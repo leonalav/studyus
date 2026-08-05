@@ -337,6 +337,70 @@ print(s.upper())`,
       { line: 4, vars: { s: '"hi"' }, stdout: ["hi", "HI"] },
     ],
   },
+  {
+    kind: "predict",
+    id: "ex9",
+    title: "Dictionary order",
+    concept: "iteration order",
+    brief: "Predict the two lines printed by this loop.",
+    code: `scores = {"ada": 3, "lin": 5}
+for name in scores:
+    print(name, scores[name])`,
+    output: "ada 3\nlin 5",
+    choices: [
+      { id: "a", text: "lin 5 then ada 3", misconception: "loop-order" },
+      { id: "b", text: "ada 3 then lin 5", misconception: "none" },
+      { id: "c", text: "ada then lin", misconception: "loop-order" },
+      { id: "d", text: "A TypeError", misconception: "loop-order" },
+    ],
+    diagnose: () => "loop-order",
+    tutorRight: "Correct. Modern Python dictionaries preserve insertion order, so the loop visits ada and then lin.",
+    tutorWrong: {
+      "loop-order":
+        "This loop iterates over the dictionary's keys in insertion order. ada was inserted first, so it prints before lin; scores[name] then retrieves each value.",
+    },
+    trace: [
+      { line: 1, vars: { scores: '{"ada": 3, "lin": 5}' }, stdout: [] },
+      { line: 2, vars: { scores: '{"ada": 3, "lin": 5}', name: '"ada"' }, stdout: [], note: "first key, in insertion order" },
+      { line: 3, vars: { scores: '{"ada": 3, "lin": 5}', name: '"ada"' }, stdout: ["ada 3"] },
+      { line: 2, vars: { scores: '{"ada": 3, "lin": 5}', name: '"lin"' }, stdout: ["ada 3"], note: "next key" },
+      { line: 3, vars: { scores: '{"ada": 3, "lin": 5}', name: '"lin"' }, stdout: ["ada 3", "lin 5"] },
+    ],
+  },
+  {
+    kind: "predict",
+    id: "ex10",
+    title: "The sticky default",
+    concept: "default mutability",
+    brief: "Why does the second call remember the first tag?",
+    code: `def add_tag(tag, tags=[]):
+    tags.append(tag)
+    return tags
+
+print(add_tag("a"))
+print(add_tag("b"))`,
+    output: "['a']\n['a', 'b']",
+    choices: [
+      { id: "a", text: "['a'] then ['b']", misconception: "reference-vs-copy" },
+      { id: "b", text: "['a'] then ['a', 'b']", misconception: "none" },
+      { id: "c", text: "['a', 'b'] then ['a', 'b']", misconception: "reference-vs-copy" },
+      { id: "d", text: "A TypeError", misconception: "reference-vs-copy" },
+    ],
+    diagnose: () => "reference-vs-copy",
+    tutorRight: "Exactly. Python creates the default list once, when the function is defined, so both calls mutate that same list.",
+    tutorWrong: {
+      "reference-vs-copy":
+        "The default value is not rebuilt for each call. tags=[] is one list shared by every call that omits tags, so the second append sees the first tag too. Use tags=None and create a list inside the function when you need a fresh one.",
+    },
+    trace: [
+      { line: 1, vars: { "default tags": "[]" }, stdout: [], note: "created once at definition time" },
+      { line: 2, vars: { tag: '"a"', tags: '["a"]' }, stdout: [] },
+      { line: 3, vars: { tag: '"a"', tags: '["a"]' }, stdout: [] },
+      { line: 5, vars: { tags: '["a"]' }, stdout: ["['a']"] },
+      { line: 2, vars: { tag: '"b"', tags: '["a", "b"]' }, stdout: ["['a']"], note: "same default list" },
+      { line: 6, vars: { tags: '["a", "b"]' }, stdout: ["['a']", "['a', 'b']"] },
+    ],
+  },
   /* ── Parsons ── */
   {
     kind: "parsons",
@@ -376,6 +440,120 @@ print(s.upper())`,
     tutorRight: "Right — empty accumulator, loop, test, append only on a match, print at the end.",
     tutorWrong:
       "Two levels of indentation matter here: the if sits inside the for, and the append sits inside the if. If append is at loop level you'll collect everything.",
+  },
+  {
+    kind: "parsons",
+    id: "p4",
+    title: "Track the maximum",
+    concept: "running state",
+    brief: "Arrange the lines so the largest value is kept and printed.",
+    solution: [
+      "largest = nums[0]",
+      "for n in nums:",
+      "    if n > largest:",
+      "        largest = n",
+      "print(largest)",
+    ],
+    distractors: ["largest = 0", "        print(largest)"],
+    output: "9",
+    tutorRight: "Nice. Keep one running candidate, replace it only when a larger value appears, then print after the scan.",
+    tutorWrong:
+      "Initialise a candidate before the loop, compare inside the loop, and update only inside the if. The final print belongs outside both blocks.",
+  },
+  {
+    kind: "parsons",
+    id: "p5",
+    title: "Return from a function",
+    concept: "function structure",
+    brief: "Build a function that doubles a number before calling it.",
+    solution: ["def double(n):", "    result = n * 2", "    return result", "print(double(4))"],
+    distractors: ["    print(result)", "return n + 2"],
+    output: "8",
+    tutorRight: "Exactly. The function computes and returns a value; the caller decides to print it.",
+    tutorWrong:
+      "The function body must be indented under def, and return has to happen before the caller can print the result. A return outside the function cannot use its local result.",
+  },
+  {
+    kind: "parsons",
+    id: "p6",
+    title: "Flatten a grid",
+    concept: "nested loops",
+    brief: "Order the nested loops so every cell is printed row by row.",
+    solution: ["for row in grid:", "    for value in row:", "        print(value)"],
+    distractors: ["for value in grid:", "    print(row)"],
+    output: "1\n2\n3\n4",
+    tutorRight: "Right — the outer loop chooses a row and the inner loop visits each value inside that row.",
+    tutorWrong:
+      "A grid is a collection of rows, so the first loop gets a row. The second loop must be nested inside it to visit each value before moving to the next row.",
+  },
+  {
+    kind: "parsons",
+    id: "p7",
+    title: "Stop when found",
+    concept: "early exit",
+    brief: "Search the list and stop at the first matching item.",
+    solution: [
+      "for item in items:",
+      "    if item == target:",
+      "        print(\"found\")",
+      "        break",
+      "else:",
+      "    print(\"missing\")",
+    ],
+    distractors: ["        continue", "    print(\"found\")"],
+    output: "found",
+    tutorRight: "Great. break exits the loop at the first match, and the loop else runs only when no break happened.",
+    tutorWrong:
+      "The match test and its print belong inside the loop. break must follow the print so the search stops; the else pairs with the for, not the if.",
+  },
+  {
+    kind: "parsons",
+    id: "p8",
+    title: "Count the matches",
+    concept: "counter pattern",
+    brief: "Count how many values pass the condition, then print the count.",
+    solution: ["count = 0", "for n in nums:", "    if n > 5:", "        count += 1", "print(count)"],
+    distractors: ["count = nums", "    count = 1"],
+    output: "2",
+    tutorRight: "Yes — start at zero, increment once per match, and print the accumulated count after the loop.",
+    tutorWrong:
+      "A counter is state: initialise it before the loop, change it only when the condition passes, and print it after every item has been checked.",
+  },
+  {
+    kind: "parsons",
+    id: "p9",
+    title: "Normalize a label",
+    concept: "transformation pipeline",
+    brief: "Clean a label before checking whether it is the expected word.",
+    solution: [
+      "label = raw.strip()",
+      "label = label.lower()",
+      "if label == \"ready\":",
+      "    print(\"go\")",
+    ],
+    distractors: ["label = raw.upper()", "    print(label)"],
+    output: "go",
+    tutorRight: "Good pipeline thinking: trim the edges, normalise case, then branch on the cleaned value.",
+    tutorWrong:
+      "Transformations need to happen before the comparison. Keep the print inside the if so it runs only when the cleaned label is ready.",
+  },
+  {
+    kind: "parsons",
+    id: "p10",
+    title: "Build a frequency map",
+    concept: "dictionary accumulation",
+    brief: "Count each word and print the count for the repeated word.",
+    solution: [
+      "counts = {}",
+      "for word in words:",
+      "    counts[word] = counts.get(word, 0) + 1",
+      "print(counts[\"red\"])",
+    ],
+    distractors: ["counts[word] = 1", "print(words[\"red\"])", "counts = words"],
+    output: "2",
+    tutorRight: "Exactly. The map starts empty, each visit increments its key, and the final lookup happens after counting.",
+    tutorWrong:
+      "Create the dictionary first. Inside the loop, read the old count (or zero) before adding one; the final lookup should happen after the loop.",
   },
 ];
 

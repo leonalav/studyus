@@ -26,19 +26,25 @@ interface Props {
   onOpenSearch: () => void;
   onOpenSettings: () => void;
   onOpenTab: (tab: { id: string; title: string; kind: "curriculum" | "test" | "note" }) => void;
+  onOpenProgramming: (curriculum: string) => void;
 }
 
 interface Curriculum {
   id: string;
   name: string;
   meta: string;
+  subject?: "math" | "physics" | "chemistry" | "biology" | "programming";
 }
 
 const DEFAULT_CURRICULA: Curriculum[] = [
-  { id: "c1", name: "AP Calculus BC — Course Guide.pdf", meta: "384 KB · 172 pages" },
-  { id: "c2", name: "IB Physics HL — Syllabus 2025.pdf", meta: "212 KB · 88 pages" },
-  { id: "c3", name: "Intro to Algorithms — Ch. 1–4.pdf", meta: "1.2 MB · 61 pages" },
+  { id: "c1", name: "AP Calculus BC — Course Guide.pdf", meta: "384 KB · 172 pages", subject: "math" },
+  { id: "c2", name: "IB Physics HL — Syllabus 2025.pdf", meta: "212 KB · 88 pages", subject: "physics" },
+  { id: "c3", name: "Intro to Algorithms — Ch. 1–4.pdf", meta: "1.2 MB · 61 pages", subject: "programming" },
 ];
+
+function isProgrammingCurriculum(curriculum: Curriculum) {
+  return curriculum.subject === "programming" || /algorithm|program|python|javascript|coding|data structure/i.test(curriculum.name);
+}
 
 function TreeNode({
   item,
@@ -93,7 +99,7 @@ function TreeNode({
   );
 }
 
-export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab }: Props) {
+export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab, onOpenProgramming }: Props) {
   const [privateOpen, setPrivateOpen] = useState(true);
   const [teamOpen, setTeamOpen] = useState(true);
   const [curriculaOpen, setCurriculaOpen] = useState(true);
@@ -107,6 +113,9 @@ export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab }: P
       id: `c-${Date.now()}-${i}`,
       name: f.name,
       meta: `${(f.size / 1024).toFixed(0)} KB · uploaded just now`,
+      subject: /algorithm|program|python|javascript|coding|data structure/i.test(f.name)
+        ? ("programming" as const)
+        : undefined,
     }));
     setCurricula((c) => [...c, ...added]);
     onNotify(`Added ${added.length} curriculum ${added.length === 1 ? "PDF" : "PDFs"}`);
@@ -184,14 +193,22 @@ export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab }: P
             {curricula.map((c) => (
               <button
                 key={c.id}
-                onClick={() => onOpenTab({ id: `cur-${c.id}`, title: c.name.replace(/\.pdf$/i, ""), kind: "curriculum" })}
-                title={c.meta}
+                onClick={() => {
+                  const title = c.name.replace(/\.pdf$/i, "");
+                  if (isProgrammingCurriculum(c)) onOpenProgramming(title);
+                  else onOpenTab({ id: `cur-${c.id}`, title, kind: "curriculum" });
+                }}
+                title={isProgrammingCurriculum(c) ? `${c.meta} · opens Parsons` : c.meta}
                 className="group flex w-full items-center gap-1.5 rounded-[4px] px-2 py-[5px] text-left text-mut transition-colors hover:bg-white/[0.055] hover:text-fg"
               >
-                <GraduationCap size={14} className="shrink-0 text-dim" />
+                <GraduationCap size={14} className={`shrink-0 ${isProgrammingCurriculum(c) ? "text-[#fcd34d]" : "text-dim"}`} />
                 <span className="min-w-0 flex-1 truncate text-[13px]">{c.name.replace(/\.pdf$/i, "")}</span>
+                {isProgrammingCurriculum(c) && <span className="font-mono text-[9px] text-[#fcd34d]/70">P</span>}
               </button>
             ))}
+            <p className="px-2 py-1 font-mono text-[9.5px] leading-relaxed text-dim">
+              <span className="text-[#fcd34d]">P</span> programming curricula open the Parsons suite
+            </p>
             <input
               ref={fileRef}
               type="file"

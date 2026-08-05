@@ -31,6 +31,7 @@ interface Props {
   notify: (text: string) => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   onPrepare: (prompt: string) => void;
+  onOpenProgramming: (curriculum: string) => void;
 }
 
 const DEPTHS: { id: Depth; label: string; desc: string }[] = [
@@ -48,7 +49,7 @@ const COMMANDS: { token: string; label: string; desc: string; intent: Intent; de
   { token: "focus", label: "Focus", desc: "Pull out the one idea to remember", intent: "explain", depth: "simple" },
 ];
 
-export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
+export function SessionCard({ subject, notify, inputRef, onPrepare, onOpenProgramming }: Props) {
   const [started, setStarted] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [typing, setTyping] = useState(false);
@@ -292,6 +293,7 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
           doc={ctxDoc}
           setDoc={setCtxDoc}
           notify={notify}
+          onOpenProgramming={onOpenProgramming}
         />
         <span className="ml-auto flex items-center gap-1.5 font-mono text-[11px] text-dim">
           <span className={`h-1.5 w-1.5 rounded-full ${started ? "bg-ok" : "bg-faint"}`} />
@@ -635,12 +637,14 @@ function ContextPicker({
   doc,
   setDoc,
   notify,
+  onOpenProgramming,
 }: {
   subject: SubjectKey | null;
   setSubject: (s: SubjectKey | null) => void;
   doc: string | null;
   setDoc: (d: string | null) => void;
   notify: (t: string) => void;
+  onOpenProgramming: (curriculum: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -714,6 +718,11 @@ function ContextPicker({
               <div className="px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
                 Curriculum PDFs
               </div>
+              {subject === "programming" && (
+                <div className="mx-2 mb-1 rounded border border-[#fcd34d]/20 bg-[#fcd34d]/[0.05] px-2 py-1.5 text-[10.5px] leading-relaxed text-[#fcd34d]/80">
+                  Choose a curriculum to jump into Parsons problems · no kernel
+                </div>
+              )}
               <div className="max-h-[220px] overflow-y-auto p-1 pt-0">
                 {docs.length === 0 && (
                   <p className="px-2.5 py-3 text-[12px] text-dim">No curriculum for this subject yet.</p>
@@ -722,9 +731,15 @@ function ContextPicker({
                   <button
                     key={d.id}
                     onClick={() => {
+                      const title = d.name.replace(/\.pdf$/i, "");
                       setDoc(d.id);
                       setOpen(false);
-                      notify(`Context set to ${d.name.replace(/\.pdf$/i, "")}`);
+                      if (d.subject === "programming") {
+                        notify("Opening the Parsons suite — no kernel needed");
+                        onOpenProgramming(title);
+                      } else {
+                        notify(`Context set to ${title}`);
+                      }
                     }}
                     className={`flex w-full items-start gap-2.5 rounded px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07] ${
                       doc === d.id ? "bg-white/[0.06]" : ""

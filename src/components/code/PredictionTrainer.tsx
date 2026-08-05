@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Play,
-  Lock,
-  RotateCcw,
-  ChevronRight,
-  Check,
-  X as XIcon,
-  GripVertical,
-  Terminal,
+  ArrowDown,
   ArrowRight,
+  ArrowUp,
+  Check,
+  ChevronRight,
+  GripVertical,
+  Lock,
+  Play,
+  RotateCcw,
+  Terminal,
+  X as XIcon,
 } from "lucide-react";
 import {
   EXERCISES,
@@ -21,24 +23,45 @@ import {
   type PredictExercise,
 } from "../../data/coding";
 
+export type TrainerMode = "all" | "parsons" | "predict";
+
 interface Props {
-  onNotify: (t: string) => void;
+  onNotify: (text: string) => void;
+  /** The curriculum that opened this trainer, if it came from the Programming picker. */
+  curriculum?: string;
+  /** Programming curricula deliberately land in Parsons first. */
+  initialMode?: TrainerMode;
 }
 
 type Phase = "predict" | "revealed";
+type Attempt = { id: string; correct: boolean; m: Misconception };
 
-export function PredictionTrainer({ onNotify }: Props) {
+export function PredictionTrainer({ onNotify, curriculum, initialMode = "all" }: Props) {
+  const [mode, setMode] = useState<TrainerMode>(initialMode);
+  const exercises = useMemo(
+    () => (mode === "all" ? EXERCISES : EXERCISES.filter((exercise) => exercise.kind === mode)),
+    [mode]
+  );
   const [index, setIndex] = useState(0);
-  const ex = EXERCISES[index];
+  const ex = exercises[index] ?? exercises[0];
 
   const [phase, setPhase] = useState<Phase>("predict");
   const [guess, setGuess] = useState("");
   const [choice, setChoice] = useState<string | null>(null);
   const [order, setOrder] = useState<string[]>([]);
   const [step, setStep] = useState(0);
-  const [log, setLog] = useState<{ id: string; correct: boolean; m: Misconception }[]>([]);
+  const [log, setLog] = useState<Attempt[]>([]);
+  const dragIdx = useRef<number | null>(null);
 
-  // reset per exercise
+  // A route change (for example, choosing a different Programming curriculum)
+  // starts the suite at its first Parsons problem.
+  useEffect(() => {
+    setMode(initialMode);
+    setIndex(0);
+    setLog([]);
+  }, [initialMode]);
+
+  // Reset the prediction surface whenever the exercise or suite changes.
   useEffect(() => {
     setPhase("predict");
     setGuess("");
@@ -50,47 +73,63 @@ export function PredictionTrainer({ onNotify }: Props) {
     } else {
       setOrder([]);
     }
-  }, [index]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [index, mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const isPredict = ex.kind === "predict";
 
-  /* the gate: Run is locked until a prediction exists */
+  // The gate is intentional: a code exercise cannot be run until the learner
+  // has committed to a model of what it will do.
   const hasPrediction = isPredict
     ? choice !== null || guess.trim().length > 0
     : order.length > 0;
 
-  const correct = useMemo(() => {
-    if (phase !== "revealed") return false;
+  const evaluate = () => {
     if (ex.kind === "predict") {
       if (choice) return ex.choices?.find((c) => c.id === choice)?.misconception === "none";
       return checkPredict(ex, guess);
     }
-    const chosen = order.filter((l) => ex.solution.includes(l));
-    return (
-      chosen.length === ex.solution.length &&
-      order.slice(0, ex.solution.length).every((l, i) => l === ex.solution[i])
-    );
-  }, [phase, ex, choice, guess, order]);
+    const chosen = order.slice(0, ex.solution.length);
+    return chosen.length === ex.solution.length && chosen.every((line, i) => line === ex.solution[i]);
+  };
 
-  const misconception: Misconception = useMemo(() => {
-    if (ex.kind !== "predict" || correct) return "none";
+  const correct = phase === "revealed" && evaluate();
+
+  const diagnose = (wasCorrect = evaluate()): Misconception => {
+    if (ex.kind !== "predict" || wasCorrect) return "none";
     if (choice) return ex.choices?.find((c) => c.id === choice)?.misconception ?? "none";
     return ex.diagnose(guess);
-  }, [ex, choice, guess, correct]);
+  };
+
+  const misconception: Misconception = diagnose(correct);
 
   const run = () => {
     if (!hasPrediction) {
-      onNotify("Predict the output first — that's the point");
+      onNotify(isPredict ? "Predict the output first — that's the point" : "Arrange the lines first");
       return;
     }
+
+    // Evaluate before changing phase. This keeps the attempt log honest; using
+    // the pre-reveal `correct` value here would record every attempt as wrong.
+    const wasCorrect = evaluate();
+    const m = diagnose(wasCorrect);
     setPhase("revealed");
     setStep(0);
-    setLog((l) => [...l, { id: ex.id, correct, m: misconception }]);
+    setLog((current) => [
+      ...current.filter((attempt) => attempt.id !== ex.id),
+      { id: ex.id, correct: wasCorrect, m },
+    ]);
   };
 
   const next = () => {
-    if (index < EXERCISES.length - 1) setIndex(index + 1);
-    else onNotify("That's the whole set — nice work");
+    if (index < exercises.length - 1) setIndex(index + 1);
+    else onNotify(`That's the end of the ${mode === "parsons" ? "Parsons suite" : "exercise set"} — nice work`);
+  };
+
+  const switchMode = (nextMode: TrainerMode) => {
+    if (nextMode === mode) return;
+    setMode(nextMode);
+    setIndex(0);
+    setLog([]);
   };
 
   const predictedText = isPredict
@@ -98,35 +137,60 @@ export function PredictionTrainer({ onNotify }: Props) {
       ? (ex as PredictExercise).choices?.find((c) => c.id === choice)?.text ?? ""
       : guess
     : order.slice(0, (ex as ParsonsExercise).solution.length).join("\n");
-
-  const actualText = isPredict ? (ex as PredictExercise).output : (ex as ParsonsExercise).output;
+  const actualText = ex.output;
 
   return (
-    <div className="flex h-[calc(100vh-92px)] w-full flex-col px-5 pt-4">
-      {/* header */}
-      <div className="mb-3 flex items-center gap-3">
+    <div className="flex min-h-0 flex-1 w-full flex-col px-5 pb-4 pt-3">
+      {/* Header */}
+      <div className="mb-3 flex flex-wrap items-center gap-2.5">
         <span className="rounded-full border border-edge bg-raise px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-mut">
-          Prediction trainer
+          {mode === "parsons" ? "Parsons suite" : "Prediction trainer"}
         </span>
         <span className="font-mono text-[11px] text-dim">
-          {String(index + 1).padStart(2, "0")} / {String(EXERCISES.length).padStart(2, "0")}
+          {String(index + 1).padStart(2, "0")} / {String(exercises.length).padStart(2, "0")}
         </span>
+        {curriculum && (
+          <span className="max-w-[260px] truncate rounded-full border border-[#fcd34d]/20 bg-[#fcd34d]/[0.06] px-2 py-0.5 font-mono text-[10px] text-[#fcd34d]/90" title={curriculum}>
+            {curriculum}
+          </span>
+        )}
         <span className="rounded-full bg-[#fcd34d]/15 px-2 py-0.5 font-mono text-[10px] text-[#fcd34d]">
-          {ex.kind === "predict" ? "predict output" : "parsons"}
+          {ex.kind === "predict" ? "predict output" : "drag + check"}
         </span>
-        <div className="ml-auto flex items-center gap-1.5">
-          {EXERCISES.map((e, i) => {
-            const rec = log.find((l) => l.id === e.id);
+
+        <div className="ml-auto flex items-center rounded-md border border-edge bg-raise p-0.5">
+          {[
+            { id: "parsons" as const, label: "Parsons", count: EXERCISES.filter((e) => e.kind === "parsons").length },
+            { id: "predict" as const, label: "Predict output", count: EXERCISES.filter((e) => e.kind === "predict").length },
+            { id: "all" as const, label: "All", count: EXERCISES.length },
+          ].map((item) => (
+            <button
+              key={item.id}
+              onClick={() => switchMode(item.id)}
+              className={`rounded px-2 py-1 font-mono text-[10px] transition-colors ${
+                mode === item.id ? "bg-white/[0.1] text-fg" : "text-dim hover:text-mut"
+              }`}
+              title={`${item.count} exercises`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex w-full items-center justify-end gap-1.5 sm:w-auto">
+          {exercises.map((exercise, i) => {
+            const record = log.find((attempt) => attempt.id === exercise.id);
             return (
               <button
-                key={e.id}
+                key={exercise.id}
                 onClick={() => setIndex(i)}
-                title={e.title}
-                className={`h-1.5 w-5 rounded-full transition-colors ${
+                title={exercise.title}
+                aria-label={`Go to ${exercise.title}`}
+                className={`h-1.5 w-4 rounded-full transition-colors sm:w-5 ${
                   i === index
                     ? "bg-accent"
-                    : rec
-                    ? rec.correct
+                    : record
+                    ? record.correct
                       ? "bg-[#86efac]"
                       : "bg-[#fca5a5]"
                     : "bg-white/12"
@@ -137,17 +201,25 @@ export function PredictionTrainer({ onNotify }: Props) {
         </div>
       </div>
 
-      {/* three columns */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[300px_1fr_340px]">
-        {/* ── LEFT: task + tutor ── */}
+      {/* Three-column learning loop */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto lg:grid-cols-[290px_minmax(0,1fr)_390px] lg:overflow-hidden">
+        {/* LEFT: task + tutor */}
         <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
+          {curriculum && mode === "parsons" && (
+            <div className="rounded-lg border border-[#fcd34d]/25 bg-[#fcd34d]/[0.05] px-3 py-2.5">
+              <div className="mb-1 font-mono text-[9.5px] uppercase tracking-wider text-[#fcd34d]/80">Curriculum route</div>
+              <p className="text-[11.5px] leading-relaxed text-mut">
+                Structure first. These problems are precomputed, so there is no kernel to start and no file to manage.
+              </p>
+            </div>
+          )}
           <div className="rounded-lg border border-edge bg-raise p-4">
             <div className="mb-1 font-mono text-[10px] uppercase tracking-wider text-dim">{ex.concept}</div>
             <h2 className="mb-2 text-[17px] font-semibold leading-snug text-fg">{ex.title}</h2>
             <p className="text-[13px] leading-relaxed text-mut">{ex.brief}</p>
           </div>
 
-          {/* the tutor stays quiet until the gap exists */}
+          {/* The tutor is deliberately quiet before the reveal. */}
           <div
             className={`rounded-lg border p-4 transition-colors ${
               phase === "revealed"
@@ -160,15 +232,12 @@ export function PredictionTrainer({ onNotify }: Props) {
             <div className="mb-2 flex items-center gap-2">
               <span className="font-mono text-[10px] uppercase tracking-wider text-dim">Tutor</span>
               {phase === "predict" && (
-                <span className="rounded-full bg-white/[0.06] px-1.5 py-[1px] font-mono text-[9px] text-dim">
-                  waiting
-                </span>
+                <span className="rounded-full bg-white/[0.06] px-1.5 py-[1px] font-mono text-[9px] text-dim">waiting</span>
               )}
             </div>
             {phase === "predict" ? (
               <p className="text-[12.5px] leading-relaxed text-dim">
-                I'm not saying anything yet. Commit to a prediction first — the gap between what you
-                expect and what actually happens is the useful part.
+                I’m holding the explanation. Commit to a prediction first — the gap between your model and the machine is the useful part.
               </p>
             ) : (
               <>
@@ -181,17 +250,21 @@ export function PredictionTrainer({ onNotify }: Props) {
                     ? ex.tutorRight
                     : ex.tutorWrong}
                 </p>
+                <div className={`mt-3 rounded-md border p-2.5 ${correct ? "border-[#86efac]/25 bg-[#86efac]/[0.04]" : "border-[#fca5a5]/25 bg-black/20"}`}>
+                  <div className={`mb-1 font-mono text-[9.5px] uppercase tracking-wider ${correct ? "text-[#86efac]" : "text-[#fca5a5]"}`}>
+                    {correct ? "Model matched" : "The gap"}
+                  </div>
+                  <div className="text-[12px] font-medium text-fg">
+                    {correct
+                      ? "Your prediction and the precomputed result agree."
+                      : `${outputLineCount(actualText)} actual ${outputLineCount(actualText) === 1 ? "line" : "lines"} · one mental model to inspect`}
+                  </div>
+                </div>
                 {!correct && ex.kind === "predict" && (
-                  <div className="mt-3 rounded-md border border-[#fca5a5]/30 bg-black/20 p-2.5">
-                    <div className="mb-1 font-mono text-[9.5px] uppercase tracking-wider text-[#fca5a5]">
-                      Misconception detected
-                    </div>
-                    <div className="text-[12.5px] font-medium text-fg">
-                      {MISCONCEPTION_LABEL[misconception]}
-                    </div>
-                    <p className="mt-1 text-[11.5px] leading-relaxed text-mut">
-                      {MISCONCEPTION_HELP[misconception]}
-                    </p>
+                  <div className="mt-2 rounded-md border border-[#fca5a5]/30 bg-black/20 p-2.5">
+                    <div className="mb-1 font-mono text-[9.5px] uppercase tracking-wider text-[#fca5a5]">Misconception detected</div>
+                    <div className="text-[12.5px] font-medium text-fg">{MISCONCEPTION_LABEL[misconception]}</div>
+                    <p className="mt-1 text-[11.5px] leading-relaxed text-mut">{MISCONCEPTION_HELP[misconception]}</p>
                   </div>
                 )}
               </>
@@ -200,27 +273,23 @@ export function PredictionTrainer({ onNotify }: Props) {
 
           {log.length > 0 && (
             <div className="rounded-lg border border-edge bg-raise p-3">
-              <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">
-                Signals collected
-              </div>
+              <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Signals collected</div>
               <div className="space-y-1">
                 {Object.entries(
                   log
-                    .filter((l) => !l.correct)
-                    .reduce<Record<string, number>>((acc, l) => {
-                      acc[l.m] = (acc[l.m] ?? 0) + 1;
+                    .filter((attempt) => !attempt.correct)
+                    .reduce<Record<string, number>>((acc, attempt) => {
+                      acc[attempt.m] = (acc[attempt.m] ?? 0) + 1;
                       return acc;
                     }, {})
                 ).map(([m, n]) => (
                   <div key={m} className="flex items-center gap-2 text-[11.5px]">
                     <span className="h-1.5 w-1.5 rounded-full bg-[#fca5a5]" />
-                    <span className="flex-1 truncate text-mut">
-                      {MISCONCEPTION_LABEL[m as Misconception]}
-                    </span>
+                    <span className="flex-1 truncate text-mut">{MISCONCEPTION_LABEL[m as Misconception]}</span>
                     <span className="font-mono text-[10px] text-dim">×{n}</span>
                   </div>
                 ))}
-                {log.every((l) => l.correct) && (
+                {log.length > 0 && log.every((attempt) => attempt.correct) && (
                   <p className="text-[11.5px] text-[#86efac]">No broken models yet.</p>
                 )}
               </div>
@@ -228,77 +297,94 @@ export function PredictionTrainer({ onNotify }: Props) {
           )}
         </div>
 
-        {/* ── MIDDLE: the program block ── */}
+        {/* MIDDLE: one program block / Parsons arrangement */}
         <div className="flex min-h-0 flex-col rounded-lg border border-edge bg-[#141414]">
           <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
             <span className="font-mono text-[10px] uppercase tracking-wider text-dim">
-              {ex.kind === "predict" ? "program" : "drag into order"}
+              {isPredict ? "one code block" : "program structure"}
             </span>
-            <span className="ml-auto font-mono text-[10px] text-dim">python</span>
+            <span className="ml-auto font-mono text-[10px] text-dim">{isPredict ? "precomputed" : "no kernel"}</span>
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
-            {ex.kind === "predict" ? (
-              <CodeBlock code={ex.code} activeLine={phase === "revealed" ? ex.trace[step]?.line : undefined} />
+            {isPredict ? (
+              <CodeBlock code={(ex as PredictExercise).code} activeLine={phase === "revealed" ? (ex as PredictExercise).trace[step]?.line : undefined} />
             ) : (
-              <ParsonsBoard order={order} setOrder={setOrder} locked={phase === "revealed"} solution={ex.solution} />
+              <ParsonsBoard
+                order={order}
+                setOrder={setOrder}
+                locked={phase === "revealed"}
+                solution={(ex as ParsonsExercise).solution}
+                dragIdx={dragIdx}
+              />
             )}
           </div>
 
-          {/* the gate */}
+          {/* Prediction gate / Parsons check */}
           <div className="border-t border-edge p-3">
             {phase === "predict" ? (
-              <>
-                <div className="mb-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
-                  <Lock size={10} />
-                  Run is locked until you predict
-                </div>
-                {ex.kind === "predict" && (
-                  <>
-                    {ex.choices && (
-                      <div className="mb-2 grid grid-cols-2 gap-1.5">
-                        {ex.choices.map((c) => (
-                          <button
-                            key={c.id}
-                            onClick={() => {
-                              setChoice(c.id);
-                              setGuess("");
-                            }}
-                            className={`rounded border px-2 py-1.5 text-left font-mono text-[11px] transition-colors ${
-                              choice === c.id
-                                ? "border-accent bg-accent/10 text-fg"
-                                : "border-edge bg-raise text-mut hover:text-fg"
-                            }`}
-                          >
-                            {c.text}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    <textarea
-                      value={guess}
-                      onChange={(e) => {
-                        setGuess(e.target.value);
-                        setChoice(null);
-                      }}
-                      placeholder="…or type the exact output you expect"
-                      className="mb-2 h-[60px] w-full resize-none rounded border border-edge bg-black/30 px-2.5 py-2 font-mono text-[12px] text-fg outline-none placeholder:text-faint focus:border-accent/60"
-                    />
-                  </>
-                )}
-                <button
-                  onClick={run}
-                  disabled={!hasPrediction}
-                  className={`flex w-full items-center justify-center gap-1.5 rounded-md py-2 text-[13px] font-medium transition-all ${
-                    hasPrediction
-                      ? "bg-accent text-white hover:bg-accent-deep active:scale-[0.99]"
-                      : "cursor-not-allowed bg-white/[0.06] text-faint"
-                  }`}
-                >
-                  {hasPrediction ? <Play size={13} fill="currentColor" /> : <Lock size={12} />}
-                  {hasPrediction ? "Run" : "Predict to unlock Run"}
-                </button>
-              </>
+              isPredict ? (
+                <>
+                  <div className="mb-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
+                    <Lock size={10} />
+                    Run is locked until you predict
+                  </div>
+                  {(ex as PredictExercise).choices && (
+                    <div className="mb-2 grid grid-cols-2 gap-1.5">
+                      {(ex as PredictExercise).choices!.map((c) => (
+                        <button
+                          key={c.id}
+                          onClick={() => {
+                            setChoice(c.id);
+                            setGuess("");
+                          }}
+                          className={`rounded border px-2 py-1.5 text-left font-mono text-[11px] transition-colors ${
+                            choice === c.id
+                              ? "border-accent bg-accent/10 text-fg"
+                              : "border-edge bg-raise text-mut hover:text-fg"
+                          }`}
+                        >
+                          {c.text}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <textarea
+                    value={guess}
+                    onChange={(event) => {
+                      setGuess(event.target.value);
+                      setChoice(null);
+                    }}
+                    placeholder="…or type the exact output you expect"
+                    className="mb-2 h-[60px] w-full resize-none rounded border border-edge bg-black/30 px-2.5 py-2 font-mono text-[12px] text-fg outline-none placeholder:text-faint focus:border-accent/60"
+                  />
+                  <button
+                    onClick={run}
+                    disabled={!hasPrediction}
+                    className={`flex w-full items-center justify-center gap-1.5 rounded-md py-2 text-[13px] font-medium transition-all ${
+                      hasPrediction ? "bg-accent text-white hover:bg-accent-deep active:scale-[0.99]" : "cursor-not-allowed bg-white/[0.06] text-faint"
+                    }`}
+                  >
+                    {hasPrediction ? <Play size={13} fill="currentColor" /> : <Lock size={12} />}
+                    {hasPrediction ? "Run" : "Predict to unlock Run"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="mb-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
+                    <GripVertical size={11} />
+                    Arrange the lines, then check your structure
+                  </div>
+                  <button
+                    onClick={run}
+                    disabled={!hasPrediction}
+                    className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#b88718] py-2 text-[13px] font-medium text-white transition-colors hover:bg-[#c99520] disabled:cursor-not-allowed disabled:bg-white/[0.06] disabled:text-faint"
+                  >
+                    <Check size={13} />
+                    Check order
+                  </button>
+                </>
+              )
             ) : (
               <div className="flex items-center gap-2">
                 <button
@@ -323,18 +409,14 @@ export function PredictionTrainer({ onNotify }: Props) {
           </div>
         </div>
 
-        {/* ── RIGHT: output ── */}
+        {/* RIGHT: output */}
         <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
-          <div className="flex min-h-0 flex-col rounded-lg border border-edge bg-[#141414]">
+          <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-edge bg-[#141414]">
             <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
               <Terminal size={11} className="text-dim" />
               <span className="font-mono text-[10px] uppercase tracking-wider text-dim">output</span>
               {phase === "revealed" && (
-                <span
-                  className={`ml-auto flex items-center gap-1 rounded-full px-1.5 py-[1px] font-mono text-[9.5px] ${
-                    correct ? "bg-[#86efac]/15 text-[#86efac]" : "bg-[#fca5a5]/15 text-[#fca5a5]"
-                  }`}
-                >
+                <span className={`ml-auto flex items-center gap-1 rounded-full px-1.5 py-[1px] font-mono text-[9.5px] ${correct ? "bg-[#86efac]/15 text-[#86efac]" : "bg-[#fca5a5]/15 text-[#fca5a5]"}`}>
                   {correct ? <Check size={9} strokeWidth={3} /> : <XIcon size={9} strokeWidth={3} />}
                   {correct ? "match" : "gap"}
                 </span>
@@ -345,79 +427,81 @@ export function PredictionTrainer({ onNotify }: Props) {
               <div className="grid flex-1 place-items-center px-4 py-10 text-center">
                 <div>
                   <Lock size={18} className="mx-auto mb-2 text-faint" />
-                  <p className="text-[12px] text-dim">
-                    Output stays hidden until you commit to a prediction.
-                  </p>
+                  <p className="text-[12px] text-dim">Output stays hidden until you commit to a prediction.</p>
                 </div>
               </div>
             ) : (
-              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-                {/* side by side */}
-                <div>
-                  <div className="mb-1 font-mono text-[9.5px] uppercase tracking-wider text-dim">
-                    You predicted
+              <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="min-w-0">
+                    <div className="mb-1 font-mono text-[9.5px] uppercase tracking-wider text-dim">
+                      {isPredict ? "You predicted" : "Your arrangement"}
+                    </div>
+                    <pre
+                      className="min-h-[76px] whitespace-pre-wrap break-words rounded border px-2.5 py-2 font-mono text-[11px] leading-relaxed"
+                      style={{
+                        borderColor: correct ? "rgba(134,239,172,0.3)" : "rgba(252,165,165,0.3)",
+                        background: correct ? "rgba(134,239,172,0.05)" : "rgba(252,165,165,0.05)",
+                        color: "#e7e7e5",
+                      }}
+                    >
+                      {predictedText || "—"}
+                    </pre>
                   </div>
-                  <pre
-                    className="whitespace-pre-wrap rounded border px-2.5 py-2 font-mono text-[12px] leading-relaxed"
-                    style={{
-                      borderColor: correct ? "rgba(134,239,172,0.3)" : "rgba(252,165,165,0.3)",
-                      background: correct ? "rgba(134,239,172,0.05)" : "rgba(252,165,165,0.05)",
-                      color: "#e7e7e5",
-                    }}
-                  >
-                    {predictedText || "—"}
-                  </pre>
-                </div>
-                <div>
-                  <div className="mb-1 font-mono text-[9.5px] uppercase tracking-wider text-dim">
-                    Actually printed
+                  <div className="min-w-0">
+                    <div className="mb-1 font-mono text-[9.5px] uppercase tracking-wider text-dim">Actual output</div>
+                    <pre className="min-h-[76px] whitespace-pre-wrap break-words rounded border border-edge bg-black/40 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-[#86efac]">
+                      {actualText}
+                    </pre>
                   </div>
-                  <pre className="whitespace-pre-wrap rounded border border-edge bg-black/40 px-2.5 py-2 font-mono text-[12px] leading-relaxed text-[#86efac]">
-                    {phase === "revealed" && ex.kind === "predict"
-                      ? ex.trace[step]?.stdout.join("\n") || "…"
-                      : actualText}
-                  </pre>
                 </div>
+                {isPredict && (
+                  <div className="mt-3 rounded border border-edge-soft bg-black/20 px-2.5 py-2">
+                    <div className="mb-1 flex items-center gap-1.5 font-mono text-[9.5px] uppercase tracking-wider text-dim">
+                      <ChevronRight size={11} className="text-accent" />
+                      Output at step {step + 1}
+                    </div>
+                    <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-mut">
+                      {(ex as PredictExercise).trace[step]?.stdout.join("\n") || "nothing printed yet"}
+                    </pre>
+                  </div>
+                )}
               </div>
             )}
           </div>
 
-          {/* step slider */}
-          {phase === "revealed" && ex.kind === "predict" && (
+          {/* Step slider: intentionally appears only after the result is visible. */}
+          {phase === "revealed" && isPredict && (
             <div className="rounded-lg border border-edge bg-raise p-3">
               <div className="mb-2 flex items-center justify-between">
-                <span className="font-mono text-[10px] uppercase tracking-wider text-dim">
-                  Step through execution
-                </span>
+                <span className="font-mono text-[10px] uppercase tracking-wider text-dim">Step through execution</span>
                 <span className="font-mono text-[10px] text-dim">
-                  {step + 1}/{ex.trace.length}
+                  {step + 1}/{(ex as PredictExercise).trace.length}
                 </span>
               </div>
               <input
                 type="range"
                 min={0}
-                max={ex.trace.length - 1}
+                max={(ex as PredictExercise).trace.length - 1}
                 value={step}
-                onChange={(e) => setStep(parseInt(e.target.value, 10))}
+                onChange={(event) => setStep(parseInt(event.target.value, 10))}
+                aria-label="Execution step"
                 className="mb-3 w-full accent-accent"
               />
               <div className="mb-2 flex items-center gap-1.5 font-mono text-[10.5px] text-dim">
                 <ChevronRight size={11} className="text-accent" />
-                line {ex.trace[step]?.line}
-                {ex.trace[step]?.note && <span className="text-mut">· {ex.trace[step].note}</span>}
+                line {(ex as PredictExercise).trace[step]?.line}
+                {(ex as PredictExercise).trace[step]?.note && <span className="truncate text-mut">· {(ex as PredictExercise).trace[step]?.note}</span>}
               </div>
               <div className="space-y-1">
-                {Object.entries(ex.trace[step]?.vars ?? {}).map(([k, v]) => (
-                  <div
-                    key={k}
-                    className="flex items-center gap-2 rounded bg-black/25 px-2 py-1 font-mono text-[11px]"
-                  >
-                    <span className="text-[#7dd3fc]">{k}</span>
+                {Object.entries((ex as PredictExercise).trace[step]?.vars ?? {}).map(([key, value]) => (
+                  <div key={key} className="flex items-center gap-2 rounded bg-black/25 px-2 py-1 font-mono text-[11px]">
+                    <span className="text-[#7dd3fc]">{key}</span>
                     <span className="text-dim">=</span>
-                    <span className="truncate text-fg">{v}</span>
+                    <span className="truncate text-fg">{value}</span>
                   </div>
                 ))}
-                {Object.keys(ex.trace[step]?.vars ?? {}).length === 0 && (
+                {Object.keys((ex as PredictExercise).trace[step]?.vars ?? {}).length === 0 && (
                   <p className="font-mono text-[10.5px] text-faint">no bindings yet</p>
                 )}
               </div>
@@ -436,15 +520,15 @@ function CodeBlock({ code, activeLine }: { code: string; activeLine?: number }) 
   return (
     <pre className="font-mono text-[13px] leading-[1.7]">
       {lines.map((line, i) => {
-        const n = i + 1;
-        const on = activeLine === n;
+        const number = i + 1;
+        const active = activeLine === number;
         return (
           <div
             key={i}
             className="flex gap-3 rounded px-1 transition-colors"
-            style={on ? { background: "rgba(35,131,226,0.16)" } : undefined}
+            style={active ? { background: "rgba(35,131,226,0.16)" } : undefined}
           >
-            <span className="w-5 shrink-0 select-none text-right text-dim">{n}</span>
+            <span className="w-5 shrink-0 select-none text-right text-dim">{number}</span>
             <span className="whitespace-pre text-fg/90">{line || " "}</span>
           </div>
         );
@@ -460,38 +544,45 @@ function ParsonsBoard({
   setOrder,
   locked,
   solution,
+  dragIdx,
 }: {
   order: string[];
-  setOrder: (v: string[]) => void;
+  setOrder: (value: string[]) => void;
   locked: boolean;
   solution: string[];
+  dragIdx: React.MutableRefObject<number | null>;
 }) {
-  const dragIdx = useRef<number | null>(null);
-
   const onDrop = (target: number) => {
     const from = dragIdx.current;
     if (from === null || from === target) return;
+    moveLine(from, target);
+    dragIdx.current = null;
+  };
+
+  const moveLine = (from: number, target: number) => {
     const next = [...order];
     const [moved] = next.splice(from, 1);
     next.splice(target, 0, moved);
     setOrder(next);
-    dragIdx.current = null;
   };
 
   return (
     <div className="space-y-1.5">
       {order.map((line, i) => {
         const inSolution = solution.includes(line);
-        const correctSpot = locked && inSolution && solution[i] === line;
-        const wrongSpot = locked && (!inSolution || solution[i] !== line);
+        const correctSpot = locked && i < solution.length && inSolution && solution[i] === line;
+        // Distractors parked after the active program are intentionally unused,
+        // not wrong. A solution line in that area is still out of place.
+        const unused = locked && i >= solution.length && !inSolution;
+        const wrongSpot = locked && !correctSpot && !unused;
         return (
           <div
             key={`${line}-${i}`}
             draggable={!locked}
             onDragStart={() => (dragIdx.current = i)}
-            onDragOver={(e) => e.preventDefault()}
+            onDragOver={(event) => event.preventDefault()}
             onDrop={() => onDrop(i)}
-            className={`flex items-center gap-2 rounded border px-2 py-1.5 font-mono text-[12.5px] transition-colors ${
+            className={`flex items-center gap-1.5 rounded border px-2 py-1.5 font-mono text-[12px] transition-colors ${
               locked
                 ? correctSpot
                   ? "border-[#86efac]/40 bg-[#86efac]/[0.06] text-fg"
@@ -506,31 +597,59 @@ function ParsonsBoard({
               <span className="shrink-0">
                 {correctSpot ? (
                   <Check size={11} className="text-[#86efac]" strokeWidth={3} />
+                ) : unused ? (
+                  <span className="block w-[11px] text-center text-dim">·</span>
                 ) : (
                   <XIcon size={11} className="text-[#fca5a5]" strokeWidth={3} />
                 )}
               </span>
             )}
-            <span className="whitespace-pre">{line}</span>
+            <span className="min-w-0 flex-1 whitespace-pre-wrap">{line}</span>
+            {!locked && (
+              <span className="ml-auto flex shrink-0 items-center gap-0.5">
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (i > 0) moveLine(i, i - 1);
+                  }}
+                  disabled={i === 0}
+                  className="grid h-5 w-5 place-items-center rounded text-dim hover:bg-white/[0.08] hover:text-fg disabled:opacity-25"
+                  aria-label="Move line up"
+                >
+                  <ArrowUp size={11} />
+                </button>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (i < order.length - 1) moveLine(i, i + 1);
+                  }}
+                  disabled={i === order.length - 1}
+                  className="grid h-5 w-5 place-items-center rounded text-dim hover:bg-white/[0.08] hover:text-fg disabled:opacity-25"
+                  aria-label="Move line down"
+                >
+                  <ArrowDown size={11} />
+                </button>
+              </span>
+            )}
           </div>
         );
       })}
-      {!locked && (
-        <p className="pt-2 font-mono text-[10.5px] text-dim">
-          Some lines don't belong. Drag the right ones into the right order.
-        </p>
-      )}
+      {!locked && <p className="pt-2 font-mono text-[10.5px] text-dim">Some lines don’t belong. Drag or use the arrows to build the structure.</p>}
     </div>
   );
 }
 
-function shuffle<T>(arr: T[]): T[] {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
+function shuffle<T>(values: T[]): T[] {
+  const result = [...values];
+  for (let i = result.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
+    [result[i], result[j]] = [result[j], result[i]];
   }
-  return a;
+  return result;
+}
+
+function outputLineCount(output: string) {
+  return output ? output.split("\n").length : 0;
 }
 
 export type { Exercise };

@@ -23,11 +23,22 @@ interface Props {
   onContinueSession: (title: string) => void;
   onStartTest: (params: TestParams) => void;
   onExitTest: () => void;
+  onOpenProgramming: (curriculum: string) => void;
   activeTest: TestParams | null;
 }
 
-export function TabContent({ tab, onNotify, onContinueSession, onStartTest, onExitTest, activeTest }: Props) {
-  if (tab.kind === "curriculum") return <CurriculumTab tab={tab} onNotify={onNotify} />;
+export function TabContent({
+  tab,
+  onNotify,
+  onContinueSession,
+  onStartTest,
+  onExitTest,
+  onOpenProgramming,
+  activeTest,
+}: Props) {
+  if (tab.kind === "curriculum") {
+    return <CurriculumTab tab={tab} onNotify={onNotify} onOpenProgramming={onOpenProgramming} />;
+  }
 
   if (tab.kind === "test") {
     if (tab.id === "test-take") return <TestCenter onNotify={onNotify} onStart={onStartTest} />;
@@ -70,7 +81,15 @@ export { encodeTestTabId, decodeTestTabId };
 
 /* ── Curriculum viewer ─────────────────────────────────────── */
 
-function CurriculumTab({ tab, onNotify }: { tab: Tab; onNotify: (t: string) => void }) {
+function CurriculumTab({
+  tab,
+  onNotify,
+  onOpenProgramming,
+}: {
+  tab: Tab;
+  onNotify: (t: string) => void;
+  onOpenProgramming: (curriculum: string) => void;
+}) {
   const doc =
     CURRICULA.find((c) => c.name.replace(/\.pdf$/i, "") === tab.title) ?? CURRICULA[0];
 
@@ -87,11 +106,21 @@ function CurriculumTab({ tab, onNotify }: { tab: Tab; onNotify: (t: string) => v
 
       <div className="mb-6 flex items-center gap-2">
         <button
-          onClick={() => onNotify("Building a chalkboard from this curriculum…")}
-          className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors hover:bg-accent-deep"
+          onClick={() => {
+            if (doc.subject === "programming") {
+              onOpenProgramming(doc.name.replace(/\.pdf$/i, ""));
+            } else {
+              onNotify("Building a chalkboard from this curriculum…");
+            }
+          }}
+          className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors ${
+            doc.subject === "programming"
+              ? "bg-[#b88718] hover:bg-[#c99520]"
+              : "bg-accent hover:bg-accent-deep"
+          }`}
         >
           <Sparkles size={13} />
-          Study with Studyus
+          {doc.subject === "programming" ? "Open Parsons suite" : "Study with Studyus"}
         </button>
         <button
           onClick={() => onNotify("Downloaded PDF")}
