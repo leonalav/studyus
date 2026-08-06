@@ -336,6 +336,26 @@ export function gradeWrite(exercise: Exercise, response: Response): WriteJudgeme
   return { judgement, checksPassed: passed, checksTotal: total, firstFailure };
 }
 
+/* ── 12.2 future upgrade path — defined, deliberately NOT implemented ── */
+
+/**
+ * §12.2: a grader that reads explanations instead of keyword-matching them.
+ * It is defined here so the upgrade path is explicit, and unimplemented in
+ * this build by design. If it is ever implemented it MUST be
+ * local-inference-only (Law 10): routing chapter text or learner responses
+ * to a cloud model would break the local-only guarantee (§18). Whoever
+ * implements it cannot do so accidentally — see BUILD_LOG.md.
+ */
+// TODO(M11): implement ModelGrader behind local inference; keep the
+// heuristic rubric grader as the fallback and always surface confidence.
+export class ModelGrader {
+  grade(): never {
+    throw new Error(
+      "ModelGrader is intentionally unimplemented in this build (§12.2). Rubric grading with surfaced heuristic confidence is the honest default.",
+    );
+  }
+}
+
 /* ── §11.3 / §17 — static policy gate, applied to ALL code before anything runs ── */
 
 const DENY_PATTERNS: { pattern: RegExp; label: string }[] = [

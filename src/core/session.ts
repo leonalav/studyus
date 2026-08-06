@@ -60,6 +60,8 @@ export interface SessionDeps {
   customDetectors: CustomDetectorRegistry;
   /** seed for reproducible generation */
   seed?: number;
+  /** deterministic id source — lets tests pin attempt ids (reproducible voice selection) */
+  ids?: () => string;
 }
 
 const HOUR = 3_600_000;
@@ -251,7 +253,7 @@ export class Session {
 
     const result = this.grade(exercise, response, misconceptions);
     const judgement = result.judgement;
-    const attemptId = uid("att");
+    const attemptId = this.deps.ids?.() ?? uid("att");
     const passed = outcomePasses(judgement);
     const isFirstEver = this.state.attempts.length === 0;
     const pairJustCompleted = exercise.beat === "explain" && !this.state.pairAnnounced;

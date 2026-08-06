@@ -1,0 +1,87 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`tutor voice snapshots (§20 — voice changes must be visible in review) > confirmation on a correct cold-open commitment 1`] = `
+{
+  "actual": "6",
+  "beat": "predict",
+  "confidence": "exact",
+  "confidenceNote": null,
+  "deeperLine": null,
+  "misconception": null,
+  "misconceptionHelp": null,
+  "outcome": {
+    "kind": "correct",
+  },
+  "surfaceNote": null,
+  "tutorLine": "Your model and the machine agree. Hold that — and name the rule that made them agree.",
+}
+`;
+
+exports[`tutor voice snapshots (§20 — voice changes must be visible in review) > contradiction with no known misconception matched 1`] = `
+{
+  "actual": "6",
+  "beat": "predict",
+  "confidence": "exact",
+  "confidenceNote": null,
+  "deeperLine": null,
+  "misconception": null,
+  "misconceptionHelp": null,
+  "outcome": {
+    "kind": "incorrect",
+  },
+  "surfaceNote": null,
+  "tutorLine": "Close, but the machine disagrees: 6. Before I say anything else — where do you think it diverged from your version?",
+}
+`;
+
+exports[`tutor voice snapshots (§20 — voice changes must be visible in review) > contradiction with the off-by-one misconception detected 1`] = `
+{
+  "actual": "6",
+  "beat": "predict",
+  "confidence": "exact",
+  "confidenceNote": null,
+  "deeperLine": "range(n) yields 0 … n−1. It stops *before* its argument — the endpoint never runs.",
+  "misconception": "range upper bound assumed inclusive",
+  "misconceptionHelp": "range(n) yields 0 … n−1. It stops *before* its argument — the endpoint never runs.",
+  "outcome": {
+    "kind": "incorrect",
+  },
+  "surfaceNote": null,
+  "tutorLine": "You're off by exactly one step of the loop, and that is almost always the same rule biting: range stops *before* its argument. It printed 6. Re-run it in your head with that rule — what does it print now?",
+}
+`;
+
+exports[`tutor voice snapshots (§20 — voice changes must be visible in review) > explain verdict — heuristic caveat and exemplar, always 1`] = `
+{
+  "actual": "",
+  "beat": "explain",
+  "confidence": "heuristic",
+  "confidenceNote": "I'm matching keywords here, not really reading your explanation. Take my verdict loosely — compare yours to the exemplar and judge for yourself.",
+  "deeperLine": "Prediction is the road; writing from blank is the destination. The map shows where this goes.",
+  "misconception": null,
+  "misconceptionHelp": null,
+  "outcome": {
+    "kind": "partial",
+    "score": 0.8,
+  },
+  "surfaceNote": null,
+  "tutorLine": "That reads like the purpose, not the transcript. Compare it with the exemplar anyway — which of the two would a stranger understand faster?",
+}
+`;
+
+exports[`tutor voice snapshots (§20 — voice changes must be visible in review) > multistructural explanation — prompted, not failed 1`] = `
+{
+  "actual": "",
+  "beat": "explain",
+  "confidence": "heuristic",
+  "confidenceNote": "I'm matching keywords here, not really reading your explanation. Take my verdict loosely — compare yours to the exemplar and judge for yourself.",
+  "deeperLine": "Prediction is the road; writing from blank is the destination. The map shows where this goes.",
+  "misconception": null,
+  "misconceptionHelp": null,
+  "outcome": {
+    "kind": "ungraded",
+  },
+  "surfaceNote": null,
+  "tutorLine": "That explanation narrates the lines one after another — the signal I'm after is the purpose. Try once more, in one sentence, at the level of what the program is for.",
+}
+`;

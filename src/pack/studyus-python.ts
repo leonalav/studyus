@@ -519,7 +519,8 @@ const templates: Template[] = [
         return {
           groups: [
             { oneOf: ["adds", "sums", "accumulates", "totals"] },
-            { oneOf: [`${start} to ${start + n - 1}`, `first ${n}`, "range"] },
+            // "0 to 3", "first 4", "range", or an enumeration beginning "0 1 …"
+            { oneOf: [`${start} to ${start + n - 1}`, `first ${n}`, "range", `${start} ${start + 1}`] },
           ],
           mustNotInclude: ["prints each", "one at a time"],
           exemplar: `It adds up the numbers from ${start} to ${start + n - 1} and prints the total.`,

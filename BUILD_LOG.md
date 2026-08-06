@@ -249,6 +249,10 @@ prints `2`). The generator simply draws another binding; such instances are neve
 - A `Partial` outcome counts as a pass for BKT/fading when its score ≥ 0.6.
 - A multistructural explanation is recorded as `Ungraded` and re-issued once ("prompt
   them; do not fail them", §12.2).
+- The for-range explain rubric accepts an enumeration of the loop's values ("0 1 …")
+  as evidence the learner sees the range — a learner who lists the values is
+  demonstrating the concept the "0 to n−1" phrase was meant to catch. The change was
+  caught and recorded by the snapshot suite (score 0.5 → 0.8 on the canonical line).
 
 ### Test results
 ```
@@ -411,26 +415,46 @@ prints `2`). The generator simply draws another binding; such instances are neve
 ```
  ✓ src/core/__tests__/session-e2e.test.ts             (10 tests)
  ✓ src/core/__tests__/generate.test.ts                (17 tests)
+ ✓ src/core/__tests__/properties.test.ts              (7 property tests, fast-check)
  ✓ src/core/__tests__/reveal-barrier.test.ts          (7 tests)
  ✓ src/core/__tests__/mastery.test.ts                 (13 tests)
  ✓ src/core/__tests__/grading.test.ts                 (8 tests)
  ✓ src/core/__tests__/voice.test.ts                   (4 tests)
+ ✓ src/core/__tests__/snapshots.test.ts               (5 snapshots)
  ✓ src/components/code/__tests__/tutor-smoke.test.tsx (3 tests)
  ✓ src/components/code/__tests__/tutor-flow.test.tsx  (4 tests)
 
- Test Files  8 passed (8)
-      Tests  66 passed (66)
+ Test Files  10 passed (10)
+      Tests  80 passed (80)
 ```
 
 The component suites drive the real React binding through commit → reveal →
 continue → map against the real Session and store, plus a remount test
 proving the store — not the component — owns progress.
 
+§20 compliance notes:
+- "Use proptest for the never-repeat and normalization properties" → `fast-check`
+  properties in `properties.test.ts`: normalization idempotence / whitespace /
+  line-ending / case-preservation, BKT probability bounds and evidence ordering,
+  selection closest-to-band over arbitrary candidate sets, and never-repeat /
+  exact-exhaustion for arbitrary seeds.
+- "Use insta (snapshot testing) for tutor output rendering" → vitest snapshots in
+  `snapshots.test.ts` (committed under `__snapshots__/`): contradiction with a
+  detected misconception, contradiction with none, confirmation, the heuristic
+  explain verdict, and the multistructural retry. Voice edits now surface as
+  snapshot diffs in review. Both suites run with pinned ids/clock/seed, so they
+  are reproducible.
+
 Grep for stubs (§22 rule 3):
 ```
 $ grep -rn "TODO(M" src/
-(no output — no todo!-style stubs, no unimplemented! equivalents exist)
+src/core/grading.ts:349:// TODO(M11): implement ModelGrader behind local inference; keep the
 ```
+Exactly one stub exists in the codebase: the `ModelGrader` of §12.2. It is defined in
+`src/core/grading.ts` as the documented future upgrade path and throws if invoked. When
+it is ever implemented it MUST be local-inference-only (Law 10) — routing chapter text or
+learner responses to a cloud model would break the §18 guarantee. No other `todo!`,
+`unimplemented!`, or hardcoded placeholder exists.
 
 ---
 
