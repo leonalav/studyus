@@ -71,7 +71,13 @@ export function ProgrammingTutor({ onNotify, curriculum }: Props) {
       <Header view={view} curriculum={curriculum} onMap={() => send({ type: "open-map" })} />
       <div className="min-h-0 flex-1 overflow-y-auto">
         {view.kind === "cold-open" && (
-          <CommitForm key={view.prompt.exerciseId} prompt={view.prompt} cold onCommit={(response) => send({ type: "commit", response, elapsedMs: Date.now() - promptShownAt.current })} />
+          <CommitForm
+            key={view.prompt.exerciseId}
+            prompt={view.prompt}
+            cold
+            onCommit={(response) => send({ type: "commit", response, elapsedMs: Date.now() - promptShownAt.current })}
+            onSofter={() => send({ type: "request-scaffold" })}
+          />
         )}
         {view.kind === "prompting" && (
           <CommitForm
@@ -293,7 +299,7 @@ function CommitForm({
             />
           )}
           <div className="flex items-center gap-2">
-            {!cold && onSofter && (
+            {onSofter && (
               <button
                 onClick={onSofter}
                 title="Ask for a softer shape of the same question — it is recorded, and it affects fading."

@@ -318,6 +318,11 @@ prints `2`). The generator simply draws another binding; such instances are neve
 - `why` equivalent: "go one level deeper" on every reveal (misconception help / the
   after-first-pair line). `doctor` equivalent: the map's runtime status lines.
 
+### Decisions I made that this prompt did not specify
+- The cold open offers the "softer" (request-scaffold) affordance but not skip:
+  the first 10 seconds must never strand a learner, and the softer shape reveals
+  nothing — it only changes the commitment surface and is recorded (§8 invariant 3).
+
 ### What I did NOT build, and why
 - `watch` mode (file-watching re-runner): there is no filesystem in a browser; Write is
   committed in-page and the structural verdict appears on commit.
@@ -398,17 +403,22 @@ prints `2`). The generator simply draws another binding; such instances are neve
 ## Final test run — all suites
 
 ```
- ✓ src/core/__tests__/session-e2e.test.ts            (9 tests)
- ✓ src/core/__tests__/generate.test.ts               (17 tests)
- ✓ src/components/code/__tests__/tutor-smoke.test.tsx (3 tests)
- ✓ src/core/__tests__/voice.test.ts                   (4 tests)
- ✓ src/core/__tests__/grading.test.ts                 (8 tests)
- ✓ src/core/__tests__/mastery.test.ts                 (13 tests)
+ ✓ src/core/__tests__/session-e2e.test.ts             (9 tests)
+ ✓ src/core/__tests__/generate.test.ts                (17 tests)
  ✓ src/core/__tests__/reveal-barrier.test.ts          (7 tests)
+ ✓ src/core/__tests__/mastery.test.ts                 (13 tests)
+ ✓ src/core/__tests__/grading.test.ts                 (8 tests)
+ ✓ src/core/__tests__/voice.test.ts                   (4 tests)
+ ✓ src/components/code/__tests__/tutor-smoke.test.tsx (3 tests)
+ ✓ src/components/code/__tests__/tutor-flow.test.tsx  (4 tests)
 
- Test Files  7 passed (7)
-      Tests  61 passed (61)
+ Test Files  8 passed (8)
+      Tests  65 passed (65)
 ```
+
+The component suites drive the real React binding through commit → reveal →
+continue → map against the real Session and store, plus a remount test
+proving the store — not the component — owns progress.
 
 Grep for stubs (§22 rule 3):
 ```

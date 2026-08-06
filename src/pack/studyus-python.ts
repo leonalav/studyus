@@ -414,8 +414,8 @@ const templates: Template[] = [
         const value = start + (n * (n - 1)) / 2;
         return [
           { id: "a", text: String(value) },
-          { id: "b", text: String(value + n) },
-          { id: "c", text: String((n * (n + 1)) / 2) },
+          { id: "b", text: String(value + n) }, // range assumed to include n
+          { id: "c", text: String(value + 1) },
           { id: "d", text: String(value - 1) },
         ];
       },
