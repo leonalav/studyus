@@ -220,6 +220,92 @@ describe("tier 3 honesty (Law 8)", () => {
   });
 });
 
+describe("spaced retrieval (§13.3)", () => {
+  it("a mastered skill re-enters only when its review is due; a miss resets the interval", () => {
+    const t0 = 5_000_000_000_000;
+    let clock = t0;
+    const store = new MemoryStore();
+    const d = () => deps(store, () => clock);
+    const SKILL = "py.loops.for-range";
+
+    // master the cold-open skill with oracle answers (same path as the e2e above)
+    let guard = 0;
+    while (!store.load().masteredAt[SKILL] && guard < 120) {
+      guard += 1;
+      const s = Session.open(d());
+      const view = s.view();
+      if (view.kind === "reading") {
+        s.input({ type: "continue" });
+        continue;
+      }
+      if (view.kind === "done") break;
+      if (view.kind === "revealed" || view.kind === "map") {
+        s.input({ type: "continue" });
+        continue;
+      }
+      const prompt = view.kind === "cold-open" ? view.prompt : view.prompt;
+      s.input({ type: "commit", response: oracleResponse(STUDYUS_PYTHON_PACK, prompt), elapsedMs: 10 });
+    }
+    expect(store.load().masteredAt[SKILL]).toBeTruthy();
+    const masteredAt = store.load().masteredAt[SKILL]!;
+
+    // not due yet — the mastered skill must not be served ahead of schedule
+    clock = masteredAt + 6 * 3_600_000;
+    let s = Session.open(d());
+    let v = s.view();
+    if (v.kind === "reading") {
+      s.input({ type: "continue" });
+      v = s.view();
+    }
+    if (v.kind === "prompting" || v.kind === "cold-open") {
+      expect(v.prompt.skillId).not.toBe(SKILL);
+    }
+
+    // a day later — the review is due; it competes in the pool like any
+    // candidate, so commit through normal work until it surfaces
+    clock = masteredAt + 25 * 3_600_000;
+    let reviewSeen = false;
+    let reviewBeat: "predict" | "explain" | "modify" | "write" = "write";
+    let s2: Session | null = null;
+    for (let i = 0; i < 60 && !reviewSeen; i += 1) {
+      s2 = Session.open(d());
+      let v = s2.view();
+      if (v.kind === "reading") {
+        s2.input({ type: "continue" });
+        v = s2.view();
+      }
+      if (v.kind === "done") break;
+      if (v.kind !== "prompting" && v.kind !== "cold-open") {
+        s2.input({ type: "continue" });
+        continue;
+      }
+      const prompt = v.prompt;
+      if (prompt.skillId === SKILL) {
+        reviewSeen = true;
+        reviewBeat = prompt.beat;
+        break;
+      }
+      s2.input({ type: "commit", response: oracleResponse(STUDYUS_PYTHON_PACK, prompt), elapsedMs: 10 });
+    }
+    expect(reviewSeen).toBe(true);
+
+    // miss the review — the interval resets to one day and p_L drops
+    const pBefore = store.load().bkt[SKILL]?.[reviewBeat]?.p ?? 0;
+    s2!.input({
+      type: "commit",
+      response:
+        reviewBeat === "write"
+          ? { kind: "source", source: "print('nope')", dryRun: "0" }
+          : { kind: "text", text: "this is not the answer" },
+      elapsedMs: 10,
+    });
+    const review = store.load().reviews[SKILL];
+    expect(review.intervalIdx).toBe(1);
+    const pAfter = store.load().bkt[SKILL]?.[reviewBeat]?.p ?? 1;
+    expect(pAfter).toBeLessThan(pBefore);
+  });
+});
+
 describe("predict choices only appear as a requested scaffold", () => {
   it("RequestScaffold on predict offers commitment options without revealing", () => {
     const store = new MemoryStore();

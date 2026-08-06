@@ -69,22 +69,32 @@ describe("10.3 never-repeat and parameter space", () => {
     expect(hashes.size).toBe(500);
   });
 
-  it("on exhaustion the generator switches or reports need — never re-serves", () => {
-    const template = pack.templates.find((t) => t.id === "py.vars.assignment.rebind.v1")!;
+  it("on exhaustion the generator switches templates, and reports need when all are exhausted — never re-serves", () => {
+    const first = pack.templates.find((t) => t.id === "py.vars.assignment.rebind.v1")!;
+    const second = pack.templates.find((t) => t.id === "py.vars.assignment.chain.v1")!;
     const seen = memorySeen();
-    // exhaust the whole space deterministically
-    const space = paramSpaceSize(template);
-    const rng = seededRng(7);
-    let drawn = drawUnseenBinding(template, rng, seen);
-    let count = 0;
-    while (drawn) {
-      seen.markSeen(template.id, drawn.hash);
-      drawn = drawUnseenBinding(template, rng, seen);
-      count += 1;
-      if (count > space + 10) break;
-    }
-    expect(count).toBe(space); // exactly the space, no re-serves
-    // now generation for that skill must gracefully report exhaustion
+    const exhaust = (template: typeof first) => {
+      const space = paramSpaceSize(template);
+      const rng = seededRng(7);
+      let drawn = drawUnseenBinding(template, rng, seen);
+      let count = 0;
+      while (drawn) {
+        seen.markSeen(template.id, drawn.hash);
+        drawn = drawUnseenBinding(template, rng, seen);
+        count += 1;
+        if (count > space + 10) break;
+      }
+      expect(count).toBe(space); // exactly the space, no re-serves
+    };
+
+    exhaust(first);
+    // §10.3: the generator switches to a different template for the skill
+    const switched = generateExercise(pack, "py.vars.assignment", "predict", seededRng(8), seen, "none");
+    expect(switched).toBeTruthy();
+    expect(switched!.exercise.template).toBe(second.id);
+
+    exhaust(second);
+    // both templates exhausted → graceful null, never a re-serve
     const result = generateExercise(pack, "py.vars.assignment", "predict", seededRng(8), seen, "none");
     expect(result).toBeNull();
   });

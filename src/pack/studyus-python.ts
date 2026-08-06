@@ -47,6 +47,13 @@ export const MISCONCEPTIONS: Misconception[] = [
     help: "An assignment rebinds the name. After `a = a + b`, the old value of a is gone — the name now points at the new result.",
   },
   {
+    id: "stale-value",
+    name: "later lines read the stale value",
+    detector: { kind: "custom", name: "uses-stale-a" },
+    remediation: "rebinding",
+    help: "Statements run top to bottom: once a is rebound, every later line sees the *new* a. Re-run it from the rebind, not from the start.",
+  },
+  {
     id: "boundary-included",
     name: "comparison boundary treated as included",
     detector: { kind: "custom", name: "boundary-as-big" },
@@ -121,6 +128,12 @@ const num = (text: string): number | null => {
 /** named detector functions registered by this pack (§7.7) */
 export const CUSTOM_DETECTORS: CustomDetectorRegistry = {
   "vars-original-value": (text, _expected, p) => num(text) === p.x,
+  "uses-stale-a": (text, expected, p) => {
+    if (expected.kind !== "stdout") return false;
+    // the stale model: the second rebind uses the ORIGINAL a, not the rebound one
+    const staleValue = applyOp(Number(p.y), String(p.op2), Number(p.x));
+    return num(text) === staleValue && num(expected.text) !== staleValue;
+  },
   "boundary-as-big": (text, _expected, p) =>
     p.v === p.t && text.trim().replace(/\r/g, "").toLowerCase() === String(p.label ?? "big").toLowerCase(),
   "sum-includes-upper": (text, expected, p) => {
@@ -164,6 +177,12 @@ function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
 }
 
+function applyOp(left: number, op: string, right: number): number {
+  if (op === "+") return left + right;
+  if (op === "-") return left - right;
+  return left * right;
+}
+
 /* ── skills (§7.3) — one connected DAG, no orphans ── */
 
 const skill = (s: Skill): Skill => s;
@@ -175,7 +194,7 @@ export const SKILLS: Skill[] = [
     tier: 1,
     prerequisites: [],
     concepts: ["assignment", "names", "state"],
-    misconceptions: ["rebinding-original"],
+    misconceptions: ["rebinding-original", "stale-value"],
     pack: PACK_ID,
     beats: ["predict", "explain", "modify", "write"],
   }),
@@ -312,6 +331,79 @@ const templates: Template[] = [
         { id: "prints-once", label: "prints exactly one line", test: (s) => countOccurrences(s, /print\s*\(/g) === 1 },
       ],
       referenceSolution: "first = int(input())\nsecond = int(input())\nprint(first - second)",
+    },
+  },
+
+  /* 1b · variables — chained rebindings (second template, never-repeat variety) */
+  {
+    id: "py.vars.assignment.chain.v1",
+    skill: "py.vars.assignment",
+    tier: 1,
+    params: {
+      x: { kind: "int", min: 1, max: 9 },
+      y: { kind: "int", min: 1, max: 9 },
+      op1: { kind: "choice", of: ["+", "-", "*"] },
+      op2: { kind: "choice", of: ["+", "-", "*"] },
+    },
+    predict: {
+      program: "a = {{x}}\nb = {{y}}\na = a {{op1}} b\nb = b {{op2}} a\nprint(b)",
+      questionText: "What does this print?",
+      reference: (b): ReferenceResult => {
+        const r1 = applyOp(Number(b.x), String(b.op1), Number(b.y));
+        const r2 = applyOp(Number(b.y), String(b.op2), r1);
+        return {
+          stdout: String(r2),
+          trace: [
+            step(1, { a: String(b.x) }, []),
+            step(2, { a: String(b.x), b: String(b.y) }, []),
+            step(3, { a: String(r1), b: String(b.y) }, [], "a is rebound first"),
+            step(4, { a: String(r1), b: String(r2) }, [], "this line sees the NEW a"),
+            step(5, { a: String(r1), b: String(r2) }, [String(r2)]),
+          ],
+        };
+      },
+      choices: (b) => {
+        const r1 = applyOp(Number(b.x), String(b.op1), Number(b.y));
+        const r2 = applyOp(Number(b.y), String(b.op2), r1);
+        const stale = applyOp(Number(b.y), String(b.op2), Number(b.x));
+        const options = [String(r2), String(stale), String(r1), String(r2 + 1)];
+        return [...new Set(options)].slice(0, 4).map((text, i) => ({ id: String.fromCharCode(97 + i), text }));
+      },
+    },
+    explain: {
+      rubric: (): Rubric => ({
+        groups: [
+          { oneOf: ["stores", "binds", "assigns"] },
+          { oneOf: ["rebinds", "updates", "changes", "new value", "then"] },
+          { oneOf: ["prints", "result", "shows"] },
+        ],
+        mustNotInclude: ["line by line"],
+        exemplar: "It stores two numbers, rebinds the first using both, then rebinds the second using the new first, and prints it.",
+      }),
+    },
+    modify: {
+      programWithHoles: "a = {{x}}\nb = {{y}}\na = ___\nb = b + a\nprint(b)",
+      holes: () => [{ id: "double", accept: ["a * 2", "a*2", "2 * a", "2*a", "a + a"] }],
+      targetBehaviour: "Double a first, then add the new a to b and print the result.",
+      stdout: (b) => String(Number(b.y) + 2 * Number(b.x)),
+    },
+    write: {
+      specification:
+        "Write a program that reads two integers a and b, one per line, and prints b plus twice a. Print nothing else.",
+      signatureHint: "Two input() calls, then one expression does the work.",
+      hiddenTests: (): HiddenTest[] => [
+        { stdin: "2\n3", stdout: "7" },
+        { stdin: "5\n1", stdout: "11" },
+        { stdin: "0\n4", stdout: "4" },
+        { stdin: "3\n3", stdout: "9" },
+      ],
+      checks: [
+        { id: "reads-two", label: "reads two integers from input", test: (s) => countOccurrences(s, /int\s*\(\s*input\s*\(/g) >= 2 },
+        { id: "doubles", label: "doubles one of the values", test: (s) => /\*\s*2\b|\b2\s*\*/.test(s) || /(\w+)\s*\+\s*\1\b/.test(s) },
+        { id: "adds", label: "adds the two parts together", test: (s) => /\+/.test(s) },
+        { id: "prints-once", label: "prints exactly one line", test: (s) => countOccurrences(s, /print\s*\(/g) === 1 },
+      ],
+      referenceSolution: "a = int(input())\nb = int(input())\nprint(b + 2 * a)",
     },
   },
 

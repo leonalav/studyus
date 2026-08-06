@@ -98,8 +98,10 @@ OK: no HTTP calls in src/
   (unique IDs, prerequisite cycles named, referenced misconceptions/templates, parameter
   space ≥ 200) emitting ALL errors at once.
 - `src/pack/studyus-python.ts` — the shipped pack: 7 Tier 1 skills forming one connected
-  DAG (variables → conditionals/loops/functions → lists → strings/dicts), 7 parameterized
-  templates with all four beats, 10 misconceptions with detectors, 2 Tier 3 readings.
+  DAG (variables → conditionals/loops/functions → lists → strings/dicts), 8 parameterized
+  templates with all four beats (variables carries two templates, so the §10.3
+  template-switch path is live content, not only a test), 11 misconceptions with
+  detectors, 2 Tier 3 readings.
 
 ### What I did NOT build, and why
 - **No OpenStax text ships.** §18 requires verifying the license of each specific document
@@ -122,6 +124,7 @@ OK: no HTTP calls in src/
 Parameter spaces (computed):
 ```
 py.vars.assignment.rebind.v1: 243
+py.vars.assignment.chain.v1:  729
 py.cond.if-else.threshold.v1: 240
 py.loops.for-range.accumulate.v1: 546
 py.funcs.def-return.scale.v1: 704
@@ -181,14 +184,15 @@ py.dicts.count.update.v1: 1215
 ### Validation statistics (real numbers, seed 3, 24 samples per template)
 ```
 py.vars.assignment.rebind.v1:      accepted 22/24 | rejected → non-triviality:2
+py.vars.assignment.chain.v1:       accepted 23/24 | rejected → non-triviality:1
 py.cond.if-else.threshold.v1:      accepted 24/24 | rejected → none
-py.loops.for-range.accumulate.v1:  accepted 23/24 | rejected → non-triviality:1
+py.loops.for-range.accumulate.v1:  accepted 24/24 | rejected → none
 py.funcs.def-return.scale.v1:      accepted 24/24 | rejected → none
 py.lists.grow.append.v1:           accepted 24/24 | rejected → none
 py.strings.methods.new-string.v1:  accepted 24/24 | rejected → none
 py.dicts.count.update.v1:          accepted 24/24 | rejected → none
 ```
-The three non-triviality rejections are the filter working as designed: bindings whose
+The four non-triviality rejections are the filter working as designed: bindings whose
 recorded output is already a literal visible in the source (e.g. `range(2)` with start 1
 prints `2`). The generator simply draws another binding; such instances are never served.
 
@@ -267,6 +271,8 @@ prints `2`). The generator simply draws another binding; such instances are neve
 ✓ does not reveal the correct fills on failure — only which holes miss the target
 ✓ a source satisfying some but not all checks is Incorrect and reports only the first failure
 ✓ source attempting a network import is blocked, not graded
+✓ spaced retrieval: mastered skill absent before its review is due, re-enters when due,
+  and a missed review resets the interval and drops p_L
 ```
 
 ### What I am uncertain about
@@ -403,7 +409,7 @@ prints `2`). The generator simply draws another binding; such instances are neve
 ## Final test run — all suites
 
 ```
- ✓ src/core/__tests__/session-e2e.test.ts             (9 tests)
+ ✓ src/core/__tests__/session-e2e.test.ts             (10 tests)
  ✓ src/core/__tests__/generate.test.ts                (17 tests)
  ✓ src/core/__tests__/reveal-barrier.test.ts          (7 tests)
  ✓ src/core/__tests__/mastery.test.ts                 (13 tests)
@@ -413,7 +419,7 @@ prints `2`). The generator simply draws another binding; such instances are neve
  ✓ src/components/code/__tests__/tutor-flow.test.tsx  (4 tests)
 
  Test Files  8 passed (8)
-      Tests  65 passed (65)
+      Tests  66 passed (66)
 ```
 
 The component suites drive the real React binding through commit → reveal →
@@ -442,9 +448,10 @@ Write-beat grading is the weakest link by construction (a browser cannot execute
 Tier 3 has two readings.
 
 **What I would do next:** (1) tune BKT and the partial-pass threshold against real
-learners; (2) add a second template per skill to widen variety; (3) build M9 ingestion
-behind a real PDF parser; (4) a surface with an interpreter (desktop shell) where beat 4
-becomes truly execution-graded — the core needs no changes for that.
+learners; (2) widen variety — variables now carries two templates (the switch path is
+live), the remaining skills would each take a second; (3) build M9 ingestion behind a
+real PDF parser; (4) a surface with an interpreter (desktop shell) where beat 4 becomes
+truly execution-graded — the core needs no changes for that.
 
 **The one thing most likely to be wrong:** the frontier selection rule. It is my addition,
 not the plan's text; it fixes a real stall I measured, but it changes how beats interleave
