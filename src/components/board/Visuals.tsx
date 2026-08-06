@@ -20,30 +20,79 @@ export function Latex({ tex, color, size = 26 }: { tex: string; color: string; s
   );
 }
 
-/* ── Shared plot helpers ── */
+/* ── Shared plot helpers & Tick Generator ── */
+
+export function generateAxisTicks(min: number, max: number, maxTicks = 5): number[] {
+  if (min >= max) return [min];
+  const range = max - min;
+  const rawStep = range / maxTicks;
+  const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const residual = rawStep / mag;
+
+  let step = mag;
+  if (residual > 5) step = 10 * mag;
+  else if (residual > 2.5) step = 5 * mag;
+  else if (residual > 1.2) step = 2 * mag;
+
+  const start = Math.floor(min / step) * step;
+  const ticks: number[] = [];
+  for (let v = start; v <= max + step - 1e-9; v += step) {
+    ticks.push(Number(v.toFixed(4)));
+  }
+  return ticks;
+}
 
 const FNS: Record<string, (x: number) => number> = {
   parabola: (x) => x * x,
-  sqrt: (x) => 8 / Math.sqrt(x),
+  sqrt: (x) => (x <= 0 ? NaN : 8 / Math.sqrt(x)),
   decay: (x) => 6 * Math.exp(-0.45 * x),
   logistic: (x) => 8 / (1 + Math.exp(-1.3 * (x - 5))),
+  sine: Math.sin,
   sin: Math.sin,
   cos: Math.cos,
+  tan: (x) => (Math.abs(Math.cos(x)) < 1e-3 ? NaN : Math.tan(x)),
 };
 
-function path(fn: (x: number) => number, x0: number, x1: number, sx: (x: number) => number, sy: (y: number) => number) {
-  const steps = 140;
-  let d = "";
+function generatePathsWithDiscontinuity(
+  fn: (x: number) => number,
+  x0: number,
+  x1: number,
+  sx: (x: number) => number,
+  sy: (y: number) => number,
+  yMin: number,
+  yMax: number
+): string[] {
+  const steps = 200;
+  const paths: string[] = [];
+  let currentPath = "";
+
   for (let i = 0; i <= steps; i++) {
     const x = x0 + ((x1 - x0) * i) / steps;
     const y = fn(x);
-    if (!isFinite(y)) continue;
-    d += `${d ? "L" : "M"}${sx(x).toFixed(1)},${sy(y).toFixed(1)}`;
+
+    if (!isFinite(y) || isNaN(y) || y < yMin - 10 * (yMax - yMin) || y > yMax + 10 * (yMax - yMin)) {
+      if (currentPath) {
+        paths.push(currentPath);
+        currentPath = "";
+      }
+      continue;
+    }
+
+    const px = sx(x).toFixed(1);
+    const py = sy(y).toFixed(1);
+
+    if (!currentPath) {
+      currentPath = `M${px},${py}`;
+    } else {
+      currentPath += ` L${px},${py}`;
+    }
   }
-  return d;
+
+  if (currentPath) paths.push(currentPath);
+  return paths;
 }
 
-/* ── 2D graph ── */
+/* ── 2D Graph with Numeric Ticks & Discontinuity Protection ── */
 
 export function Graph2D({
   fn,
@@ -60,9 +109,12 @@ export function Graph2D({
   color: string;
   accent: string;
 }) {
-  const W = 300;
-  const H = 200;
-  const pad = 26;
+  const W = 320;
+  const H = 220;
+  const padLeft = 40;
+  const padBottom = 30;
+  const padTop = 20;
+  const padRight = 20;
   const [x0, x1] = domainX;
 
   const series = useMemo(() => {
@@ -75,7 +127,7 @@ export function Graph2D({
       ];
     }
     if (curves?.length) {
-      const palette = [accent, "#f9a8d4"];
+      const palette = [accent, "#f9a8d4", "#60a5fa"];
       return curves.map((c, i) => ({ f: FNS[c] ?? FNS.sin, c: palette[i % palette.length], label: c }));
     }
     return [{ f: FNS[fn] ?? FNS.parabola, c: accent, label: fn }];
@@ -83,66 +135,80 @@ export function Graph2D({
 
   const yVals = series.flatMap((s) => {
     const out: number[] = [];
-    for (let i = 0; i <= 40; i++) {
-      const v = s.f(x0 + ((x1 - x0) * i) / 40);
-      if (isFinite(v)) out.push(v);
+    for (let i = 0; i <= 60; i++) {
+      const v = s.f(x0 + ((x1 - x0) * i) / 60);
+      if (isFinite(v) && !isNaN(v)) out.push(v);
     }
     return out;
   });
-  const yMin = Math.min(0, ...yVals);
-  const yMax = Math.max(1, ...yVals);
 
-  const sx = (x: number) => pad + ((x - x0) / (x1 - x0)) * (W - pad * 2);
-  const sy = (y: number) => H - pad - ((y - yMin) / (yMax - yMin)) * (H - pad * 2);
+  const yMin = yVals.length ? Math.min(0, ...yVals) : 0;
+  const yMax = yVals.length ? Math.max(1, ...yVals) : 1;
+
+  const sx = (x: number) => padLeft + ((x - x0) / (x1 - x0)) * (W - padLeft - padRight);
+  const sy = (y: number) => H - padBottom - ((y - yMin) / (yMax - yMin || 1)) * (H - padTop - padBottom);
+
+  const xTicks = useMemo(() => generateAxisTicks(x0, x1, 5), [x0, x1]);
+  const yTicks = useMemo(() => generateAxisTicks(yMin, yMax, 4), [yMin, yMax]);
 
   return (
     <figure className="m-0">
-      <svg width={W} height={H} className="overflow-visible">
-        {/* axes */}
-        <line x1={pad} y1={H - pad} x2={W - pad + 8} y2={H - pad} stroke={color} strokeWidth={1.6} opacity={0.75} strokeLinecap="round" />
-        <line x1={pad} y1={H - pad} x2={pad} y2={pad - 8} stroke={color} strokeWidth={1.6} opacity={0.75} strokeLinecap="round" />
-        {/* ticks */}
-        {[0.25, 0.5, 0.75].map((t) => (
-          <line
-            key={t}
-            x1={pad + t * (W - pad * 2)}
-            y1={H - pad - 4}
-            x2={pad + t * (W - pad * 2)}
-            y2={H - pad + 4}
-            stroke={color}
-            strokeWidth={1.2}
-            opacity={0.5}
-          />
-        ))}
-        {series.map((s, i) => (
-          <path
-            key={i}
-            d={path(s.f, x0, x1, sx, sy)}
-            fill="none"
-            stroke={s.c}
-            strokeWidth={2.2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            opacity={0.95}
-          />
-        ))}
-        {/* tangent line for parabola */}
-        {fn === "parabola" && (
-          <line
-            x1={sx(Math.max(x0, -0.5))}
-            y1={sy(2 * Math.max(x0, -0.5) - 1)}
-            x2={sx(Math.min(x1, 2.6))}
-            y2={sy(2 * Math.min(x1, 2.6) - 1)}
-            stroke="#fbbf24"
-            strokeWidth={1.6}
-            strokeDasharray="5 4"
-            opacity={0.9}
-          />
-        )}
+      <svg width={W} height={H} className="overflow-visible font-mono">
+        {/* Axes */}
+        <line x1={padLeft} y1={H - padBottom} x2={W - padRight + 8} y2={H - padBottom} stroke={color} strokeWidth={1.6} opacity={0.75} />
+        <line x1={padLeft} y1={H - padBottom} x2={padLeft} y2={padTop - 8} stroke={color} strokeWidth={1.6} opacity={0.75} />
+
+        {/* X Ticks & Labels BELOW x-axis */}
+        {xTicks.map((xt) => {
+          const px = sx(xt);
+          return (
+            <g key={`xt-${xt}`}>
+              <line x1={px} y1={H - padBottom} x2={px} y2={H - padBottom + 4} stroke={color} strokeWidth={1.2} opacity={0.6} />
+              <text x={px} y={H - padBottom + 16} fontSize={10} fill={color} textAnchor="middle" opacity={0.85}>
+                {xt}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Y Ticks & Labels BESIDE y-axis */}
+        {yTicks.map((yt) => {
+          const py = sy(yt);
+          return (
+            <g key={`yt-${yt}`}>
+              <line x1={padLeft - 4} y1={py} x2={padLeft} y2={py} stroke={color} strokeWidth={1.2} opacity={0.6} />
+              <text x={padLeft - 8} y={py + 3} fontSize={10} fill={color} textAnchor="end" opacity={0.85}>
+                {yt}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Curve series rendering with discontinuity separation */}
+        {series.map((s, i) => {
+          const pathSegments = generatePathsWithDiscontinuity(s.f, x0, x1, sx, sy, yMin, yMax);
+          return (
+            <g key={i}>
+              {pathSegments.map((d, pIdx) => (
+                <path
+                  key={pIdx}
+                  d={d}
+                  fill="none"
+                  stroke={s.c}
+                  strokeWidth={2.2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity={0.95}
+                />
+              ))}
+            </g>
+          );
+        })}
+
         {series.length > 1 && (
           <g>
             {series.map((s, i) => (
-              <g key={i} transform={`translate(${W - pad - 62}, ${pad + i * 15})`}>
+              <g key={i} transform={`translate(${W - padRight - 65}, ${padTop + i * 15})`}>
                 <line x1={0} y1={0} x2={14} y2={0} stroke={s.c} strokeWidth={2.4} strokeLinecap="round" />
                 <text x={19} y={3.5} fontSize={10} fill={color} opacity={0.85}>
                   {s.label}
@@ -157,7 +223,7 @@ export function Graph2D({
   );
 }
 
-/* ── 3D wireframe surface ── */
+/* ── 3D Wireframe Surface with Numeric Tick Axes ── */
 
 const SURFACES: Record<string, (x: number, y: number) => number> = {
   saddle: (x, y) => (x * x - y * y) * 0.55,
@@ -166,15 +232,15 @@ const SURFACES: Record<string, (x: number, y: number) => number> = {
 };
 
 export function Graph3D({ surface, caption, color, accent }: { surface: string; caption?: string; color: string; accent: string }) {
-  const W = 300;
-  const H = 210;
+  const W = 320;
+  const H = 230;
   const N = 13;
   const f = SURFACES[surface] ?? SURFACES.saddle;
 
   const { rows, cols } = useMemo(() => {
     const cx = W / 2;
-    const cy = H / 2 + 30;
-    const s = 11;
+    const cy = H / 2 + 20;
+    const s = 12;
     const zs = 15;
     const proj = (i: number, j: number) => {
       const x = (i / (N - 1)) * 4 - 2;
@@ -192,23 +258,25 @@ export function Graph3D({ surface, caption, color, accent }: { surface: string; 
   }, [surface]);
 
   return (
-    <figure className="m-0">
+    <figure className="m-0 font-mono">
       <svg width={W} height={H} className="overflow-visible">
         {rows.map((p, i) => (
-          <polyline key={`r${i}`} points={p} fill="none" stroke={accent} strokeWidth={1.1} opacity={0.32 + (i / N) * 0.5} strokeLinejoin="round" />
+          <polyline key={`r${i}`} points={p} fill="none" stroke={accent} strokeWidth={1.1} opacity={0.35 + (i / N) * 0.5} strokeLinejoin="round" />
         ))}
         {cols.map((p, i) => (
-          <polyline key={`c${i}`} points={p} fill="none" stroke={color} strokeWidth={1} opacity={0.22 + (i / N) * 0.4} strokeLinejoin="round" />
+          <polyline key={`c${i}`} points={p} fill="none" stroke={color} strokeWidth={1} opacity={0.25 + (i / N) * 0.4} strokeLinejoin="round" />
         ))}
-        {/* axes hint */}
-        <g opacity={0.55} stroke={color} strokeWidth={1.3} strokeLinecap="round">
-          <line x1={26} y1={H - 18} x2={64} y2={H - 34} />
-          <line x1={26} y1={H - 18} x2={64} y2={H - 2} />
-          <line x1={26} y1={H - 18} x2={26} y2={H - 56} />
+        {/* 3D Axis with Numeric Ticks */}
+        <g opacity={0.7} stroke={color} strokeWidth={1.4} strokeLinecap="round">
+          <line x1={30} y1={H - 25} x2={70} y2={H - 45} />
+          <line x1={30} y1={H - 25} x2={70} y2={H - 10} />
+          <line x1={30} y1={H - 25} x2={30} y2={H - 65} />
         </g>
-        <text x={68} y={H - 33} fontSize={9.5} fill={color} opacity={0.7}>x</text>
-        <text x={68} y={H - 1} fontSize={9.5} fill={color} opacity={0.7}>y</text>
-        <text x={20} y={H - 60} fontSize={9.5} fill={color} opacity={0.7}>z</text>
+        {/* X axis tick numbers */}
+        <text x={75} y={H - 45} fontSize={10} fill={color} opacity={0.9}>x (2.0)</text>
+        <text x={75} y={H - 8} fontSize={10} fill={color} opacity={0.9}>y (2.0)</text>
+        <text x={24} y={H - 70} fontSize={10} fill={color} opacity={0.9}>z (1.5)</text>
+        <text x={20} y={H - 22} fontSize={9} fill={color} opacity={0.65}>0</text>
       </svg>
       {caption && <figcaption className="mt-1 text-[13px] opacity-70">{caption}</figcaption>}
     </figure>
@@ -217,7 +285,6 @@ export function Graph3D({ surface, caption, color, accent }: { surface: string; 
 
 /* ── Chalk diagrams ── */
 
-/* Handwriting fonts don't ship bold weights — render "bold" as a soft yellow shade. */
 export function ChalkStrong({ children }: { children: React.ReactNode }) {
   return <span style={{ color: "#fde68a" }}>{children}</span>;
 }

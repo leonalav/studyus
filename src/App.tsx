@@ -31,6 +31,7 @@ export default function App() {
   const [board, setBoard] = useState<BoardDoc | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chosenSection, setChosenSection] = useState<string | null>(null);
 
   const subject = SUBJECTS.find((s) => s.id === subjectId)!;
 
@@ -216,10 +217,10 @@ export default function App() {
               <header className="anim-fade-up mb-8">
                 <h1 className="text-[38px] font-bold leading-tight tracking-tight sm:text-[44px]">
                   <span className="text-faint">@</span>
-                  <span className="text-[#909090]">Today {time}</span>
+                  <span className="text-[#909090]">{chosenSection ? chosenSection : `Today ${time}`}</span>
                 </h1>
                 <p className="mt-2 font-mono text-[11px] uppercase tracking-wider text-dim">
-                  Tell Studyus what to study · it builds the chalkboard
+                  {chosenSection ? `Studying concept section: ${chosenSection}` : "Tell Studyus what to study · it builds the chalkboard"}
                 </p>
               </header>
 
@@ -243,6 +244,11 @@ export default function App() {
               }}
               onStartTest={startTest}
               onExitTest={exitTest}
+              onSelectSectionForStudy={(sectionTitle) => {
+                setChosenSection(sectionTitle);
+                setActiveTabId(HOME_TAB_ID);
+                notify(`Switched to Tutor @[${sectionTitle}]`);
+              }}
               activeTest={activeTest}
             />
           )}
