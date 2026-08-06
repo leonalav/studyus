@@ -4,6 +4,7 @@ import { BoardToolbar, type PanelId, type PenTool } from "./BoardToolbar";
 import { ThreadsPanel, SettingsPanel, ChatDock, type ChatMsg } from "./BoardPanels";
 import { buildSubBoard, boardToMarkdown, DOMAIN_META, type BoardDoc } from "../../data/boards";
 import { defaultTools, runAgent, type AgentEndpoint } from "../../lib/agent";
+import { ContextMenu, ContextMenuTarget } from "../ContextMenu";
 import { toPng } from "html-to-image";
 
 interface Props {
@@ -45,10 +46,39 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [viewMap, setViewMap] = useState<Record<string, BoardView>>({});
   const [strokeMap, setStrokeMap] = useState<Record<string, Stroke[]>>({});
+  const [contextMenu, setContextMenu] = useState<ContextMenuTarget | null>(null);
 
   const msgId = useRef(0);
   const board = boards.find((b) => b.id === activeId) ?? boards[0];
   const fontCss = FONTS.find((f) => f.id === fontId)?.css ?? FONTS[0].css;
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const target = e.target as HTMLElement;
+    let type: ContextMenuTarget["type"] = "chalkboard_bg";
+
+    if (target.closest("figure")) type = "graph";
+    else if (target.closest("[data-block]")) type = "board_object";
+
+    setContextMenu({
+      type,
+      x: e.clientX,
+      y: e.clientY,
+    });
+  };
+
+  const handleContextMenuAction = (actionId: string) => {
+    if (actionId === "clear_board") {
+      clearInkRef.current();
+      notify("Board cleared");
+    } else if (actionId === "ask_tutor_board" || actionId === "ask_tutor_obj") {
+      notify("Asking tutor about selected content…");
+    } else if (actionId === "export_board_image") {
+      notify("Exporting board image…");
+    } else {
+      notify(`Context action executed: ${actionId}`);
+    }
+  };
 
   const captureActive = useCallback(async () => {
     const node = boardRootRef.current;
@@ -100,15 +130,6 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
     }, delay);
   }, []);
 
-  /* greet on entry */
-  useEffect(() => {
-    pushTutor(
-      `Board is up — ${initialBoard.title}. I'll write here as we go. Drag the board to move around, and highlight any line to branch it into its own board.`,
-      900
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   /* branch from highlighted text */
   const handleAsk = useCallback(
     async (selection: string, question: string) => {
@@ -130,8 +151,8 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
 
   /* chat replies — calls the configured agent when endpoint is enabled */
   const handleSend = useCallback(
-    async (text: string) => {
-      setMessages((m) => [...m, { id: ++msgId.current, role: "user", text }]);
+    async (text: string, imageData?: string) => {
+      setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
       const meta = DOMAIN_META[board.domain];
 
       if (!endpoint.enabled) {
@@ -249,7 +270,10 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
   };
 
   return (
-    <div className="anim-teleport relative h-full w-full overflow-hidden bg-black">
+    <div
+      onContextMenu={handleContextMenu}
+      className="anim-teleport relative h-full w-full overflow-hidden bg-black"
+    >
       {/* the shared screen frame */}
       <div className="share-frame absolute inset-2 overflow-hidden rounded-lg">
         <Chalkboard
@@ -308,6 +332,13 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
         chatCount={messages.filter((m) => m.role === "tutor").length}
       />
 
+      {/* Context Menu */}
+      <ContextMenu
+        target={contextMenu}
+        onClose={() => setContextMenu(null)}
+        onAction={handleContextMenuAction}
+      />
+
       {/* live recording chip */}
       {recording && (
         <div className="anim-toast absolute left-4 top-[68px] z-40 flex items-center gap-2 rounded-md border border-[#c42b1c]/40 bg-[#1a1010]/95 px-2.5 py-1.5 backdrop-blur-md">
@@ -353,21 +384,21 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
       {chatOpen && (
         <ChatDock
           messages={messages}
-          onSend={(t) => { void handleSend(t); }}
+          onSend={(t, img) => { void handleSend(t, img); }}
           collapsed={chatCollapsed}
           setCollapsed={setChatCollapsed}
           onClose={() => setChatOpen(false)}
           typing={typing}
           agentStatus={agentStatus}
           attachments={attachments}
-          onAddAttachment={(kind) => {
-            const placeholder = {
+          onAddAttachment={(kind, name, url) => {
+            const placeholder = name || {
               file: `file-${Date.now()}.pdf`,
               image: `image-${Date.now()}.png`,
               audio: `voice-${Date.now()}.m4a`,
               code: `snippet-${Date.now()}.py`,
             }[kind];
-            setAttachments((list) => [...list, { name: placeholder, kind }]);
+            setAttachments((list) => [...list, { name: placeholder, kind, url }]);
             notify(`${kind} attached`);
           }}
           onClearAttachments={() => setAttachments([])}

@@ -6,15 +6,19 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@types/sql.js": "^1.4.11",
     "clsx": "2.1.1",
     "html-to-image": "^1.11.13",
     "katex": "^0.18.1",
     "lucide-react": "^1.28.0",
+    "pdfjs-dist": "^6.2.108",
     "react": "19.2.6",
     "react-dom": "19.2.6",
+    "sql.js": "^1.14.1",
     "tailwind-merge": "3.4.0"
   },
   "devDependencies": {
@@ -26,6 +30,7 @@
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.3.2",
-    "vite-plugin-singlefile": "2.3.0"
+    "vite-plugin-singlefile": "2.3.0",
+    "vitest": "^4.1.10"
   }
 }

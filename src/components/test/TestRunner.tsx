@@ -10,8 +10,11 @@ import {
   ChevronDown,
   PenLine,
   Sigma,
+  Save,
+  AlertCircle,
 } from "lucide-react";
 import { QUESTION_BANK, type SubjectKey, type QuestionFormat } from "../../data/curriculum";
+import { autosaveDraft, submitAttempt, AttemptResultDTO } from "../../api";
 
 interface Props {
   subject: SubjectKey;
@@ -77,9 +80,12 @@ export function TestRunner({
   onExit,
   onNotify,
 }: Props) {
+  const [attemptId] = useState(() => `attempt-active-1`);
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<string, { mcq?: string; proof?: string }>>({});
-  const [submitted, setSubmitted] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">("saved");
+  const [confirmSubmitOpen, setConfirmSubmitOpen] = useState(false);
+  const [submissionResult, setSubmissionResult] = useState<AttemptResultDTO | null>(null);
   const [time, setTime] = useState(0);
   const startTime = useRef(Date.now());
   const docName = docs.find((d) => d.id === docId)?.name.replace(/\.pdf$/i, "") ?? "Mixed study set";
@@ -87,7 +93,6 @@ export function TestRunner({
   const questions = useMemo(() => {
     if (format === "mcq") return MCQ_POOL.slice(0, count);
     if (format === "proof") return PROOF_POOL.slice(0, count);
-    // mixed
     const half = Math.ceil(count / 2);
     return [...MCQ_POOL.slice(0, half), ...PROOF_POOL.slice(0, count - half)];
   }, [format, count]);
@@ -107,6 +112,21 @@ export function TestRunner({
     return () => window.clearInterval(t);
   }, []);
 
+  // Debounced draft autosave to backend SQLite
+  const saveTimeoutRef = useRef<any>(null);
+  const handleDraftChange = (itemId: string, responseVal: string) => {
+    setSaveStatus("saving");
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(async () => {
+      try {
+        await autosaveDraft(attemptId, itemId, responseVal, [], index + 1);
+        setSaveStatus("saved");
+      } catch {
+        setSaveStatus("error");
+      }
+    }, 400);
+  };
+
   const answered = questions.filter((item) => {
     const a = answers[item.id];
     if (!a) return false;
@@ -117,30 +137,46 @@ export function TestRunner({
   const select = (val: string) => {
     if (!q) return;
     setAnswers((current) => ({ ...current, [q.id]: { ...current[q.id], mcq: val } }));
+    handleDraftChange(q.id, val);
   };
 
   const setProof = (val: string) => {
     if (!q) return;
     setAnswers((current) => ({ ...current, [q.id]: { ...current[q.id], proof: val } }));
+    handleDraftChange(q.id, val);
   };
 
-  const submit = () => {
-    setSubmitted(true);
-    onNotify(`Submitted · ${answered}/${total} answered`);
+  const requestSubmit = () => {
+    if (answered < total) {
+      setConfirmSubmitOpen(true);
+    } else {
+      executeSubmit();
+    }
+  };
+
+  const executeSubmit = async () => {
+    setConfirmSubmitOpen(false);
+    try {
+      const res = await submitAttempt(attemptId);
+      setSubmissionResult(res);
+      onNotify(`Exam submitted · Final score: ${res.aggregateScore}/${res.totalPossibleMarks}`);
+    } catch {
+      onNotify("Submission error. Attempt recorded as retryable.");
+    }
   };
 
   const toggleProof = () => {
     onNotify(isProof ? "Already in proof-only mode" : "Switched to proof-only layout");
   };
 
-  if (submitted) {
+  if (submissionResult) {
     return (
       <SubmittedView
         questions={questions}
-        answers={answers}
+        result={submissionResult}
         onRetake={() => {
           setAnswers({});
-          setSubmitted(false);
+          setSubmissionResult(null);
           setIndex(0);
           startTime.current = Date.now();
           onNotify("Retake started");
@@ -153,7 +189,7 @@ export function TestRunner({
   }
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-72px)] w-full max-w-[1100px] flex-col px-5 pt-6">
+    <div className="mx-auto flex h-[calc(100vh-72px)] w-full max-w-[1100px] flex-col px-5 pt-6 select-none">
       {/* header */}
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -170,13 +206,18 @@ export function TestRunner({
           <span className="rounded-full bg-accent/15 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-accent">
             {rigor}
           </span>
+          {/* Live autosave status indicator */}
+          <span className="flex items-center gap-1 font-mono text-[10.5px] text-dim">
+            <Save size={11} className={saveStatus === "saving" ? "animate-spin text-accent" : "text-dim"} />
+            {saveStatus === "saving" ? "saving draft…" : saveStatus === "saved" ? "draft saved" : "save error"}
+          </span>
         </div>
         <div className="flex items-center gap-3">
           <span className="font-mono text-[12px] text-dim">
             {String(Math.floor(time / 60)).padStart(2, "0")}:{String(time % 60).padStart(2, "0")}
           </span>
           <button
-            onClick={submit}
+            onClick={requestSubmit}
             className="rounded-md bg-accent px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors hover:bg-accent-deep"
           >
             Submit exam
@@ -263,13 +304,6 @@ export function TestRunner({
             <p className="mt-1 font-mono text-[10.5px] text-dim">
               {selected.length} concept{selected.length === 1 ? "" : "s"} · {format} · {rigor}
             </p>
-            <p className="mt-2 text-[11px] text-dim">
-              {onlyProof
-                ? "Proof-based questions only. You write the answer; LaTeX-supported."
-                : isMixed
-                ? "Mixed set — switch to a proof question to use the equation keyboard."
-                : "MCQ only — pick one option per question."}
-            </p>
           </div>
           <button
             onClick={toggleProof}
@@ -279,6 +313,35 @@ export function TestRunner({
           </button>
         </aside>
       </div>
+
+      {/* Unanswered items confirmation modal */}
+      {confirmSubmitOpen && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 p-4">
+          <div className="w-[380px] rounded-xl border border-edge bg-[#222224] p-5 shadow-2xl">
+            <div className="mb-2 flex items-center gap-2 text-[#fcd34d]">
+              <AlertCircle size={18} />
+              <h3 className="text-[15px] font-semibold text-fg">Unanswered Questions</h3>
+            </div>
+            <p className="mb-4 text-[13px] text-dim leading-relaxed">
+              You have <span className="font-semibold text-fg">{total - answered}</span> unanswered questions remaining. Are you sure you want to finalize submission?
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setConfirmSubmitOpen(false)}
+                className="rounded-md px-3 py-1.5 text-[12.5px] text-mut hover:text-fg"
+              >
+                Keep working
+              </button>
+              <button
+                onClick={executeSubmit}
+                className="rounded-md bg-accent px-3.5 py-1.5 text-[12.5px] font-medium text-white hover:bg-accent-deep"
+              >
+                Submit anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -385,7 +448,6 @@ function ProofQuestion({
 
   return (
     <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-[1fr_1.1fr]">
-      {/* left: question + composer */}
       <div className="flex min-h-0 flex-col">
         <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.text}</h2>
         <div className="mt-3 rounded-md border border-dashed border-accent/40 bg-accent/[0.04] px-3 py-2">
@@ -396,7 +458,6 @@ function ProofQuestion({
           <p className="mt-2 text-[12.5px] text-dim">Hint · {q.hint}</p>
         )}
 
-        {/* LaTeX keyboard */}
         <div className="mt-4 rounded-md border border-edge bg-card">
           <button
             onClick={() => setKbOpen((v) => !v)}
@@ -423,7 +484,6 @@ function ProofQuestion({
           )}
         </div>
 
-        {/* answer field */}
         <div className="mt-3 flex min-h-0 flex-1 flex-col rounded-md border border-edge bg-ink/60">
           <div className="flex items-center justify-between border-b border-edge px-3 py-1.5">
             <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
@@ -434,7 +494,6 @@ function ProofQuestion({
               <button
                 onClick={() => setFontSize((s) => Math.max(11, s - 1))}
                 className="grid h-5 w-5 place-items-center rounded hover:bg-white/[0.07]"
-                title="Smaller"
               >
                 <Minimize2 size={10} />
               </button>
@@ -442,7 +501,6 @@ function ProofQuestion({
               <button
                 onClick={() => setFontSize((s) => Math.min(22, s + 1))}
                 className="grid h-5 w-5 place-items-center rounded hover:bg-white/[0.07]"
-                title="Larger"
               >
                 <Maximize2 size={10} />
               </button>
@@ -452,14 +510,13 @@ function ProofQuestion({
             ref={taRef}
             value={answer}
             onChange={(e) => onChange(e.target.value)}
-            placeholder="Type your proof here. Use the LaTeX keyboard for equations. e.g. f'(x) = \lim_{h\to0} \frac{f(x+h)-f(x)}{h} = 2x"
+            placeholder="Type your proof here. Use the LaTeX keyboard for equations."
             className="min-h-[180px] flex-1 resize-none bg-transparent px-3 py-2.5 font-mono leading-relaxed text-fg outline-none placeholder:text-faint"
             style={{ fontSize }}
           />
         </div>
       </div>
 
-      {/* right: live preview */}
       <div className="flex min-h-0 flex-col rounded-md border border-edge bg-card">
         <div className="flex items-center justify-between border-b border-edge px-3 py-2">
           <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
@@ -475,18 +532,9 @@ function ProofQuestion({
             <RenderedProof text={answer} />
           ) : (
             <p className="font-mono text-[11.5px] text-faint">
-              Your typeset answer will appear here as you type. Mixed LaTeX and prose both render.
+              Your typeset answer will appear here as you type.
             </p>
           )}
-        </div>
-        <div className="flex items-center justify-between border-t border-edge px-3 py-2">
-          <span className="font-mono text-[10px] text-dim">{answer.length} characters</span>
-          <button
-            onClick={() => insert("\n\n")}
-            className="rounded border border-edge bg-raise px-2.5 py-1 text-[11px] text-mut transition-colors hover:bg-white/[0.07] hover:text-fg"
-          >
-            New step
-          </button>
         </div>
       </div>
     </div>
@@ -539,82 +587,78 @@ function Katex({ math }: { math: string }) {
   return <div className="katex-chalk" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-/* ── Submitted view ── */
+/* ── Submitted view consuming Authoritative DTO ── */
 
 function SubmittedView({
   questions,
-  answers,
+  result,
   onRetake,
   onExit,
   onNotify,
   time,
 }: {
   questions: Question[];
-  answers: Record<string, { mcq?: string; proof?: string }>;
+  result: AttemptResultDTO;
   onRetake: () => void;
   onExit: () => void;
   onNotify: (t: string) => void;
   time: number;
 }) {
-  const total = questions.length;
-  const answered = questions.filter((q) => answers[q.id]?.mcq || answers[q.id]?.proof?.trim()).length;
-  const score = questions.filter((q) => answers[q.id]?.mcq === "b" || answers[q.id]?.mcq === "a").length;
+  const total = result.totalPossibleMarks;
+  const score = result.aggregateScore;
   const mm = String(Math.floor(time / 60)).padStart(2, "0");
   const ss = String(time % 60).padStart(2, "0");
 
   return (
-    <div className="mx-auto w-full max-w-[860px] px-5 pt-10 pb-20">
-      <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Exam submitted</div>
+    <div className="mx-auto w-full max-w-[860px] px-5 pt-10 pb-20 select-none">
+      <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Authoritative Evaluation</div>
       <h1 className="mb-1 text-[40px] font-bold leading-tight text-fg tabular-nums">
         {score} <span className="text-[20px] text-dim">/ {total}</span>
       </h1>
-      <p className="mb-6 text-[13px] text-dim">
-        Graded automatically by Studyus. Use the dashboard to dive into the questions you missed.
+      <p className="mb-6 text-[13.5px] text-dim">
+        Criterion-referenced result evaluated deterministically by backend. Demonstrated criterion mastery.
       </p>
 
       <div className="mb-6 grid grid-cols-3 gap-3">
         {[
-          { label: "Answered", val: `${answered}/${total}`, color: "text-fg" },
-          { label: "Time", val: `${mm}:${ss}`, color: "text-[#fcd34d]" },
-          { label: "Auto-flagged", val: questions.length - answered, color: "text-[#fca5a5]" },
+          { label: "Grading Status", val: result.status, color: "text-fg" },
+          { label: "Completion Time", val: `${mm}:${ss}`, color: "text-[#fcd34d]" },
+          { label: "Demonstrated Score", val: `${score}/${total}`, color: "text-[#86efac]" },
         ].map((m) => (
           <div key={m.label} className="rounded-md border border-edge bg-raise p-3">
-            <div className={`text-[18px] font-semibold ${m.color}`}>{m.val}</div>
+            <div className={`text-[18px] font-semibold capitalize ${m.color}`}>{m.val}</div>
             <div className="text-[11px] text-dim">{m.label}</div>
           </div>
         ))}
       </div>
 
       <div className="mb-6 overflow-hidden rounded-md border border-edge">
-        {questions.map((q, i) => {
-          const a = answers[q.id];
-          return (
-            <div key={q.id} className={i > 0 ? "border-t border-edge-soft" : ""}>
-              <div className="flex items-start gap-3 px-4 py-3">
-                <span className="w-7 shrink-0 font-mono text-[12px] text-dim">{String(i + 1).padStart(2, "0")}</span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[13px] text-fg">{q.text}</div>
-                  <div className="mt-1 font-mono text-[10.5px] text-dim">
-                    {q.format === "mcq" ? `Picked: ${a?.mcq?.toUpperCase() ?? "—"}` : `Proof: ${a?.proof ? `${a.proof.length} chars` : "—"}`}
-                  </div>
+        {result.questions.map((q, i) => (
+          <div key={q.itemId} className={i > 0 ? "border-t border-edge-soft" : ""}>
+            <div className="flex items-start gap-3 px-4 py-3">
+              <span className="w-7 shrink-0 font-mono text-[12px] text-dim">{String(i + 1).padStart(2, "0")}</span>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13px] text-fg">{q.stem}</div>
+                <div className="mt-1 font-mono text-[10.5px] text-dim">
+                  Committed: {q.committedResponse || "blank"}
                 </div>
-                <span
-                  className={`shrink-0 rounded-full px-1.5 py-[1px] font-mono text-[9.5px] ${
-                    q.format === "mcq" && a?.mcq
-                      ? a.mcq === "b" || a.mcq === "a"
-                        ? "bg-[#86efac]/15 text-[#86efac]"
-                        : "bg-[#fca5a5]/15 text-[#fca5a5]"
-                      : a?.proof
-                      ? "bg-[#86efac]/15 text-[#86efac]"
-                      : "bg-white/8 text-dim"
-                  }`}
-                >
-                  {a?.proof || a?.mcq ? "graded" : "skipped"}
-                </span>
+                {q.criteria.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {q.criteria.map((c) => (
+                      <div key={c.criterionId} className="flex items-center justify-between text-[11px] text-dim bg-black/20 px-2 py-1 rounded">
+                        <span>Criterion [{c.criterionId}]: {c.rationale}</span>
+                        <span className="font-mono text-fg font-medium">{c.awardedMark}/{c.maximumMark}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
+              <span className="shrink-0 font-mono text-[13px] font-semibold text-[#86efac]">
+                {q.awardedMarks}/{q.maximumMarks}
+              </span>
             </div>
-          );
-        })}
+          </div>
+        ))}
       </div>
 
       <div className="flex items-center gap-2">
@@ -625,10 +669,7 @@ function SubmittedView({
           Retake exam
         </button>
         <button
-          onClick={() => {
-            onNotify("Saved to Available tests");
-            onExit();
-          }}
+          onClick={onExit}
           className="rounded-md border border-edge bg-raise px-3.5 py-2 text-[13px] text-mut transition-colors hover:bg-white/[0.07] hover:text-fg"
         >
           Back to dashboard

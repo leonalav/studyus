@@ -7,8 +7,8 @@ import {
   Image as ImageIcon,
   Mic,
   Code2,
-  Volume2,
-  Sparkles,
+  AtSign,
+  X,
 } from "lucide-react";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
@@ -147,7 +147,7 @@ function MiniBlock({ block }: { block: Block }) {
   }
 }
 
-/* ══ Settings ══ */
+/* ══ Settings (Temporary Agent Endpoint section removed completely) ══ */
 
 export function SettingsPanel({
   theme,
@@ -158,8 +158,6 @@ export function SettingsPanel({
   setFontScale,
   latex,
   setLatex,
-  endpoint,
-  setEndpoint,
   onClose,
 }: {
   theme: BoardTheme;
@@ -170,8 +168,8 @@ export function SettingsPanel({
   setFontScale: (n: number) => void;
   latex: boolean;
   setLatex: (b: boolean) => void;
-  endpoint: AgentEndpoint;
-  setEndpoint: (e: AgentEndpoint) => void;
+  endpoint?: AgentEndpoint;
+  setEndpoint?: (e: AgentEndpoint) => void;
   onClose: () => void;
 }) {
   return (
@@ -231,7 +229,7 @@ export function SettingsPanel({
 
         <button
           onClick={() => setLatex(!latex)}
-          className="mb-4 flex w-full items-center gap-2.5 rounded-md border border-edge bg-raise px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07]"
+          className="flex w-full items-center gap-2.5 rounded-md border border-edge bg-raise px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07]"
         >
           <span className="flex-1">
             <span className="block text-[12.5px] text-fg">LaTeX rendering</span>
@@ -241,50 +239,6 @@ export function SettingsPanel({
             <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${latex ? "translate-x-3" : ""}`} />
           </span>
         </button>
-
-        <div className="mb-1 flex items-center justify-between">
-          <Label>Agent endpoint (temporary)</Label>
-          <span className={`rounded-full px-1.5 py-[1px] text-[9.5px] font-medium ${
-            endpoint.enabled ? "bg-accent/20 text-accent" : "bg-white/8 text-dim"
-          }`}>
-            {endpoint.enabled ? "Live" : "Off"}
-          </span>
-        </div>
-        <p className="mb-2 text-[10.5px] text-dim">
-          OpenAI-compatible chat endpoint. Used by the agent to reply in the chat box and write on the chalkboard.
-        </p>
-        <div className="mb-2 flex gap-1.5">
-          <input
-            value={endpoint.baseUrl}
-            onChange={(e) => setEndpoint({ ...endpoint, baseUrl: e.target.value })}
-            placeholder="https://api.openai.com/v1"
-            className="min-w-0 flex-1 rounded-md border border-edge bg-black/30 px-2 py-1.5 font-mono text-[10.5px] text-fg outline-none placeholder:text-dim focus:border-accent/60"
-          />
-          <button
-            onClick={() => setEndpoint({ ...endpoint, enabled: !endpoint.enabled })}
-            className={`rounded-md px-2.5 py-1.5 text-[10.5px] font-medium transition-colors ${
-              endpoint.enabled ? "bg-accent text-white" : "border border-edge bg-white/[0.06] text-mut hover:text-fg"
-            }`}
-          >
-            {endpoint.enabled ? "Disable" : "Enable"}
-          </button>
-        </div>
-        <input
-          value={endpoint.model}
-          onChange={(e) => setEndpoint({ ...endpoint, model: e.target.value })}
-          placeholder="Model (e.g. gpt-4o-mini, llama-3, etc.)"
-          className="mb-2 w-full rounded-md border border-edge bg-black/30 px-2 py-1.5 font-mono text-[10.5px] text-fg outline-none placeholder:text-dim focus:border-accent/60"
-        />
-        <input
-          type="password"
-          value={endpoint.apiKey}
-          onChange={(e) => setEndpoint({ ...endpoint, apiKey: e.target.value })}
-          placeholder="API key (kept in-session only)"
-          className="w-full rounded-md border border-edge bg-black/30 px-2 py-1.5 font-mono text-[10.5px] text-fg outline-none placeholder:text-dim focus:border-accent/60"
-        />
-        <p className="mt-2 font-mono text-[9.5px] text-dim">
-          Resets when the session ends.
-        </p>
       </div>
     </div>
   );
@@ -323,6 +277,7 @@ export interface ChatMsg {
   id: number;
   role: "tutor" | "user" | "system";
   text: string;
+  imageData?: string;
 }
 
 export function ChatDock({
@@ -335,30 +290,62 @@ export function ChatDock({
   attachments,
   onAddAttachment,
   onClearAttachments,
-  onSpeakLast,
   onInlineAction,
   agentStatus,
 }: {
   messages: ChatMsg[];
-  onSend: (t: string) => void;
+  onSend: (t: string, imgData?: string) => void;
   collapsed: boolean;
   setCollapsed: (b: boolean) => void;
   onClose: () => void;
   typing: boolean;
-  attachments: { name: string; kind: "file" | "image" | "audio" | "code" }[];
-  onAddAttachment: (kind: "file" | "image" | "audio" | "code") => void;
+  attachments: { name: string; kind: "file" | "image" | "audio" | "code"; url?: string }[];
+  onAddAttachment: (kind: "file" | "image" | "audio" | "code", name?: string, url?: string) => void;
   onClearAttachments: () => void;
   onSpeakLast: () => void;
   onInlineAction: (a: "ask-tutor" | "explain" | "example" | "redo") => void;
   agentStatus?: "idle" | "thinking" | "writing" | "error";
 }) {
   const [val, setVal] = useState("");
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [commandsMenuOpen, setCommandsMenuOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  /* draggable position — null means "use the default anchored spot" */
+  /* draggable position */
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const dragRef = useRef<{ dx: number; dy: number } | null>(null);
   const shellRef = useRef<HTMLDivElement>(null);
+
+  const toggleVoiceDictation = () => {
+    if (isRecordingVoice) {
+      setIsRecordingVoice(false);
+      onSend("Voice recording transcript");
+    } else {
+      setIsRecordingVoice(true);
+      onAddAttachment("audio", `voice-${Date.now()}.m4a`);
+    }
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const url = evt.target?.result as string;
+        onAddAttachment("image", file.name, url);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      onAddAttachment("file", file.name);
+    }
+  };
 
   const startDrag = (e: React.MouseEvent) => {
     const box = shellRef.current?.getBoundingClientRect();
@@ -398,19 +385,29 @@ export function ChatDock({
   }, [messages, typing]);
 
   const send = () => {
-    if (!val.trim()) return;
-    onSend(val.trim());
+    if (!val.trim() && attachments.length === 0) return;
+    const imgAtt = attachments.find((a) => a.kind === "image");
+    onSend(val.trim(), imgAtt?.url);
     setVal("");
+    setCommandsMenuOpen(false);
   };
+
+  const COMMAND_ITEMS = [
+    { id: "@skill", label: "@skill — Test a specific skill" },
+    { id: "@explain", label: "@explain — Explain in deeper detail" },
+    { id: "@summarize", label: "@summarize — Summarize chalkboard notes" },
+    { id: "@example", label: "@example — Show a worked example" },
+    { id: "@redo", label: "@redo — Redo the last chalkboard step" },
+  ];
 
   const attachmentsBar = (
     <div className="flex items-center gap-1.5 overflow-x-auto border-b border-white/[0.08] px-2.5 py-1.5">
       {attachments.length === 0 ? (
-        <span className="font-mono text-[9.5px] text-white/30">No attachments · use the row below to add a file, image, voice or code</span>
+        <span className="font-mono text-[9.5px] text-white/30">No attachments · click File, Image, Voice or Commands below</span>
       ) : (
         <>
           {attachments.map((a, i) => (
-            <span key={i} className="flex items-center gap-1 rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[9.5px] text-white/75">
+            <span key={i} className="flex items-center gap-1.5 rounded bg-white/[0.07] px-2 py-1 font-mono text-[10px] text-white/85">
               <span className="h-1.5 w-1.5 rounded-full bg-accent" />
               {a.name}
             </span>
@@ -424,31 +421,69 @@ export function ChatDock({
   );
 
   const multimodalRow = (
-    <div className="flex items-center gap-0.5 px-2 py-1">
-      <MMButton onClick={() => onAddAttachment("file")} title="Attach a file" label="File">
+    <div className="relative flex items-center gap-0.5 px-2 py-1">
+      <input
+        ref={fileInputRef}
+        type="file"
+        hidden
+        onChange={handleFileUpload}
+      />
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={handleImageUpload}
+      />
+
+      <MMButton onClick={() => fileInputRef.current?.click()} title="Attach a file" label="File">
         <Paperclip size={13} />
       </MMButton>
-      <MMButton onClick={() => onAddAttachment("image")} title="Attach an image" label="Image">
+      <MMButton onClick={() => imageInputRef.current?.click()} title="Attach an image" label="Image">
         <ImageIcon size={13} />
       </MMButton>
-      <MMButton onClick={() => onAddAttachment("audio")} title="Voice input" label="Voice">
-        <Mic size={13} />
+      <MMButton onClick={toggleVoiceDictation} title="Voice input / Dictation" label="Voice">
+        <Mic size={13} className={isRecordingVoice ? "text-accent animate-pulse" : ""} />
       </MMButton>
-      <MMButton onClick={() => onAddAttachment("code")} title="Paste a code snippet" label="Code">
+      <MMButton onClick={() => onAddAttachment("code", `code-${Date.now()}.py`)} title="Paste code snippet" label="Code">
         <Code2 size={13} />
       </MMButton>
       <span className="mx-1 h-4 w-px bg-white/8" />
-      <MMButton onClick={() => onInlineAction("ask-tutor")} title="Ask the tutor to expand on the board" label="Ask">
-        <Sparkles size={13} />
+
+      {/* Commands button with @ icon */}
+      <MMButton onClick={() => setCommandsMenuOpen((v) => !v)} title="Insert command" label="Commands">
+        <AtSign size={13} className="text-accent" />
       </MMButton>
-      <MMButton onClick={onSpeakLast} title="Read the last tutor answer aloud" label="Read">
-        <Volume2 size={13} />
-      </MMButton>
+
+      {/* Commands Floating Menu with EXACT AI Response Glassmorphism */}
+      {commandsMenuOpen && (
+        <div className="anim-toast absolute bottom-full left-0 mb-2.5 w-[260px] overflow-hidden rounded-md border border-white/8 bg-[#343436]/58 p-1.5 shadow-[0_12px_32px_rgba(0,0,0,0.25)] backdrop-blur-md z-50">
+          <div className="mb-1 border-b border-white/[0.08] px-2.5 py-1 flex items-center justify-between">
+            <span className="font-mono text-[9.5px] uppercase tracking-wider text-white/50">Commands (@)</span>
+            <button onClick={() => setCommandsMenuOpen(false)} className="text-white/40 hover:text-white transition-colors">
+              <X size={11} />
+            </button>
+          </div>
+          <div className="space-y-0.5">
+            {COMMAND_ITEMS.map((cmd) => (
+              <button
+                key={cmd.id}
+                onClick={() => {
+                  setVal((prev) => `${prev} ${cmd.id} `.trimStart());
+                  setCommandsMenuOpen(false);
+                }}
+                className="flex w-full items-center rounded px-2.5 py-1.5 text-left font-mono text-[11px] text-white/85 transition-colors hover:bg-white/10 hover:text-white"
+              >
+                {cmd.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 
-  /* Collapsed = only the thin bar. It stays collapsed while typing;
-     only the Chat button expands it. */
+  /* Collapsed = only the thin bar */
   if (collapsed) {
     return (
       <div ref={shellRef} className={shellClass} style={shellStyle}>
@@ -490,8 +525,29 @@ export function ChatDock({
 
   return (
     <div ref={shellRef} className={shellClass} style={shellStyle}>
+      {/* Floating Pill Window for Active Voice Soundwaves */}
+      {isRecordingVoice && (
+        <div className="anim-toast absolute -top-12 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 rounded-full border border-accent/40 bg-[#1c1c1e]/95 px-4 py-2 shadow-2xl backdrop-blur-md">
+          <span className="h-2.5 w-2.5 rounded-full bg-accent animate-ping" />
+          <span className="font-mono text-[11px] font-medium text-fg">Listening…</span>
+          <div className="flex items-center gap-1 h-4">
+            <span className="h-3 w-1 rounded bg-accent animate-bounce" style={{ animationDelay: "0ms" }} />
+            <span className="h-4 w-1 rounded bg-accent animate-bounce" style={{ animationDelay: "150ms" }} />
+            <span className="h-2 w-1 rounded bg-accent animate-bounce" style={{ animationDelay: "300ms" }} />
+            <span className="h-4 w-1 rounded bg-accent animate-bounce" style={{ animationDelay: "450ms" }} />
+            <span className="h-2.5 w-1 rounded bg-accent animate-bounce" style={{ animationDelay: "600ms" }} />
+          </div>
+          <button
+            onClick={toggleVoiceDictation}
+            className="ml-1 rounded-full bg-white/10 px-2 py-0.5 font-mono text-[9.5px] text-white hover:bg-white/20"
+          >
+            Done
+          </button>
+        </div>
+      )}
+
       <div className="anim-toast overflow-hidden rounded-md border border-white/8 bg-[#343436]/58 shadow-[0_12px_32px_rgba(0,0,0,0.25)]">
-        {/* compact title bar — drag handle */}
+        {/* compact title bar */}
         <div
           onMouseDown={startDrag}
           className="flex h-8 cursor-grab items-center gap-2 border-b border-white/[0.08] px-2.5 active:cursor-grabbing"
@@ -500,16 +556,6 @@ export function ChatDock({
           <div className="mx-auto max-w-[280px] flex-1 truncate rounded bg-white/[0.07] px-2 py-1 text-center font-mono text-[8.5px] text-white/52">
             Ask anything about the shared chalkboard
           </div>
-          {pos && (
-            <button
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={() => setPos(null)}
-              className="rounded px-1 py-0.5 font-mono text-[9px] text-white/35 transition-colors hover:bg-white/10 hover:text-white"
-              title="Snap back to the top"
-            >
-              reset
-            </button>
-          )}
           <button
             onMouseDown={(e) => e.stopPropagation()}
             onClick={() => setCollapsed(true)}
@@ -529,11 +575,6 @@ export function ChatDock({
 
         {/* message stream */}
         <div className="max-h-[210px] space-y-2 overflow-y-auto px-3 py-2.5">
-          {messages.length === 0 && (
-              <p className="text-[10.5px] leading-relaxed text-white/40">
-              Ask about anything on the board. Answers stay here — writing happens on the chalkboard.
-            </p>
-          )}
           {messages.map((m) => {
             if (m.role === "system") {
               return (
@@ -544,10 +585,17 @@ export function ChatDock({
             }
             if (m.role === "user") {
               return (
-                <div key={m.id} className="anim-msg">
-                  <div className="mb-0.5 text-right text-[8.5px] uppercase tracking-[0.12em] text-white/30">You</div>
+                <div key={m.id} className="anim-msg space-y-1">
+                  <div className="text-right text-[8.5px] uppercase tracking-[0.12em] text-white/30">You</div>
                   <div className="ml-auto max-w-[90%] rounded bg-white/[0.07] px-2 py-1.5 text-[10.5px] leading-relaxed text-white/82">
                     {m.text}
+                    {m.imageData && (
+                      <img
+                        src={m.imageData}
+                        alt="User uploaded attachment"
+                        className="mt-2 max-w-full rounded-md object-contain max-h-[160px] border border-white/10"
+                      />
+                    )}
                   </div>
                 </div>
               );
@@ -586,16 +634,21 @@ export function ChatDock({
           <div className="flex items-center gap-2 px-2.5 pb-2">
             <input
               value={val}
-              onChange={(e) => setVal(e.target.value)}
+              onChange={(e) => {
+                setVal(e.target.value);
+                if (e.target.value.endsWith("@")) {
+                  setCommandsMenuOpen(true);
+                }
+              }}
               onKeyDown={(e) => e.key === "Enter" && send()}
-              placeholder="what if I want to…"
+              placeholder="what if I want to… (type @ for commands)"
               className="min-w-0 flex-1 rounded bg-black/15 px-2 py-1.5 text-[10px] text-white outline-none placeholder:text-white/30"
             />
             <button
               onClick={send}
-              disabled={!val.trim()}
+              disabled={!val.trim() && attachments.length === 0}
               className={`rounded px-2.5 py-1.5 text-[9.5px] font-medium transition-all ${
-                val.trim() ? "bg-white text-black active:scale-95" : "bg-white/10 text-white/30"
+                val.trim() || attachments.length > 0 ? "bg-white text-black active:scale-95" : "bg-white/10 text-white/30"
               }`}
             >
               Submit

@@ -324,17 +324,8 @@ export function Chalkboard({
       >
         <div className="space-y-7">
           {board.blocks.length === 0 && (
-            <div className="anim-chalk max-w-[640px]" style={{ opacity: 0.75 }}>
+            <div className="anim-chalk max-w-[640px]" style={{ opacity: 0.85 }}>
               <div style={{ fontSize: 34, lineHeight: 1.25 }}>{board.title}</div>
-              <p className="mt-3" style={{ fontSize: 17, lineHeight: 1.6, opacity: 0.7 }}>
-                Empty chalkboard. Ask the tutor a question in the chat — the agent
-                will write equations, diagrams and graphs here as it explains.
-              </p>
-              <ul className="mt-3 space-y-1.5" style={{ fontSize: 15, opacity: 0.55 }}>
-                <li>— configure a model in Settings first</li>
-                <li>— then type a question in the chat box</li>
-                <li>— the agent replies + writes on the board</li>
-              </ul>
             </div>
           )}
 

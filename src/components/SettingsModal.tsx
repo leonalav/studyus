@@ -1075,6 +1075,41 @@ function Models({
         </>
       ) : (
         <>
+      <GroupLabel>Three Assignable Agent Roles</GroupLabel>
+      <div className="mb-3 space-y-2 rounded-md border border-white/8 bg-white/[0.03] p-3">
+        {[
+          { role: "tutor", label: "Role 1: Socratic Tutor Agent", desc: "Chalkboard explanations, diagrams, progressive hints" },
+          { role: "generation", label: "Role 2: Test Generation Agent", desc: "Creates grounded assessment items & rubrics" },
+          { role: "evaluator", label: "Role 3: Test Evaluator Agent", desc: "Analytic rubric grading & explanation gate evaluation" },
+        ].map((r) => (
+          <div key={r.role} className="flex items-center justify-between border-b border-white/6 pb-2 last:border-0 last:pb-0">
+            <div>
+              <div className="text-[12px] font-medium text-fg">{r.label}</div>
+              <div className="text-[10.5px] text-dim">{r.desc}</div>
+            </div>
+            <span className="rounded-full bg-accent/15 px-2 py-0.5 font-mono text-[10px] text-accent">
+              Bound
+            </span>
+          </div>
+        ))}
+
+        <button
+          onClick={() => {
+            const activeEp = endpoints.find((e) => e.active) || endpoints[0];
+            void import("../lib/llm").then((m) => {
+              m.bindAllModelRoles({
+                provider: activeEp.provider as any,
+                baseUrl: activeEp.baseUrl,
+                modelId: activeEp.model,
+              });
+            });
+          }}
+          className="w-full mt-2 rounded bg-accent/20 border border-accent/40 py-1.5 text-[11.5px] font-medium text-accent hover:bg-accent/30 transition-colors"
+        >
+          Single action: Assign active model to all 3 roles
+        </button>
+      </div>
+
       <GroupLabel>Saved endpoints</GroupLabel>
       <div className="mb-2 space-y-1.5">
         {endpoints.filter((e) => e.provider !== "studyus").map((e) => (
@@ -1097,6 +1132,26 @@ function Models({
                 {e.model} · {e.baseUrl} · key: {e.keyMasked}
               </div>
             </div>
+            <button
+              onClick={() => {
+                void import("../lib/llm").then((m) => {
+                  m.testModelEndpoint({
+                    provider: e.provider as any,
+                    baseUrl: e.baseUrl,
+                    modelId: e.model,
+                  }).then((res) => {
+                    if (res.reachable && res.modelAvailable) {
+                      alert(`Test connection success: Model ${e.model} is reachable and available.`);
+                    } else {
+                      alert(`Test connection failure: ${res.error || "Could not reach endpoint."}`);
+                    }
+                  });
+                });
+              }}
+              className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut transition-colors hover:bg-white/[0.12] hover:text-fg"
+            >
+              Test
+            </button>
             {!e.active && (
               <button
                 onClick={() => activateEndpoint(e.id)}
