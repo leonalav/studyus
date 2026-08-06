@@ -11,7 +11,7 @@ import { STUDYUS_PYTHON_PACK, CUSTOM_DETECTORS } from "../../pack/studyus-python
 const pack = STUDYUS_PYTHON_PACK;
 const forRange = pack.templates.find((t) => t.id === "py.loops.for-range.accumulate.v1")!;
 const misconceptions = pack.misconceptions.filter((m) =>
-  ["range-includes-upper", "range-starts-at-one"].includes(m.id),
+  ["range-includes-upper", "range-starts-at-one", "desc-excludes-start"].includes(m.id),
 );
 
 describe("12.1 Predict — normalization", () => {
@@ -37,6 +37,15 @@ describe("12.1 Predict — normalization", () => {
     expect(judgement.outcome.kind).toBe("incorrect");
     expect(judgement.matchedMisconception).toBe("range-includes-upper");
     expect(judgement.confidence).toBe("exact");
+  });
+
+  it("a descending-range misread (dropping the first value) matches desc-excludes-start", () => {
+    const descend = pack.templates.find((t) => t.id === "py.loops.for-range.descend.v1")!;
+    const exercise = buildExercise(pack, descend, "predict", { n: 5, base: 0, label: "total" }, 9, "none")!;
+    // expected 15; predicting 10 means range(5, 0, -1) was assumed to skip the 5
+    const judgement = gradePredict(exercise, { kind: "text", text: "10" }, misconceptions, CUSTOM_DETECTORS);
+    expect(judgement.outcome.kind).toBe("incorrect");
+    expect(judgement.matchedMisconception).toBe("desc-excludes-start");
   });
 });
 

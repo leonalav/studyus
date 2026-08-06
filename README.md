@@ -32,11 +32,12 @@ Rules that hold in the code, enforced by tests:
 
 ```bash
 npm install
-npm run dev        # local dev server
-npm test           # vitest — law-enforcement tests included
-npm run typecheck  # strict TypeScript
-npm run check:deps # Law 9 + §18 dependency rules
-npm run build      # production single-file build
+npm run dev               # local dev server
+npm test                  # vitest — law-enforcement tests included
+npm run typecheck         # strict TypeScript
+npm run check:deps        # Law 9 + §18 dependency rules
+npm run validate:content  # §11 validation chain, per-filter table
+npm run build             # production single-file build
 ```
 
 Open the app, pick a Programming curriculum (sidebar or session card), and the cold open

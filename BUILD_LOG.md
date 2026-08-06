@@ -98,9 +98,9 @@ OK: no HTTP calls in src/
   (unique IDs, prerequisite cycles named, referenced misconceptions/templates, parameter
   space ≥ 200) emitting ALL errors at once.
 - `src/pack/studyus-python.ts` — the shipped pack: 7 Tier 1 skills forming one connected
-  DAG (variables → conditionals/loops/functions → lists → strings/dicts), 8 parameterized
-  templates with all four beats (variables carries two templates, so the §10.3
-  template-switch path is live content, not only a test), 11 misconceptions with
+  DAG (variables → conditionals/loops/functions → lists → strings/dicts), 9 parameterized
+  templates with all four beats (variables and loops each carry two templates, so the
+  §10.3 template-switch path is live content, not only a test), 12 misconceptions with
   detectors, 2 Tier 3 readings.
 
 ### What I did NOT build, and why
@@ -127,6 +127,7 @@ py.vars.assignment.rebind.v1: 243
 py.vars.assignment.chain.v1:  729
 py.cond.if-else.threshold.v1: 240
 py.loops.for-range.accumulate.v1: 546
+py.loops.for-range.descend.v1: 420
 py.funcs.def-return.scale.v1: 704
 py.lists.grow.append.v1: 729
 py.strings.methods.new-string.v1: 240
@@ -321,7 +322,8 @@ prints `2`). The generator simply draws another binding; such instances are neve
   No grading, selection, mastery arithmetic, fade decisions, or tier logic anywhere in
   `src/components` — the §15.4 contract.
 - Cold open: the Appendix B program (`range(4)` accumulator), one question, no menu, no
-  dashboard, no welcome. Rendered synchronously from embedded pack data.
+  dashboard, no welcome. Rendered synchronously from embedded pack data. Ctrl/Cmd+Enter
+  commits from any text field — §15.3's 90-second sessions should not require the mouse.
 - Beats 1 and 4 ship together; the app was never read-only at any commit.
 - Capability map with locked/open/in-progress/mastered states, readings, the two local
   signals, runtime honesty lines, export and reset.
@@ -397,10 +399,34 @@ prints `2`). The generator simply draws another binding; such instances are neve
 
 ### What I built
 - The first arc: variables → conditionals → loops → functions → lists → strings → dicts,
-  each skill with all four beats, misconceptions, recorded traces, and ≥ 4 hidden tests on
-  every Write beat. The capability map shows one connected DAG with no orphan skills.
+  each skill with all four beats, misconceptions (12 total), recorded traces, and ≥ 4
+  hidden tests on every Write beat. The capability map shows one connected DAG with no
+  orphan skills. Variables and loops each carry two templates (chained rebindings;
+  descending accumulation with its own `desc-excludes-start` misconception), so the §10.3
+  template-switch path is live content on the two most-repeated skills.
 - Two Tier 3 readings (model-choice judgement; automation trade-offs) delivered ungated
   with the disclaimer spoken out loud, revisited weekly.
+- `npm run validate:content` — the §15.1 `content validate <pack>` command as a script
+  (`scripts/validate-content.ts`): runs the whole §11 chain over every template × a sample
+  of bindings and prints the per-filter table with pack attribution. Output at 50 samples:
+
+```
+pack validation: 0 errors — 7 skills, 9 templates
+
+template                              space   accepted/50   rejected by filter
+────────────────────────────────────────────────────────────────────────────────────
+py.vars.assignment.rebind.v1          243       46/50     non-triviality:4
+py.vars.assignment.chain.v1           729       46/50     non-triviality:4
+py.cond.if-else.threshold.v1          240       50/50     —
+py.loops.for-range.accumulate.v1      546       50/50     —
+py.loops.for-range.descend.v1         420       50/50     —
+py.funcs.def-return.scale.v1          704       50/50     —
+py.lists.grow.append.v1               729       50/50     —
+py.strings.methods.new-string.v1      240       50/50     —
+py.dicts.count.update.v1              1215      50/50     —
+────────────────────────────────────────────────────────────────────────────────────
+total: 442/450 accepted · seed 3 · trivial instances are rejected on purpose and never served
+```
 
 ### Test results
 ```
@@ -418,14 +444,14 @@ prints `2`). The generator simply draws another binding; such instances are neve
  ✓ src/core/__tests__/properties.test.ts              (7 property tests, fast-check)
  ✓ src/core/__tests__/reveal-barrier.test.ts          (7 tests)
  ✓ src/core/__tests__/mastery.test.ts                 (13 tests)
- ✓ src/core/__tests__/grading.test.ts                 (8 tests)
+ ✓ src/core/__tests__/grading.test.ts                 (9 tests)
  ✓ src/core/__tests__/voice.test.ts                   (4 tests)
  ✓ src/core/__tests__/snapshots.test.ts               (5 snapshots)
  ✓ src/components/code/__tests__/tutor-smoke.test.tsx (3 tests)
  ✓ src/components/code/__tests__/tutor-flow.test.tsx  (4 tests)
 
  Test Files  10 passed (10)
-      Tests  80 passed (80)
+      Tests  81 passed (81)
 ```
 
 The component suites drive the real React binding through commit → reveal →
@@ -472,10 +498,10 @@ Write-beat grading is the weakest link by construction (a browser cannot execute
 Tier 3 has two readings.
 
 **What I would do next:** (1) tune BKT and the partial-pass threshold against real
-learners; (2) widen variety — variables now carries two templates (the switch path is
-live), the remaining skills would each take a second; (3) build M9 ingestion behind a
-real PDF parser; (4) a surface with an interpreter (desktop shell) where beat 4 becomes
-truly execution-graded — the core needs no changes for that.
+learners; (2) widen variety — variables and loops now carry two templates each (the
+switch path is live), the remaining skills would each take a second; (3) build M9
+ingestion behind a real PDF parser; (4) a surface with an interpreter (desktop shell)
+where beat 4 becomes truly execution-graded — the core needs no changes for that.
 
 **The one thing most likely to be wrong:** the frontier selection rule. It is my addition,
 not the plan's text; it fixes a real stall I measured, but it changes how beats interleave

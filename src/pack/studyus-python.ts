@@ -75,6 +75,13 @@ export const MISCONCEPTIONS: Misconception[] = [
     help: "range(n) starts at 0. If the accumulator starts somewhere else, the first value added is still 0.",
   },
   {
+    id: "desc-excludes-start",
+    name: "descending range assumed to skip its first value",
+    detector: { kind: "custom", name: "desc-misses-first" },
+    remediation: "range-upper-exclusive",
+    help: "range(n, 0, -1) starts AT n and stops before 0 — the first value is always included; only the stop value is excluded.",
+  },
+  {
     id: "returns-none",
     name: "expects the call itself to be printed",
     detector: { kind: "exact-response", value: "None" },
@@ -148,6 +155,12 @@ export const CUSTOM_DETECTORS: CustomDetectorRegistry = {
     const fromOne = (n * (n + 1)) / 2;
     return num(text) === fromOne && num(expected.text) !== fromOne;
   },
+  "desc-misses-first": (text, expected, p) => {
+    if (expected.kind !== "stdout" || !("base" in p)) return false;
+    const got = num(text);
+    const exp = num(expected.text);
+    return got !== null && exp !== null && exp - got === Number(p.n);
+  },
   "append-gives-list": (text, _expected, p) => {
     const list = `[${p.a}, ${p.b}, ${p.c}]`;
     const lines = text.trim().replace(/\r/g, "").split("\n").map((l) => l.trim());
@@ -214,7 +227,7 @@ export const SKILLS: Skill[] = [
     tier: 1,
     prerequisites: ["py.vars.assignment"],
     concepts: ["iteration", "accumulator", "range"],
-    misconceptions: ["range-includes-upper", "range-starts-at-one"],
+    misconceptions: ["range-includes-upper", "range-starts-at-one", "desc-excludes-start"],
     pack: PACK_ID,
     beats: ["predict", "explain", "modify", "write"],
   }),
@@ -559,6 +572,83 @@ const templates: Template[] = [
         { id: "prints-once", label: "prints exactly one line", test: (s) => countOccurrences(s, /print\s*\(/g) === 1 },
       ],
       referenceSolution: "n = int(input())\ntotal = 0\nfor i in range(1, n + 1):\n    total += i\nprint(total)",
+    },
+  },
+
+  /* 3b · loops — descending accumulation (second template, varied angle) */
+  {
+    id: "py.loops.for-range.descend.v1",
+    skill: "py.loops.for-range",
+    tier: 1,
+    params: {
+      n: { kind: "int", min: 2, max: 15 },
+      base: { kind: "int", min: 0, max: 9 },
+      label: { kind: "choice", of: ["total", "sum_so_far", "running"] },
+    },
+    predict: {
+      program: "{{label}} = {{base}}\nfor i in range({{n}}, 0, -1):\n    {{label}} += i\nprint({{label}})",
+      questionText: "What does this print?",
+      reference: (b): ReferenceResult => {
+        const n = Number(b.n);
+        const base = Number(b.base);
+        const label = String(b.label);
+        let acc = base;
+        const trace: TraceStep[] = [step(1, { [label]: String(acc) }, [])];
+        for (let i = n; i >= 1; i -= 1) {
+          acc += i;
+          trace.push(step(3, { i: String(i), [label]: String(acc) }, [], i === 1 ? `range(${n}, 0, -1) stops before 0` : undefined));
+        }
+        trace.push(step(4, { [label]: String(acc) }, [String(acc)]));
+        return { stdout: String(acc), trace };
+      },
+      choices: (b) => {
+        const n = Number(b.n);
+        const base = Number(b.base);
+        const value = base + (n * (n + 1)) / 2;
+        const options = [String(value), String(value - n), String(value + 1), String(base)];
+        return [...new Set(options)].slice(0, 4).map((text, i) => ({ id: String.fromCharCode(97 + i), text }));
+      },
+    },
+    explain: {
+      rubric: (b): Rubric => {
+        const n = Number(b.n);
+        return {
+          groups: [
+            { oneOf: ["adds", "sums", "accumulates", "totals"] },
+            { oneOf: ["down", "descending", "backwards", "counts down", `${n} to 1`, "reverse"] },
+            { oneOf: ["prints", "total", "result"] },
+          ],
+          mustNotInclude: ["prints each", "one at a time"],
+          exemplar: `It adds up the numbers from ${n} down to 1 and prints the total.`,
+        };
+      },
+    },
+    modify: {
+      programWithHoles: "{{label}} = 0\nfor i in range({{n}}, ___, -1):\n    {{label}} += i\nprint({{label}})",
+      holes: () => [{ id: "stop", accept: ["0"] }],
+      targetBehaviour: "Sum the numbers from 1 to {{n}} inclusive, counting downwards.",
+      stdout: (b) => String((Number(b.n) * (Number(b.n) + 1)) / 2),
+    },
+    write: {
+      specification:
+        "Write a program that reads an integer n from input and prints the sum of all integers from n down to 0, using a loop that counts downwards. Print nothing else.",
+      signatureHint: "range(n, -1, -1) visits exactly the numbers n … 0.",
+      hiddenTests: (): HiddenTest[] => [
+        { stdin: "5", stdout: "15" },
+        { stdin: "1", stdout: "1" },
+        { stdin: "0", stdout: "0" },
+        { stdin: "100", stdout: "5050" },
+      ],
+      checks: [
+        { id: "reads", label: "reads an integer n from input", test: (s) => /int\s*\(\s*input\s*\(/.test(s) },
+        {
+          id: "descends",
+          label: "counts downwards with a negative step (or uses a closed-form sum)",
+          test: (s) => /range\s*\([^)]*-1\s*\)/.test(s) || /n\s*\*\s*\(\s*n\s*\+\s*1\s*\)/.test(s),
+        },
+        { id: "prints-once", label: "prints exactly one line", test: (s) => countOccurrences(s, /print\s*\(/g) === 1 },
+      ],
+      referenceSolution: "n = int(input())\ntotal = 0\nfor i in range(n, -1, -1):\n    total += i\nprint(total)",
     },
   },
 

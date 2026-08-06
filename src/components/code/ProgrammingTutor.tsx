@@ -191,6 +191,14 @@ function CommitForm({
     }
   };
 
+  // §15.3 sessions are short: Ctrl/Cmd+Enter commits without leaving the keyboard
+  const onKeyCommit = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      commit();
+    }
+  };
+
   return (
     <div className={`mx-auto grid w-full gap-4 ${body.kind === "write" ? "lg:grid-cols-[minmax(0,1fr)_360px]" : "lg:grid-cols-[300px_minmax(0,1fr)_340px]"}`}>
       {/* left — the task, and nothing else before commitment */}
@@ -234,7 +242,7 @@ function CommitForm({
       </div>
 
       {/* middle — the program (or the blank page) */}
-      <div className="flex min-h-[280px] flex-col rounded-lg border border-edge bg-[#141414]">
+      <div onKeyDown={onKeyCommit} className="flex min-h-[280px] flex-col rounded-lg border border-edge bg-[#141414]">
         <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
           <Terminal size={11} className="text-dim" />
           <span className="font-mono text-[10px] uppercase tracking-wider text-dim">
