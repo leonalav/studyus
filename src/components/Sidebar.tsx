@@ -198,7 +198,7 @@ export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab, onO
                   if (isProgrammingCurriculum(c)) onOpenProgramming(title);
                   else onOpenTab({ id: `cur-${c.id}`, title, kind: "curriculum" });
                 }}
-                title={isProgrammingCurriculum(c) ? `${c.meta} · opens Parsons` : c.meta}
+                title={isProgrammingCurriculum(c) ? `${c.meta} · opens the programming tutor` : c.meta}
                 className="group flex w-full items-center gap-1.5 rounded-[4px] px-2 py-[5px] text-left text-mut transition-colors hover:bg-white/[0.055] hover:text-fg"
               >
                 <GraduationCap size={14} className={`shrink-0 ${isProgrammingCurriculum(c) ? "text-[#fcd34d]" : "text-dim"}`} />
@@ -207,7 +207,7 @@ export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab, onO
               </button>
             ))}
             <p className="px-2 py-1 font-mono text-[9.5px] leading-relaxed text-dim">
-              <span className="text-[#fcd34d]">P</span> programming curricula open the Parsons suite
+              <span className="text-[#fcd34d]">P</span> programming curricula open the commit-before-reveal tutor
             </p>
             <input
               ref={fileRef}

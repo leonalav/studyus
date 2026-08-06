@@ -720,7 +720,7 @@ function ContextPicker({
               </div>
               {subject === "programming" && (
                 <div className="mx-2 mb-1 rounded border border-[#fcd34d]/20 bg-[#fcd34d]/[0.05] px-2 py-1.5 text-[10.5px] leading-relaxed text-[#fcd34d]/80">
-                  Choose a curriculum to jump into Parsons problems · no kernel
+                  Choose a curriculum to open the programming tutor — commit before reveal
                 </div>
               )}
               <div className="max-h-[220px] overflow-y-auto p-1 pt-0">
@@ -735,7 +735,7 @@ function ContextPicker({
                       setDoc(d.id);
                       setOpen(false);
                       if (d.subject === "programming") {
-                        notify("Opening the Parsons suite — no kernel needed");
+                        notify("Opening the programming tutor — nothing revealed until you commit");
                         onOpenProgramming(title);
                       } else {
                         notify(`Context set to ${title}`);

@@ -9,7 +9,7 @@ import { SearchModal } from "./components/SearchModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { TabContent, encodeTestTabId, type TestParams } from "./components/TabContent";
 import { StudyRoom } from "./components/board/StudyRoom";
-import { PredictionTrainer, type TrainerMode } from "./components/code/PredictionTrainer";
+import { ProgrammingTutor } from "./components/code/ProgrammingTutor";
 import { buildBoard, detectDomain, type BoardDoc } from "./data/boards";
 import { SUBJECTS, type SubjectId } from "./data/tutor";
 
@@ -29,7 +29,6 @@ export default function App() {
   const [subjectId] = useState<SubjectId>("physics");
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [board, setBoard] = useState<BoardDoc | null>(null);
-  const [trainerMode, setTrainerMode] = useState<TrainerMode>("all");
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -52,17 +51,15 @@ export default function App() {
   }, []);
 
   const startPrep = useCallback((prompt: string) => {
-    setTrainerMode("all");
     setBoard(buildBoard(detectDomain(prompt), prompt));
   }, []);
 
-  // Programming curricula open the focused, no-kernel Parsons path directly.
-  // Keeping this as a separate entry point makes the curriculum choice feel like
-  // a route, rather than another generic chalkboard prompt.
+  // Programming curricula open the commit-before-reveal tutor directly.
+  // Keeping this as a separate entry point makes the curriculum choice feel
+  // like a route, rather than another generic chalkboard prompt.
   const openProgramming = useCallback((curriculum: string) => {
-    setTrainerMode("parsons");
     setBoard(buildBoard("programming", curriculum));
-    notify(`Opening Parsons suite · ${curriculum}`);
+    notify(`Opening the programming tutor · ${curriculum}`);
   }, [notify]);
 
   const openTab = useCallback((incoming: { id: string; title: string; kind: Tab["kind"] }) => {
@@ -133,7 +130,7 @@ export default function App() {
     [tabs, activeTabId]
   );
 
-  /* ── Programming gets the prediction trainer, not a chalkboard ── */
+  /* ── Programming gets the commit-before-reveal tutor, not a chalkboard ── */
   if (board && board.domain === "programming") {
     return (
       <div className="ambient flex h-screen w-screen flex-col overflow-hidden">
@@ -141,25 +138,18 @@ export default function App() {
           <button
             onClick={() => {
               setBoard(null);
-              setTrainerMode("all");
-              notify("Left the trainer");
+              notify("Left the tutor");
             }}
             className="rounded-md border border-edge bg-raise px-2.5 py-1 text-[12px] text-mut transition-colors hover:bg-white/[0.07] hover:text-fg"
           >
             ← Back
           </button>
-          <span className="text-[13px] font-semibold text-fg">
-            Programming · {trainerMode === "parsons" ? "Parsons suite" : "Prediction trainer"}
-          </span>
+          <span className="text-[13px] font-semibold text-fg">Programming · commit before reveal</span>
           <span className="ml-auto font-mono text-[10px] uppercase tracking-wider text-dim">
-            no kernel · precomputed
+            precomputed · local-only
           </span>
         </div>
-        <PredictionTrainer
-          onNotify={notify}
-          curriculum={board.subtitle}
-          initialMode={trainerMode}
-        />
+        <ProgrammingTutor onNotify={notify} curriculum={board.subtitle} />
         <Toasts items={toasts} />
       </div>
     );

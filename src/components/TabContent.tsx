@@ -120,7 +120,7 @@ function CurriculumTab({
           }`}
         >
           <Sparkles size={13} />
-          {doc.subject === "programming" ? "Open Parsons suite" : "Study with Studyus"}
+          {doc.subject === "programming" ? "Open the programming tutor" : "Study with Studyus"}
         </button>
         <button
           onClick={() => onNotify("Downloaded PDF")}
