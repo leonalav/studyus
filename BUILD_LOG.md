@@ -20,13 +20,17 @@ API* — is preserved and CI-enforced.
   "Lumina" per instruction, plus the §19-required record of the deferred second frontend.
 - `BUILD_LOG.md` (this file).
 - Vitest added as the test runner (`vitest.config.ts`, `npm test`).
-- `scripts/check-deps.sh` + `.github/workflows/ci.yml` running typecheck, tests, the
-  dependency checks, and a build.
+- `scripts/check-deps.sh` plus npm scripts running typecheck, tests, the dependency
+  checks, and a build (see the note below on the CI workflow file).
 
 ### What I did NOT build, and why
 - `rust-toolchain.toml` / Cargo workspace: this repository is a Vite + React + TypeScript
   app; the MSRV concept maps to the Node 22 / TS strict setup already here.
 - No `fmt`/`clippy` equivalents are wired beyond `tsc --noEmit` (strict, noUnusedLocals).
+- `.github/workflows/ci.yml` was written but could not be pushed: this environment's
+  GitHub App token lacks the `workflows` permission (push refused). The identical checks
+  live in `npm run typecheck && npm test && npm run check:deps && npm run build` and
+  `scripts/check-deps.sh`, ready for any CI to call.
 
 ### Decisions I made that this prompt did not specify
 - The dependency-rule CI check greps `src/core` and `src/pack` for React/DOM imports and
