@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Settings,
   ChevronRight,
@@ -20,6 +20,8 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onNotify: (t: string) => void;
+  /** Section to land on when opened (e.g. routed from search). Defaults to root. */
+  initialSection?: Section;
 }
 
 type Section = "root" | "about" | "appearance" | "tutor" | "notifications" | "models";
@@ -31,6 +33,13 @@ const SECTIONS: { id: Section; label: string; desc: string }[] = [
   { id: "notifications", label: "Notifications", desc: "Reminders, streaks and summaries" },
   { id: "models", label: "Model configuration", desc: "Official models or your own endpoints" },
 ];
+
+/** Exposes the real settings catalog to the search index, minus the synthetic
+ *  "root" entry. Used by buildSearchIndex so search rows map 1:1 to a section
+ *  the Settings modal can actually open. */
+export function getSettingsSections(): { id: string; label: string; desc: string }[] {
+  return SECTIONS.map((s) => ({ id: s.id, label: s.label, desc: s.desc }));
+}
 
 /* ══════════════════════════════════════════════════════════════
    NOTIFICATIONS
@@ -169,47 +178,21 @@ const PRESETS: TutorStyle[] = [
 interface Endpoint {
   id: string;
   label: string;
-  provider: "studyus" | "openai" | "anthropic" | "custom";
+  provider: "openai" | "anthropic" | "custom";
   baseUrl: string;
   model: string;
   keyMasked: string;
   active: boolean;
 }
-const DEFAULT_ENDPOINTS: Endpoint[] = [
-  {
-    id: "studyus",
-    label: "Studyus (default)",
-    provider: "studyus",
-    baseUrl: "https://api.studyus.ai/v1",
-    model: "studyus-tutor-3",
-    keyMasked: "included",
-    active: true,
-  },
-  {
-    id: "gpt",
-    label: "OpenAI GPT-4o",
-    provider: "openai",
-    baseUrl: "https://api.openai.com/v1",
-    model: "gpt-4o",
-    keyMasked: "sk-•••••4a71",
-    active: false,
-  },
-  {
-    id: "claude",
-    label: "Anthropic Claude 3.5",
-    provider: "anthropic",
-    baseUrl: "https://api.anthropic.com/v1",
-    model: "claude-3-5-sonnet",
-    keyMasked: "sk-ant-•••2c9",
-    active: false,
-  },
-];
+/* No preset endpoints — the list is populated from bindings the user actually
+   configures. The "studyus" provider does not exist as a real service. */
+const DEFAULT_ENDPOINTS: Endpoint[] = [];
 
 /* ══════════════════════════════════════════════════════════════
    MODAL
    ══════════════════════════════════════════════════════════════ */
 
-export function SettingsModal({ open, onClose, onNotify }: Props) {
+export function SettingsModal({ open, onClose, onNotify, initialSection }: Props) {
   const [section, setSection] = useState<Section>("root");
   const [q, setQ] = useState("");
 
@@ -239,7 +222,7 @@ export function SettingsModal({ open, onClose, onNotify }: Props) {
   const [autoNotes, setAutoNotes] = useState(true);
 
   // models
-  const [endpoints, setEndpoints] = useState(DEFAULT_ENDPOINTS);
+  const [endpoints, setEndpoints] = useState<Endpoint[]>(DEFAULT_ENDPOINTS);
   const [showAdd, setShowAdd] = useState(false);
   const [draft, setDraft] = useState<Endpoint>({
     id: "",
@@ -251,12 +234,25 @@ export function SettingsModal({ open, onClose, onNotify }: Props) {
     active: false,
   });
 
+  // Which agent roles actually have a bound endpoint (from the DB).
+  const [boundRoles, setBoundRoles] = useState<{ tutor: boolean; generation: boolean; evaluator: boolean }>({
+    tutor: false,
+    generation: false,
+    evaluator: false,
+  });
+  const refreshBoundRoles = () => {
+    void import("../lib/agentRuntime").then((m) => m.getBoundRoles().then(setBoundRoles));
+  };
+  useEffect(() => {
+    if (open) refreshBoundRoles();
+  }, [open]);
+
   useEffect(() => {
     if (open) {
-      setSection("root");
+      setSection(initialSection && initialSection !== "root" ? initialSection : "root");
       setQ("");
     }
-  }, [open]);
+  }, [open, initialSection]);
 
   useEffect(() => {
     if (!open) return;
@@ -305,10 +301,17 @@ export function SettingsModal({ open, onClose, onNotify }: Props) {
       return;
     }
     const id = `ep-${Date.now()}`;
-    const key = draft.keyMasked ? `sk-•••${draft.keyMasked.slice(-4)}` : "not set";
-    setEndpoints((list) => [...list, { ...draft, id, keyMasked: key, active: false }]);
+    const key = draft.keyMasked.trim();
+    // Store the real key under the endpoint id; the list only ever holds a mask
+    // so the key never round-trips through UI state.
+    if (key) {
+      void import("../lib/llm").then((m) => m.storeCredentialLocally(`endpoint_${id}`, key));
+    }
+    const keyMasked = key ? `sk-••••${key.slice(-4)}` : "not set";
+    setEndpoints((list) => [...list, { ...draft, id, keyMasked, active: list.length === 0 }]);
     setDraft({ id: "", label: "", provider: "custom", baseUrl: "https://", model: "", keyMasked: "", active: false });
     setShowAdd(false);
+    refreshBoundRoles();
     onNotify(`Added endpoint "${draft.label}"`);
   };
 
@@ -316,7 +319,7 @@ export function SettingsModal({ open, onClose, onNotify }: Props) {
     setEndpoints((list) => list.map((e) => ({ ...e, active: e.id === id })));
   };
   const removeEndpoint = (id: string) => {
-    setEndpoints((list) => list.filter((e) => e.id !== id || e.provider === "studyus"));
+    setEndpoints((list) => list.filter((e) => e.id !== id));
   };
 
   return (
@@ -450,6 +453,9 @@ export function SettingsModal({ open, onClose, onNotify }: Props) {
               draft={draft}
               setDraft={setDraft}
               commitEndpoint={commitEndpoint}
+              boundRoles={boundRoles}
+              refreshBoundRoles={refreshBoundRoles}
+              onNotify={onNotify}
             />
           )}
         </div>
@@ -998,6 +1004,9 @@ function Models({
   draft,
   setDraft,
   commitEndpoint,
+  boundRoles,
+  refreshBoundRoles,
+  onNotify,
 }: {
   endpoints: Endpoint[];
   activateEndpoint: (id: string) => void;
@@ -1007,77 +1016,63 @@ function Models({
   draft: Endpoint;
   setDraft: React.Dispatch<React.SetStateAction<Endpoint>>;
   commitEndpoint: () => void;
+  boundRoles: { tutor: boolean; generation: boolean; evaluator: boolean };
+  refreshBoundRoles: () => void;
+  onNotify: (t: string) => void;
 }) {
-  const activeId = endpoints.find((e) => e.active)?.id ?? "";
-  const official = activeId === "studyus";
-
   return (
     <div>
-      <GroupLabel>Model source</GroupLabel>
-      <div className="mb-3 flex items-center gap-1 rounded-lg bg-black/25 p-1">
+      <GroupLabel>Three Assignable Agent Roles</GroupLabel>
+      <div className="mb-3 space-y-2 rounded-md border border-white/8 bg-white/[0.03] p-3">
+        {[
+          { role: "tutor" as const, label: "Role 1: Socratic Tutor Agent", desc: "Chalkboard explanations, diagrams, progressive hints" },
+          { role: "generation" as const, label: "Role 2: Test Generation Agent", desc: "Creates grounded assessment items & rubrics" },
+          { role: "evaluator" as const, label: "Role 3: Test Evaluator Agent", desc: "Analytic rubric grading & explanation gate evaluation" },
+        ].map((r) => (
+          <div key={r.role} className="flex items-center justify-between border-b border-white/6 pb-2 last:border-0 last:pb-0">
+            <div>
+              <div className="text-[12px] font-medium text-fg">{r.label}</div>
+              <div className="text-[10.5px] text-dim">{r.desc}</div>
+            </div>
+            <span
+              className={`rounded-full px-2 py-0.5 font-mono text-[10px] ${
+                boundRoles[r.role] ? "bg-accent/15 text-accent" : "bg-white/8 text-dim"
+              }`}
+            >
+              {boundRoles[r.role] ? "Bound" : "Unbound"}
+            </span>
+          </div>
+        ))}
+
         <button
-          onClick={() => activateEndpoint("studyus")}
-          className={`flex-1 rounded-md px-3 py-2 text-left transition-colors ${
-            official ? "bg-white/[0.14] text-fg" : "text-mut hover:bg-white/[0.06] hover:text-fg"
-          }`}
+          onClick={() => {
+            const activeEp = endpoints.find((e) => e.active) || endpoints[0];
+            if (!activeEp) {
+              onNotify("Add an endpoint first");
+              return;
+            }
+            void import("../lib/llm").then((m) => {
+              const apiKey = m.getCredentialLocally(`endpoint_${activeEp.id}`);
+              m.bindAllModelRoles({
+                provider: activeEp.provider as any,
+                baseUrl: activeEp.baseUrl,
+                modelId: activeEp.model,
+                apiKey: apiKey || undefined,
+              }).then(() => {
+                refreshBoundRoles();
+                onNotify(`Bound ${activeEp.label} to all 3 roles`);
+              });
+            });
+          }}
+          className="w-full mt-2 rounded bg-accent/20 border border-accent/40 py-1.5 text-[11.5px] font-medium text-accent hover:bg-accent/30 transition-colors"
         >
-          <span className="block text-[12.5px] font-medium">Official Studyus models</span>
-          <span className="block text-[10.5px] text-dim">Included with your plan</span>
-        </button>
-        <button
-          onClick={() => activateEndpoint(endpoints.find((e) => e.provider !== "studyus")?.id ?? "")}
-          className={`flex-1 rounded-md px-3 py-2 text-left transition-colors ${
-            !official && activeId ? "bg-white/[0.14] text-fg" : "text-mut hover:bg-white/[0.06] hover:text-fg"
-          }`}
-        >
-          <span className="block text-[12.5px] font-medium">Bring your own</span>
-          <span className="block text-[10.5px] text-dim">OpenAI-compatible endpoint</span>
+          Single action: Assign active model to all 3 roles
         </button>
       </div>
 
-      {official ? (
-        <>
-          <GroupLabel>Included models</GroupLabel>
-          <div className="mb-2 space-y-1.5">
-            {[
-              { name: "studyus-tutor-3", desc: "Best for explanations and chalkboards" },
-              { name: "studyus-solver-2", desc: "Optimised for step-by-step problem solving" },
-              { name: "studyus-grader-1", desc: "Marks proof-based answers" },
-            ].map((m, i) => (
-              <div
-                key={m.name}
-                className={`flex items-center gap-2 rounded-md border p-2.5 ${
-                  i === 0 ? "border-accent/60 bg-accent/[0.05]" : "border-white/8 bg-white/[0.03]"
-                }`}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="truncate font-mono text-[12px] text-fg">{m.name}</span>
-                    {i === 0 && (
-                      <span className="rounded-full bg-accent/20 px-1.5 py-[1px] text-[9.5px] font-medium text-accent">
-                        Active
-                      </span>
-                    )}
-                  </div>
-                  <div className="truncate text-[10.5px] text-dim">{m.desc}</div>
-                </div>
-                {i !== 0 && (
-                  <button className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut transition-colors hover:bg-white/[0.12] hover:text-fg">
-                    Use
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-          <p className="mb-2 px-1 text-[11px] text-dim">
-            Official models are billed against your monthly credits. Switch to “Bring your own” to use a custom endpoint.
-          </p>
-        </>
-      ) : (
-        <>
       <GroupLabel>Saved endpoints</GroupLabel>
       <div className="mb-2 space-y-1.5">
-        {endpoints.filter((e) => e.provider !== "studyus").map((e) => (
+        {endpoints.map((e) => (
           <div
             key={e.id}
             className={`flex items-center gap-2 rounded-md border p-2.5 transition-colors ${
@@ -1097,6 +1092,27 @@ function Models({
                 {e.model} · {e.baseUrl} · key: {e.keyMasked}
               </div>
             </div>
+            <button
+              onClick={() => {
+                void import("../lib/llm").then((m) => {
+                  m.testModelEndpoint({
+                    provider: e.provider as any,
+                    baseUrl: e.baseUrl,
+                    modelId: e.model,
+                    apiKey: m.getCredentialLocally(`endpoint_${e.id}`) || undefined,
+                  }).then((res) => {
+                    if (res.reachable && res.modelAvailable) {
+                      alert(`Test connection success: Model ${e.model} is reachable and available.`);
+                    } else {
+                      alert(`Test connection failure: ${res.error || "Could not reach endpoint."}`);
+                    }
+                  });
+                });
+              }}
+              className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut transition-colors hover:bg-white/[0.12] hover:text-fg"
+            >
+              Test
+            </button>
             {!e.active && (
               <button
                 onClick={() => activateEndpoint(e.id)}
@@ -1105,15 +1121,13 @@ function Models({
                 Use
               </button>
             )}
-            {e.provider !== "studyus" && (
-              <button
+            <button
                 onClick={() => removeEndpoint(e.id)}
                 className="shrink-0 grid h-6 w-6 place-items-center rounded text-dim transition-colors hover:bg-white/[0.07] hover:text-[#ff8b80]"
                 title="Remove endpoint"
               >
                 <Trash2 size={12} />
               </button>
-            )}
           </div>
         ))}
       </div>
@@ -1189,20 +1203,6 @@ function Models({
           </div>
         </div>
       )}
-        </>
-      )}
-
-      <GroupLabel>Advanced</GroupLabel>
-      <Row label="Log requests locally" hint="Keep a debug log of tutor calls in your browser">
-        <Toggle on={false} onChange={() => {}} />
-      </Row>
-      <Row label="Stream responses" hint="Show partial answers as they arrive">
-        <Toggle on={true} onChange={() => {}} />
-      </Row>
     </div>
   );
 }
-
-/* placeholder to avoid unused-import errors in some sections */
-const _unused = useMemo;
-void _unused;

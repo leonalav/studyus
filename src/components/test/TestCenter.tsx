@@ -1,19 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Check, Play, Square, RotateCcw } from "lucide-react";
+import { ChevronRight, Check, Play, Square, RotateCcw, GraduationCap } from "lucide-react";
 import {
-  CURRICULA,
   SUBJECT_LIST,
   maxQuestions,
-  type CurriculumDoc,
   type ExamMode,
   type QuestionFormat,
   type Rigor,
   type SubjectKey,
 } from "../../data/curriculum";
+import { getDb } from "../../db/database";
+import { generateAssessment } from "../../api";
+import { getCurriculumTree, CurriculumNodeRecord } from "../../lib/curriculum";
 
 interface Props {
   onNotify: (t: string) => void;
   onStart: (params: {
+    attemptId: string;
+    title: string;
     subject: SubjectKey;
     format: QuestionFormat;
     count: number;
@@ -21,6 +24,12 @@ interface Props {
     docId: string | null;
     picked: string[];
   }) => void;
+}
+
+export interface RealPdfSource {
+  id: string;
+  name: string;
+  pageCount: number;
 }
 
 const MODES: { id: ExamMode; label: string; desc: string }[] = [
@@ -43,7 +52,10 @@ const FORMATS: { id: QuestionFormat; label: string; desc: string }[] = [
 
 export function TestCenter({ onNotify, onStart }: Props) {
   const [subject, setSubject] = useState<SubjectKey>("physics");
-  const [docId, setDocId] = useState<string>("");
+  const [sources, setSources] = useState<RealPdfSource[]>([]);
+  const [selectedSourceId, setSelectedSourceId] = useState<string>("");
+  const [nodes, setNodes] = useState<CurriculumNodeRecord[]>([]);
+
   const [mode, setMode] = useState<ExamMode>("module");
   const [rigor, setRigor] = useState<Rigor>("challenging");
   const [format, setFormat] = useState<QuestionFormat>("mixed");
@@ -56,20 +68,45 @@ export function TestCenter({ onNotify, onStart }: Props) {
   const [elapsed, setElapsed] = useState(0);
   const tick = useRef<number | null>(null);
 
-  const docs = useMemo(() => CURRICULA.filter((c) => c.subject === subject), [subject]);
-  const doc: CurriculumDoc | undefined = docs.find((d) => d.id === docId) ?? docs[0];
+  // Load real PDF sources from SQLite DB
+  useEffect(() => {
+    (async () => {
+      const db = await getDb();
+      const res = db.exec("SELECT id, name, page_count FROM curriculum_sources;");
+      if (res[0]) {
+        const loaded = res[0].values.map((row) => ({
+          id: row[0] as string,
+          name: row[1] as string,
+          pageCount: row[2] as number,
+        }));
+        setSources(loaded);
+        if (loaded.length > 0 && !selectedSourceId) {
+          setSelectedSourceId(loaded[0].id);
+        }
+      } else {
+        setSources([]);
+        setSelectedSourceId("");
+      }
+    })();
+  }, [selectedSourceId]);
 
-  // reset picks when subject / doc / mode changes
+  // Load real bookmarks/sections for chosen PDF source
+  useEffect(() => {
+    if (!selectedSourceId) return;
+    (async () => {
+      const tree = await getCurriculumTree(selectedSourceId);
+      setNodes(tree);
+      if (tree.length > 0) {
+        setExpanded(new Set([tree[0].id]));
+      }
+    })();
+  }, [selectedSourceId]);
+
+  // Reset picks when source or mode changes
   useEffect(() => {
     setPicked(new Set());
-    setExpanded(new Set(doc ? [doc.sections[0]?.id] : []));
-  }, [subject, docId, mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedSourceId, mode]);
 
-  useEffect(() => {
-    setDocId(docs[0]?.id ?? "");
-  }, [subject]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // clamp counter to the format ceiling
   const ceiling = maxQuestions(format);
   useEffect(() => {
     setCount((c) => Math.min(c, ceiling));
@@ -90,32 +127,33 @@ export function TestCenter({ onNotify, onStart }: Props) {
   const mm = String(Math.floor((elapsed % 3600) / 60)).padStart(2, "0");
   const ss = String(elapsed % 60).padStart(2, "0");
 
-  const allSubIds = useMemo(
-    () => (doc ? doc.sections.flatMap((s) => s.subsections.map((x) => x.id)) : []),
-    [doc]
-  );
-  const effectivePicked = mode === "final" ? new Set(allSubIds) : picked;
+  const allConceptIds = useMemo(() => {
+    const list: string[] = [];
+    nodes.forEach((n) => {
+      list.push(n.id);
+      if (n.children) n.children.forEach((c) => list.push(c.id));
+    });
+    return list;
+  }, [nodes]);
 
-  const toggleSub = (sectionId: string, subId: string) => {
+  const effectivePicked = mode === "final" ? new Set(allConceptIds) : picked;
+
+  const toggleConcept = (nodeId: string) => {
     if (mode === "final") return;
     setPicked((current) => {
       const next = new Set(current);
       if (mode === "module") {
-        // module = exactly one subsection
-        return next.has(subId) ? new Set<string>() : new Set([subId]);
+        return next.has(nodeId) ? new Set<string>() : new Set([nodeId]);
       }
-      if (next.has(subId)) next.delete(subId);
-      else next.add(subId);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
       return next;
     });
-    void sectionId;
   };
 
-  const toggleSection = (sectionId: string) => {
-    if (mode !== "custom" || !doc) return;
-    const section = doc.sections.find((s) => s.id === sectionId);
-    if (!section) return;
-    const ids = section.subsections.map((s) => s.id);
+  const toggleSectionAll = (section: CurriculumNodeRecord) => {
+    if (mode !== "custom") return;
+    const ids = [section.id, ...(section.children || []).map((c) => c.id)];
     const allOn = ids.every((id) => picked.has(id));
     setPicked((current) => {
       const next = new Set(current);
@@ -128,7 +166,7 @@ export function TestCenter({ onNotify, onStart }: Props) {
 
   const start = () => {
     if (!canStart) {
-      onNotify(mode === "module" ? "Pick one subsection first" : "Select at least one concept");
+      onNotify(mode === "module" ? "Pick one concept section first" : "Select at least one concept");
       return;
     }
     setElapsed(0);
@@ -136,27 +174,57 @@ export function TestCenter({ onNotify, onStart }: Props) {
     onNotify(`Started ${MODES.find((m) => m.id === mode)!.label} · ${count} questions`);
   };
 
-  const launch = () => {
+  const [generating, setGenerating] = useState(false);
+  const [genProgress, setGenProgress] = useState<{ pct: number; stage: string }>({ pct: 0, stage: "" });
+
+  const launch = async () => {
     if (!canStart) {
-      onNotify(mode === "module" ? "Pick one subsection first" : "Select at least one concept");
+      onNotify(mode === "module" ? "Pick one concept section first" : "Select at least one concept");
       return;
     }
-    onStart({
-      subject,
-      format,
-      count,
-      rigor,
-      docId: doc?.id ?? null,
-      picked: Array.from(effectivePicked),
-    });
+    if (!selectedSourceId) {
+      onNotify("Upload and select a curriculum source first");
+      return;
+    }
+    setGenerating(true);
+    setGenProgress({ pct: 1, stage: "Starting…" });
+    try {
+      const result = await generateAssessment({
+        subject,
+        format,
+        count,
+        rigor,
+        nodeIds: Array.from(effectivePicked),
+        sourceName: selectedSource?.name,
+        onProgress: (pct, stage) => setGenProgress({ pct, stage }),
+      });
+      onNotify(`Generated ${result.itemCount} grounded questions`);
+      onStart({
+        attemptId: result.attemptId,
+        title: result.title,
+        subject,
+        format,
+        count: result.itemCount,
+        rigor,
+        docId: selectedSourceId,
+        picked: Array.from(effectivePicked),
+      });
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Test generation failed");
+    } finally {
+      setGenerating(false);
+      setGenProgress({ pct: 0, stage: "" });
+    }
   };
 
+  const selectedSource = sources.find((s) => s.id === selectedSourceId);
+
   return (
-    <div className="mx-auto w-full max-w-[860px] px-5 pt-10 pb-20">
+    <div className="mx-auto w-full max-w-[860px] px-5 pt-10 pb-20 select-none">
       <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Testing & Practice</div>
       <h1 className="mb-1 text-[36px] font-bold leading-tight tracking-tight text-fg">Take a test</h1>
       <p className="mb-7 text-[13.5px] text-dim">
-        Build an exam from your curriculum. Studyus writes the questions, grades them, and files the results.
+        Build an exam from your uploaded PDF curriculum. Test generation & evaluator agents produce grounded items from cited evidence.
       </p>
 
       {/* timer */}
@@ -223,30 +291,30 @@ export function TestCenter({ onNotify, onStart }: Props) {
         ))}
       </div>
 
-      {/* curriculum */}
-      <Label>Curriculum source</Label>
+      {/* CURRICULUM SOURCE: Loaded from real uploaded PDFs in SQLite DB */}
+      <Label>Curriculum source (Uploaded PDFs)</Label>
       <div className="mb-6 space-y-1.5">
-        {docs.length === 0 && (
+        {sources.length === 0 && (
           <p className="rounded-md border border-dashed border-edge px-3 py-4 text-center text-[12.5px] text-dim">
-            No curriculum PDF for this subject yet — add one from the sidebar.
+            No curriculum PDF uploaded yet — click the + icon in the sidebar CURRICULUM menu to upload one.
           </p>
         )}
-        {docs.map((d) => (
+        {sources.map((src) => (
           <button
-            key={d.id}
-            onClick={() => setDocId(d.id)}
+            key={src.id}
+            onClick={() => setSelectedSourceId(src.id)}
             className={`flex w-full items-center gap-3 rounded-md border p-2.5 text-left transition-colors ${
-              doc?.id === d.id ? "border-accent bg-accent/[0.07]" : "border-edge bg-raise hover:bg-white/[0.06]"
+              selectedSourceId === src.id ? "border-accent bg-accent/[0.07]" : "border-edge bg-raise hover:bg-white/[0.06]"
             }`}
           >
+            <GraduationCap size={16} className="text-accent shrink-0" />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px] text-fg">{d.name}</span>
+              <span className="block truncate text-[13px] font-medium text-fg">{src.name}</span>
               <span className="block font-mono text-[10.5px] text-dim">
-                {d.pages} pages · {d.sections.length} sections ·{" "}
-                {d.sections.reduce((n, s) => n + s.subsections.length, 0)} subsections
+                {src.pageCount} pages · Ingested in SQLite
               </span>
             </span>
-            {doc?.id === d.id && <Check size={14} className="text-accent" />}
+            {selectedSourceId === src.id && <Check size={14} className="text-accent shrink-0" />}
           </button>
         ))}
       </div>
@@ -268,28 +336,36 @@ export function TestCenter({ onNotify, onStart }: Props) {
         ))}
       </div>
 
-      {/* concepts */}
+      {/* CONCEPTS TO BE TESTED: Rendered bookmarks of the PDF */}
       <Label>
-        Concepts to be tested
+        Concepts to be tested (Rendered Bookmarks)
         <span className="ml-2 font-mono text-[10px] normal-case text-dim">
           {mode === "final"
-            ? `all ${allSubIds.length} selected`
+            ? `all ${allConceptIds.length} selected`
             : mode === "module"
             ? picked.size > 0
-              ? "1 subsection selected"
+              ? "1 concept section selected"
               : "choose exactly one"
             : `${picked.size} selected`}
         </span>
       </Label>
-      <div className={`mb-6 overflow-hidden rounded-md border border-edge ${mode === "final" ? "opacity-60" : ""}`}>
-        {doc?.sections.map((section, i) => {
+
+      <div className={`mb-6 overflow-hidden rounded-md border border-edge bg-raise ${mode === "final" ? "opacity-60" : ""}`}>
+        {nodes.length === 0 ? (
+          <p className="px-4 py-6 text-center text-[12.5px] text-dim">
+            {selectedSourceId
+              ? "This curriculum has no indexed bookmarks yet — ingest its outline to test from specific sections."
+              : "Select a curriculum source above to load its sections."}
+          </p>
+        ) : nodes.map((section, i) => {
           const open = expanded.has(section.id);
-          const secIds = section.subsections.map((s) => s.id);
-          const allOn = secIds.every((id) => effectivePicked.has(id));
-          const someOn = secIds.some((id) => effectivePicked.has(id));
+          const childIds = (section.children || []).map((c) => c.id);
+          const allSecIds = [section.id, ...childIds];
+          const allOn = allSecIds.every((id) => effectivePicked.has(id));
+
           return (
             <div key={section.id} className={i > 0 ? "border-t border-edge-soft" : ""}>
-              <div className="flex items-center gap-2 bg-white/[0.02] px-3 py-2">
+              <div className="flex items-center gap-2 bg-white/[0.02] px-3 py-2.5">
                 <button
                   onClick={() =>
                     setExpanded((cur) => {
@@ -302,27 +378,38 @@ export function TestCenter({ onNotify, onStart }: Props) {
                 >
                   <ChevronRight size={13} className={`transition-transform ${open ? "rotate-90" : ""}`} />
                 </button>
-                <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-fg">{section.label}</span>
+                <button
+                  onClick={() => toggleConcept(section.id)}
+                  disabled={mode === "final"}
+                  className="flex items-center gap-2 min-w-0 flex-1 text-left"
+                >
+                  <span
+                    className={`grid h-[15px] w-[15px] shrink-0 place-items-center border transition-colors ${
+                      mode === "module" ? "rounded-full" : "rounded-[3px]"
+                    } ${effectivePicked.has(section.id) ? "border-accent bg-accent text-white" : "border-white/20"}`}
+                  >
+                    {effectivePicked.has(section.id) && <Check size={10} strokeWidth={3} />}
+                  </span>
+                  <span className="truncate text-[13px] font-medium text-fg">{section.title}</span>
+                </button>
                 {mode === "custom" && (
                   <button
-                    onClick={() => toggleSection(section.id)}
+                    onClick={() => toggleSectionAll(section)}
                     className="rounded px-2 py-0.5 text-[11px] text-mut transition-colors hover:bg-white/[0.07] hover:text-fg"
                   >
                     {allOn ? "Clear" : "Select all"}
                   </button>
                 )}
-                <span className="font-mono text-[10px] text-dim">
-                  {someOn ? `${secIds.filter((id) => effectivePicked.has(id)).length}/${secIds.length}` : `${secIds.length}`}
-                </span>
               </div>
-              {open && (
+
+              {open && section.children && (
                 <div>
-                  {section.subsections.map((sub) => {
+                  {section.children.map((sub) => {
                     const on = effectivePicked.has(sub.id);
                     return (
                       <button
                         key={sub.id}
-                        onClick={() => toggleSub(section.id, sub.id)}
+                        onClick={() => toggleConcept(sub.id)}
                         disabled={mode === "final"}
                         className="flex w-full items-center gap-2.5 border-t border-edge-soft px-3 py-2 pl-10 text-left transition-colors hover:bg-white/[0.03] disabled:cursor-default"
                       >
@@ -333,7 +420,7 @@ export function TestCenter({ onNotify, onStart }: Props) {
                         >
                           {on && <Check size={10} strokeWidth={3} />}
                         </span>
-                        <span className={`truncate text-[12.5px] ${on ? "text-fg" : "text-mut"}`}>{sub.label}</span>
+                        <span className={`truncate text-[12.5px] ${on ? "text-fg" : "text-mut"}`}>{sub.title}</span>
                       </button>
                     );
                   })}
@@ -424,20 +511,42 @@ export function TestCenter({ onNotify, onStart }: Props) {
           </div>
           <div className="truncate font-mono text-[11px] text-dim">
             {count} questions · {effectivePicked.size} concept{effectivePicked.size === 1 ? "" : "s"} ·{" "}
-            {doc?.name ?? "no curriculum"}
+            {selectedSource?.name ?? "no curriculum selected"}
           </div>
         </div>
         <button
           onClick={launch}
-          disabled={!canStart}
+          disabled={!canStart || generating}
           className={`flex items-center gap-1.5 rounded-md px-4 py-2 text-[13px] font-medium transition-all ${
-            canStart ? "bg-accent text-white hover:bg-accent-deep active:scale-[0.98]" : "bg-white/[0.06] text-faint"
+            canStart && !generating ? "bg-accent text-white hover:bg-accent-deep active:scale-[0.98]" : "bg-white/[0.06] text-faint"
           }`}
         >
           <Play size={13} fill="currentColor" />
-          Generate & start
+          {generating ? "Generating…" : "Generate & start"}
         </button>
       </div>
+
+      {/* Dedicated, real progress bar for test generation. The harness reports an
+          honest 0–100 estimate and a stage label per generation phase (evidence
+          fetch → grounded item generation → validation → save); the bar only
+          advances on real work, never a fake animation. */}
+      {generating && (
+        <div className="anim-fade-up -mt-3 mb-3 rounded-lg border border-edge bg-raise p-4">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+            <span className="font-mono text-[11px] uppercase tracking-wider text-dim">
+              {genProgress.stage || "Working…"}
+            </span>
+            <span className="ml-auto font-mono text-[10px] text-dim">{genProgress.pct}%</span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-edge">
+            <div
+              className="h-full rounded-full bg-accent transition-[width] duration-300 ease-out"
+              style={{ width: `${Math.max(2, genProgress.pct)}%` }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

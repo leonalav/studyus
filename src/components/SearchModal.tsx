@@ -8,10 +8,10 @@ import {
   FileText,
   ChevronDown,
   Plus,
-  FolderClosed,
   CornerDownLeft,
 } from "lucide-react";
-import { SEARCH_INDEX, RECENCY_LABEL, type Recency, type SearchItem } from "../data/library";
+import { buildSearchIndex, RECENCY_LABEL, type Recency, type SearchItem } from "../data/library";
+import { getSettingsSections } from "./SettingsModal";
 
 interface Props {
   open: boolean;
@@ -25,8 +25,23 @@ export function SearchModal({ open, onClose, onPick }: Props) {
   const [q, setQ] = useState("");
   const [titleOnly, setTitleOnly] = useState(false);
   const [cursor, setCursor] = useState(0);
+  const [index, setIndex] = useState<SearchItem[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Build the live index (real notes from SQLite + real settings sections)
+  // every time the modal opens, so a freshly-saved chalkboard is searchable
+  // without a reload. Never falls back to placeholder notes.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void buildSearchIndex(getSettingsSections()).then((items) => {
+      if (!cancelled) setIndex(items);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   useEffect(() => {
     if (open) {
@@ -38,13 +53,13 @@ export function SearchModal({ open, onClose, onPick }: Props) {
 
   const results = useMemo(() => {
     const term = q.trim().toLowerCase();
-    if (!term) return SEARCH_INDEX;
-    return SEARCH_INDEX.filter((item) =>
+    if (!term) return index;
+    return index.filter((item) =>
       titleOnly
         ? item.label.toLowerCase().includes(term)
         : item.label.toLowerCase().includes(term) || item.path.toLowerCase().includes(term)
     );
-  }, [q, titleOnly]);
+  }, [q, titleOnly, index]);
 
   const grouped = useMemo(() => {
     return ORDER.map((bucket) => ({
@@ -105,7 +120,7 @@ export function SearchModal({ open, onClose, onPick }: Props) {
             ref={inputRef}
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search notes and folders in Studyus…"
+            placeholder="Search notes and settings in Studyus…"
             className="min-w-0 flex-1 bg-transparent text-[15px] text-fg outline-none placeholder:text-[#6e6e6c]"
           />
           <button className="grid h-6 w-6 place-items-center rounded text-dim transition-colors hover:bg-white/[0.07] hover:text-fg">
@@ -134,7 +149,7 @@ export function SearchModal({ open, onClose, onPick }: Props) {
         <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-2">
           {flat.length === 0 && (
             <p className="px-4 py-8 text-center text-[13px] text-dim">
-              No notes or folders match “{q}”.
+              No notes or settings match “{q}”.
             </p>
           )}
 
@@ -161,7 +176,7 @@ export function SearchModal({ open, onClose, onPick }: Props) {
                     }`}
                   >
                     <span className="grid h-[18px] w-[18px] shrink-0 place-items-center rounded-[3px]" style={{ background: `${item.accent}1f`, color: item.accent }}>
-                      {item.type === "folder" ? <FolderClosed size={11} /> : <FileText size={11} />}
+                      <FileText size={11} />
                     </span>
                     <span className="truncate text-[13.5px] font-medium text-fg">{item.label}</span>
                     {item.path && (

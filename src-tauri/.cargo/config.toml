@@ -1,0 +1,10 @@
+# NOTE: when cargo is invoked via `--manifest-path` (as the tauri CLI does from
+# the repo root), this file can be ignored in some cargo versions — config
+# discovery walks from the working directory, not the manifest dir. The
+# authoritative mechanism is the `CARGO_TARGET_DIR=C:/rust_targets` env var,
+# which package.json now sets on every `npm run tauri*` script via cross-env.
+# This file stays as a fallback for direct `cd src-tauri && cargo …` runs from
+# inside src-tauri (where discovery DOES find it).
+
+[build]
+target-dir = "C:/rust_targets"

@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default window capability: core permissions plus invoke of the app's own render_page_range / extract_text_range / chat_completion commands.","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-close","core:window:allow-minimize","core:window:allow-toggle-maximize","core:window:allow-start-dragging"]}}

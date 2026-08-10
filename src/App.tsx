@@ -7,11 +7,14 @@ import { ActivityList } from "./components/ActivityList";
 import { Toasts, type ToastItem } from "./components/Toasts";
 import { SearchModal } from "./components/SearchModal";
 import { SettingsModal } from "./components/SettingsModal";
-import { TabContent, encodeTestTabId, type TestParams } from "./components/TabContent";
+import { TabContent, type TestParams } from "./components/TabContent";
+import { encodeTestTabId } from "./components/testTabIds";
 import { StudyRoom } from "./components/board/StudyRoom";
 import { PredictionTrainer } from "./components/code/PredictionTrainer";
+import { WindowControls, DragBar } from "./components/WindowControls";
 import { buildBoard, detectDomain, type BoardDoc } from "./data/boards";
-import { SUBJECTS, type SubjectId } from "./data/tutor";
+import { type OnboardingAnswers } from "./data/tutor";
+import { getStudySession, type StoredStudySession } from "./state/studySessionStore";
 
 function useClock() {
   const [now, setNow] = useState(() => new Date());
@@ -26,19 +29,25 @@ const HOME_TAB_ID = "home";
 
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [subjectId] = useState<SubjectId>("physics");
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [board, setBoard] = useState<BoardDoc | null>(null);
+  const [restoredSession, setRestoredSession] = useState<StoredStudySession | null>(null);
+  const [pendingBoundNodes, setPendingBoundNodes] = useState<string[]>([]);
+  const [pendingOnboarding, setPendingOnboarding] = useState<OnboardingAnswers | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-
-  const subject = SUBJECTS.find((s) => s.id === subjectId)!;
+  const [settingsSection, setSettingsSection] = useState<
+    "root" | "about" | "appearance" | "tutor" | "notifications" | "models"
+  >("root");
+  const [chosenSection, setChosenSection] = useState<string | null>(null);
 
   const [tabs, setTabs] = useState<Tab[]>([
-    { id: HOME_TAB_ID, title: subject.topic, kind: "board" },
+    { id: HOME_TAB_ID, title: chosenSection ?? "Study", kind: "board" },
   ]);
   const [activeTabId, setActiveTabId] = useState<string>(HOME_TAB_ID);
   const [activeTest, setActiveTest] = useState<TestParams | null>(null);
+  /** Bumped on every generated test so Available tests re-fetches from SQLite. */
+  const [availableTestsRefreshKey, setAvailableTestsRefreshKey] = useState(0);
 
   const toastId = useRef(0);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -50,17 +59,41 @@ export default function App() {
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2600);
   }, []);
 
-  const startPrep = useCallback((prompt: string) => {
-    setBoard(buildBoard(detectDomain(prompt), prompt));
-  }, []);
+  const startPrep = useCallback(
+    (prompt: string, boundNodes?: string[], onboarding?: OnboardingAnswers) => {
+      setRestoredSession(null);
+      setPendingBoundNodes(boundNodes ?? []);
+      setPendingOnboarding(onboarding ?? null);
+      // Title the board from the chosen concept (carried on the onboarding
+      // answers), never the raw prompt — the board must not echo the learner's
+      // own query back at them.
+      setBoard(buildBoard(detectDomain(prompt), prompt, onboarding?.concept));
+    },
+    []
+  );
+
+  const openStoredSession = useCallback((id: string) => {
+    const session = getStudySession(id);
+    if (!session) return notify("That study session is no longer available");
+    setRestoredSession(session);
+    setBoard(session.boards.find((item) => item.id === session.activeId) ?? session.boards[0]);
+  }, [notify]);
 
   const openTab = useCallback((incoming: { id: string; title: string; kind: Tab["kind"] }) => {
+    // Past-notes (Sidebar → "note" tabs) are live chalkboard sessions, not a
+    // read-only transcript: reopen the same fullscreen StudyRoom from the
+    // persisted session store instead of opening a note tab.
+    if (incoming.kind === "note") {
+      const sessionId = incoming.id.replace(/^note-/, "");
+      openStoredSession(sessionId);
+      return;
+    }
     setTabs((current) => {
       if (current.some((t) => t.id === incoming.id)) return current;
       return [...current, incoming];
     });
     setActiveTabId(incoming.id);
-  }, []);
+  }, [openStoredSession]);
 
   const closeTab = useCallback(
     (id: string) => {
@@ -85,8 +118,9 @@ export default function App() {
 
   const startTest = useCallback((params: TestParams) => {
     setActiveTest(params);
+    setAvailableTestsRefreshKey((n) => n + 1);
     const id = encodeTestTabId(params);
-    const title = `${SUBJECTS.find((s) => s.id === "physics")?.label ?? "Test"} · ${params.format} · ${params.count}q`;
+    const title = `${params.title} · ${params.count}q`;
     setTabs((current) => {
       if (current.some((t) => t.id === id)) return current;
       return [...current, { id, title, kind: "test" }];
@@ -126,7 +160,7 @@ export default function App() {
   if (board && board.domain === "programming") {
     return (
       <div className="ambient flex h-screen w-screen flex-col overflow-hidden">
-        <div className="flex items-center gap-3 border-b border-edge-soft bg-panel px-4 py-2">
+        <div className="flex items-center gap-3 border-b border-edge-soft bg-panel px-4 py-2" data-tauri-drag-region="deep">
           <button
             onClick={() => {
               setBoard(null);
@@ -142,6 +176,8 @@ export default function App() {
           </span>
         </div>
         <PredictionTrainer onNotify={notify} />
+        <DragBar />
+        <WindowControls />
         <Toasts items={toasts} />
       </div>
     );
@@ -153,12 +189,17 @@ export default function App() {
       <div className="h-screen w-screen overflow-hidden bg-black">
         <StudyRoom
           initialBoard={board}
+          initialSession={restoredSession ?? undefined}
+          boundNodes={restoredSession ? undefined : pendingBoundNodes}
+          onboarding={restoredSession ? undefined : pendingOnboarding ?? undefined}
           notify={notify}
           onLeave={() => {
             setBoard(null);
             notify("Left the chalkboard — back to prep");
           }}
         />
+        <DragBar />
+        <WindowControls />
         <Toasts items={toasts} />
       </div>
     );
@@ -174,11 +215,12 @@ export default function App() {
         <TabContent
           tab={activeTab}
           onNotify={notify}
-          onContinueSession={() => {}}
           onStartTest={startTest}
           onExitTest={exitTest}
           activeTest={activeTest}
         />
+        <DragBar />
+        <WindowControls />
         <Toasts items={toasts} />
       </div>
     );
@@ -214,36 +256,46 @@ export default function App() {
           {isBoardTab ? (
             <main className="mx-auto w-full max-w-[760px] px-5 pt-14 sm:pt-20">
               <header className="anim-fade-up mb-8">
+                {/* The big page header always shows the current time — it is never
+                    replaced by the chosen subsection name. The subsection lives in
+                    the "Add context" dropdown in the SessionCard header instead. */}
                 <h1 className="text-[38px] font-bold leading-tight tracking-tight sm:text-[44px]">
                   <span className="text-faint">@</span>
                   <span className="text-[#909090]">Today {time}</span>
                 </h1>
                 <p className="mt-2 font-mono text-[11px] uppercase tracking-wider text-dim">
-                  Tell Studyus what to study · it builds the chalkboard
+                  {chosenSection ? `Studying concept section: ${chosenSection}` : "Tell Studyus what to study · it builds the chalkboard"}
                 </p>
               </header>
 
               <SessionCard
                 key={activeTab.id}
-                subject={subject}
                 notify={notify}
                 inputRef={inputRef}
                 onPrepare={startPrep}
               />
 
-              <ActivityList onOpen={(title) => notify(`Opening "${title}"…`)} />
+              <ActivityList
+                onOpen={(id, title) => {
+                  openStoredSession(id);
+                  notify(`Reopening "${title}"…`);
+                }}
+                onNotify={notify}
+              />
             </main>
           ) : (
             <TabContent
               tab={activeTab}
               onNotify={notify}
-              onContinueSession={(title) => {
-                setBoard(buildBoard(detectDomain(title), title));
-                notify("Reopening the chalkboard…");
-              }}
               onStartTest={startTest}
               onExitTest={exitTest}
+              onSelectSectionForStudy={(sectionTitle) => {
+                setChosenSection(sectionTitle);
+                setActiveTabId(HOME_TAB_ID);
+                notify(`Switched to Tutor @[${sectionTitle}]`);
+              }}
               activeTest={activeTest}
+              availableTestsRefreshKey={availableTestsRefreshKey}
             />
           )}
         </div>
@@ -252,12 +304,31 @@ export default function App() {
       <SearchModal
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
-        onPick={(item) =>
-          openTab({ id: `search-${item.id}`, title: item.label, kind: "note" })
-        }
+        onPick={(item) => {
+          if (item.type === "note" && item.noteId) {
+            openStoredSession(item.noteId);
+            notify(`Reopening "${item.label}"…`);
+          } else if (item.type === "setting" && item.settingId) {
+            // A settings pick opens the Settings modal landed on that section,
+            // never a note tab. Validate against the known section ids before
+            // handing it to the modal.
+            const known = ["about", "appearance", "tutor", "notifications", "models"];
+            setSettingsSection(
+              known.includes(item.settingId)
+                ? (item.settingId as typeof settingsSection)
+                : "root"
+            );
+            setSettingsOpen(true);
+          }
+        }}
       />
 
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onNotify={notify} />
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onNotify={notify}
+        initialSection={settingsSection}
+      />
 
       <Toasts items={toasts} />
     </div>

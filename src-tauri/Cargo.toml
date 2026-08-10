@@ -1,0 +1,42 @@
+[package]
+name = "studyus_app"
+version = "0.1.0"
+description = "Studyus desktop app — pdfium-backed curriculum text+math ingestion"
+authors = ["Studyus"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "studyus_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.3", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# PDF page rasterization. OpenStax renders math as vector drawings, so text
+# extraction is not viable — we send rendered PNG pages to the vision LLM.
+# pdfium-render dynamically loads pdfium.dll at runtime; the DLL is vendored at
+# `src-tauri/pdfium/pdfium.dll` and copied next to the built exe by build.rs.
+pdfium-render = { version = "0.9.2", default-features = false, features = ["pdfium_latest", "thread_safe", "image_025"] }
+# `image` encodes PDFium's bitmap output as PNG bytes.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Encode rendered PNG pages into base64 strings for IPC to the frontend, which
+# posts them as `data:image/png;base64,...` URLs in vision LLM image_url parts.
+base64 = "0.22"
+# Native HTTP transport for model chat completions. Browser `fetch` to model
+# endpoints is blocked by CORS in the Tauri webview, so in the desktop build the
+# agent runtime routes the OpenAI-compatible POST through this Rust command
+# instead — native `reqwest` has no same-origin enforcement, and the rendered PNG
+# pages and API key never touch the page's network stack. The browser single-file
+# build keeps using `fetch` and degrades with a clear transport error instead.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+opt-level = "s"
+strip = true

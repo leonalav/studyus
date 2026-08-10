@@ -3,19 +3,32 @@ import { Chalkboard, THEMES, FONTS, type BoardTheme, type BoardView, type Stroke
 import { BoardToolbar, type PanelId, type PenTool } from "./BoardToolbar";
 import { ThreadsPanel, SettingsPanel, ChatDock, type ChatMsg } from "./BoardPanels";
 import { buildSubBoard, boardToMarkdown, DOMAIN_META, type BoardDoc } from "../../data/boards";
-import { defaultTools, runAgent, type AgentEndpoint } from "../../lib/agent";
+import { validateVisualizationIntent } from "../../lib/visualization/validate";
+import type { VisualizationIntent, VisualizationState } from "../../lib/visualization/types";
+import { askTutorTurn, ensureChalkboardSession } from "../../lib/tutor";
+import { ContextMenu, ContextMenuTarget } from "../ContextMenu";
 import { toPng } from "html-to-image";
+import { saveStudySession } from "../../state/studySessionStore";
+import type { OnboardingAnswers } from "../../data/tutor";
 
 interface Props {
   initialBoard: BoardDoc;
+  initialSession?: import("../../state/studySessionStore").StoredStudySession;
+  /** Curriculum node ids the tutor may ground its replies on. Restored from
+   *  the stored session when reopening; empty means no curriculum is bound. */
+  boundNodes?: string[];
+  /** Onboarding answers from the AI-generated intake interview. Threaded into
+   *  every tutor turn as a consistent system reminder. Undefined for a restored
+   *  session — that interview already ran. */
+  onboarding?: OnboardingAnswers;
   onLeave: () => void;
   notify: (t: string) => void;
 }
 
-export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
-  const [boards, setBoards] = useState<BoardDoc[]>([initialBoard]);
-  const [activeId, setActiveId] = useState(initialBoard.id);
-  const [written, setWritten] = useState<Set<string>>(new Set());
+export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding, onLeave, notify }: Props) {
+  const [boards, setBoards] = useState<BoardDoc[]>(initialSession?.boards ?? [initialBoard]);
+  const [activeId, setActiveId] = useState(initialSession?.activeId ?? initialBoard.id);
+  const [written, setWritten] = useState<Set<string>>(new Set((initialSession?.boards ?? []).map((item) => item.id)));
 
   const [theme, setTheme] = useState<BoardTheme>(THEMES[0]);
   const [fontId, setFontId] = useState("gloria");
@@ -25,30 +38,83 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
   const [panel, setPanel] = useState<PanelId>(null);
   const [chatOpen, setChatOpen] = useState(true);
   const [chatCollapsed, setChatCollapsed] = useState(false);
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [messages, setMessages] = useState<ChatMsg[]>(initialSession?.messages ?? []);
   const [typing, setTyping] = useState(false);
 
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
-  const [endpoint, setEndpoint] = useState<AgentEndpoint>({
-    baseUrl: "",
-    model: "",
-    apiKey: "",
-    enabled: false,
-  });
-  const [attachments, setAttachments] = useState<{ name: string; kind: "file" | "image" | "audio" | "code" }[]>([]);
+  const [attachments, setAttachments] = useState<{ name: string; kind: "file" | "image" | "audio" | "code"; url?: string }[]>([]);
   const [agentStatus, setAgentStatus] = useState<"idle" | "thinking" | "writing" | "error">("idle");
   const [penTool, setPenTool] = useState<PenTool>("pen");
   const [penColor, setPenColor] = useState("#fbbf24");
   const clearInkRef = useRef<() => void>(() => {});
   const boardRootRef = useRef<HTMLDivElement | null>(null);
+
+  /* One persisted chalkboard session per room entry; the tutor harness writes
+     both sides of the conversation into session_messages under this id. */
+  const [sessionId] = useState(() => initialSession?.id ?? `session-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+  const resolvedBoundNodes = boundNodes ?? initialSession?.boundNodes ?? [];
+  useEffect(() => {
+    void ensureChalkboardSession({ id: sessionId, title: initialBoard.title, domain: initialBoard.domain, boundNodes: resolvedBoundNodes });
+  }, [sessionId, initialBoard.title, initialBoard.domain, resolvedBoundNodes]);
+
+  /* The in-flight tutor call is aborted when the room unmounts. */
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
   const [previews, setPreviews] = useState<Record<string, string>>({});
-  const [viewMap, setViewMap] = useState<Record<string, BoardView>>({});
-  const [strokeMap, setStrokeMap] = useState<Record<string, Stroke[]>>({});
+  const [viewMap, setViewMap] = useState<Record<string, BoardView>>(initialSession?.viewMap ?? {});
+  const [strokeMap, setStrokeMap] = useState<Record<string, Stroke[]>>(initialSession?.strokeMap ?? {});
+  const [contextMenu, setContextMenu] = useState<ContextMenuTarget | null>(null);
 
   const msgId = useRef(0);
   const board = boards.find((b) => b.id === activeId) ?? boards[0];
   const fontCss = FONTS.find((f) => f.id === fontId)?.css ?? FONTS[0].css;
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      saveStudySession({
+        id: sessionId,
+        title: board.title,
+        domain: board.domain,
+        boundNodes: resolvedBoundNodes,
+        boards,
+        activeId,
+        messages,
+        viewMap,
+        strokeMap,
+        updatedAt: new Date().toISOString(),
+      });
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [sessionId, board.title, board.domain, boards, activeId, messages, viewMap, strokeMap, resolvedBoundNodes]);
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const target = e.target as HTMLElement;
+    let type: ContextMenuTarget["type"] = "chalkboard_bg";
+
+    if (target.closest("figure")) type = "graph";
+    else if (target.closest("[data-block]")) type = "board_object";
+
+    setContextMenu({
+      type,
+      x: e.clientX,
+      y: e.clientY,
+    });
+  };
+
+  const handleContextMenuAction = (actionId: string) => {
+    if (actionId === "clear_board") {
+      clearInkRef.current();
+      notify("Board cleared");
+    } else if (actionId === "ask_tutor_board" || actionId === "ask_tutor_obj") {
+      notify("Asking tutor about selected content…");
+    } else if (actionId === "export_board_image") {
+      notify("Exporting board image…");
+    } else {
+      notify(`Context action executed: ${actionId}`);
+    }
+  };
 
   const captureActive = useCallback(async () => {
     const node = boardRootRef.current;
@@ -73,6 +139,29 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
   const saveStrokes = useCallback((strokes: Stroke[]) => {
     setStrokeMap((current) => ({ ...current, [activeId]: strokes }));
   }, [activeId]);
+
+  // Persist interactive visualization state (e.g. dragged point positions) into
+  // the owning block so it round-trips through the saved session. Visual state
+  // lives on the block, not in a side-map, because it must restore on reopen.
+  const saveBlockState = useCallback(
+    (blockId: string, state: VisualizationState) => {
+      setBoards((current) =>
+        current.map((b) =>
+          b.id === activeId
+            ? {
+                ...b,
+                blocks: b.blocks.map((blk) =>
+                  blk.id === blockId && blk.kind === "visualization"
+                    ? { ...blk, state }
+                    : blk
+                ),
+              }
+            : b
+        )
+      );
+    },
+    [activeId]
+  );
 
   /* session timer */
   useEffect(() => {
@@ -100,15 +189,6 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
     }, delay);
   }, []);
 
-  /* greet on entry */
-  useEffect(() => {
-    pushTutor(
-      `Board is up — ${initialBoard.title}. I'll write here as we go. Drag the board to move around, and highlight any line to branch it into its own board.`,
-      900
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   /* branch from highlighted text */
   const handleAsk = useCallback(
     async (selection: string, question: string) => {
@@ -128,62 +208,44 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
     [board, captureActive, notify, pushTutor]
   );
 
-  /* chat replies — calls the configured agent when endpoint is enabled */
+  /* chat replies — routed through the tutor harness, which resolves the bound
+     tutor role, validates structured output, and persists both messages */
   const handleSend = useCallback(
-    async (text: string) => {
-      setMessages((m) => [...m, { id: ++msgId.current, role: "user", text }]);
-      const meta = DOMAIN_META[board.domain];
-
-      if (!endpoint.enabled) {
-        const replies = [
-          `Good — look at the ${meta.label.toLowerCase()} block on the left. Start from the definition, then substitute one value at a time.`,
-          `Try it on the board: change a single variable and predict what moves. I'll check your reasoning.`,
-          `That connects to what's already written — trace it from the equation down to the graph and tell me what you notice.`,
-          `Short answer: yes, but the reason matters more than the result. Walk me through your first step.`,
-        ];
-        pushTutor(replies[Math.floor(Math.random() * replies.length)], 750 + Math.random() * 500);
-        return;
-      }
-
+    async (text: string, imageData?: string) => {
+      void imageData;
+      setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
       setAgentStatus("thinking");
       setTyping(true);
+
       const controller = new AbortController();
+      abortRef.current = controller;
       try {
-        const system = [
-          "You are Studyus, the chalkboard tutor in this app.",
-          `The current board is on the domain: ${meta.label} — ${board.title}.`,
-          "Use the provided tools to write on the chalkboard: titles, text, bullets, latex, plot_2d, plot_3d, draw_diagram, callout.",
-          "Reply with a short text message in the chat AND call the appropriate tools to write on the board. Don't repeat the same text inside tool calls.",
-          "If a tool call is appropriate, prefer it over a long text reply.",
-        ].join("\n");
-
-        const attachmentsNote =
-          attachments.length > 0 ? `\n\nAttached: ${attachments.map((a) => a.name).join(", ")}` : "";
-
-        const result = await runAgent({
-          endpoint,
-          system,
-          user: text + attachmentsNote,
-          tools: defaultTools(),
+        const result = await askTutorTurn({
+          sessionId,
+          sessionTitle: board.title,
+          domain: board.domain,
+          boundNodes: resolvedBoundNodes,
+          onboarding: onboarding ?? undefined,
+          learnerMessage: text,
+          attachments: attachments.map((a) => ({ name: a.name, kind: a.kind })),
           signal: controller.signal,
         });
 
-        if (result.text) {
-          setMessages((m) => [...m, { id: ++msgId.current, role: "tutor", text: result.text }]);
-        }
+        const turn = result.value;
+        setMessages((m) => [...m, { id: ++msgId.current, role: "tutor", text: turn.speech }]);
 
-        // Each tool call becomes a board block
-        if (result.toolCalls.length > 0) {
+        // Each validated board operation becomes a chalkboard block.
+        if (turn.boardOps.length > 0) {
           setAgentStatus("writing");
-          for (const call of result.toolCalls) {
-            const block = toolCallToBlock(call, board.domain);
+          for (const op of turn.boardOps) {
+            const block = toolCallToBlock({ name: op.op, args: op as unknown as Record<string, unknown> }, board.domain);
             if (block) {
               await new Promise((r) => window.setTimeout(r, 480));
               setBoards((current) => {
                 const next = current.map((b) => (b.id === activeId ? appendBlock(b, block) : b));
                 return next;
               });
-              notify(`Agent wrote: ${block.kind}`);
+              notify(`Tutor wrote: ${block.kind}`);
             }
           }
         }
@@ -191,19 +253,19 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
         setAgentStatus("idle");
       } catch (e: any) {
         setAgentStatus("error");
-        const message = e?.message ?? "Agent failed";
-        notify(`Agent: ${message}`);
+        const message = e?.message ?? "Tutor unavailable";
+        notify(`Tutor: ${message}`);
         setMessages((m) => [
           ...m,
-          { id: ++msgId.current, role: "system", text: `agent error: ${message}` },
+          { id: ++msgId.current, role: "system", text: `tutor error: ${message}` },
         ]);
         setAgentStatus("idle");
       } finally {
         setTyping(false);
-        void controller;
+        if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [activeId, attachments, board.domain, board.title, endpoint, notify, pushTutor]
+    [activeId, attachments, board.domain, board.title, notify, sessionId, resolvedBoundNodes]
   );
 
   /* markdown recording + export */
@@ -249,7 +311,10 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
   };
 
   return (
-    <div className="anim-teleport relative h-full w-full overflow-hidden bg-black">
+    <div
+      onContextMenu={handleContextMenu}
+      className="anim-teleport relative h-full w-full overflow-hidden bg-black"
+    >
       {/* the shared screen frame */}
       <div className="share-frame absolute inset-2 overflow-hidden rounded-lg">
         <Chalkboard
@@ -270,6 +335,7 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
           onViewChange={saveView}
           initialStrokes={strokeMap[board.id]}
           onStrokesChange={saveStrokes}
+          onBlockStateChange={saveBlockState}
         />
       </div>
 
@@ -308,6 +374,13 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
         chatCount={messages.filter((m) => m.role === "tutor").length}
       />
 
+      {/* Context Menu */}
+      <ContextMenu
+        target={contextMenu}
+        onClose={() => setContextMenu(null)}
+        onAction={handleContextMenuAction}
+      />
+
       {/* live recording chip */}
       {recording && (
         <div className="anim-toast absolute left-4 top-[68px] z-40 flex items-center gap-2 rounded-md border border-[#c42b1c]/40 bg-[#1a1010]/95 px-2.5 py-1.5 backdrop-blur-md">
@@ -344,8 +417,6 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
           setFontScale={setFontScale}
           latex={latex}
           setLatex={setLatex}
-          endpoint={endpoint}
-          setEndpoint={setEndpoint}
           onClose={() => setPanel(null)}
         />
       )}
@@ -353,36 +424,31 @@ export function StudyRoom({ initialBoard, onLeave, notify }: Props) {
       {chatOpen && (
         <ChatDock
           messages={messages}
-          onSend={(t) => { void handleSend(t); }}
+          onSend={(t, img) => { void handleSend(t, img); }}
           collapsed={chatCollapsed}
           setCollapsed={setChatCollapsed}
           onClose={() => setChatOpen(false)}
           typing={typing}
           agentStatus={agentStatus}
           attachments={attachments}
-          onAddAttachment={(kind) => {
-            const placeholder = {
+          onAddAttachment={(kind, name, url) => {
+            const placeholder = name || {
               file: `file-${Date.now()}.pdf`,
               image: `image-${Date.now()}.png`,
               audio: `voice-${Date.now()}.m4a`,
               code: `snippet-${Date.now()}.py`,
             }[kind];
-            setAttachments((list) => [...list, { name: placeholder, kind }]);
+            setAttachments((list) => [...list, { name: placeholder, kind, url }]);
             notify(`${kind} attached`);
           }}
           onClearAttachments={() => setAttachments([])}
+          onRemoveAttachment={(index) =>
+            setAttachments((list) => list.filter((_, i) => i !== index))
+          }
           onSpeakLast={() => {
             const last = [...messages].reverse().find((m) => m.role === "tutor");
             if (last) notify(`Reading aloud: "${last.text.slice(0, 60)}…"`);
             else notify("Nothing to read yet");
-          }}
-          onInlineAction={(a) => {
-            const label =
-              a === "ask-tutor" ? "Ask the tutor to expand on the board" :
-              a === "explain" ? "Explain deeper" :
-              a === "example" ? "Show an example" : "Redo the last chalkboard step";
-            setMessages((m) => [...m, { id: ++msgId.current, role: "user", text: label }]);
-            pushTutor(`Got it — I'll handle "${label}" on the next pass.`, 600);
           }}
         />
       )}
@@ -419,31 +485,21 @@ function toolCallToBlock(call: { name: string; args: Record<string, any> }, doma
         tex: text("tex"),
         caption: text("caption") || undefined,
       };
-    case "plot_2d": {
-      const dx = Array.isArray(args.domainX) ? args.domainX : [0, 1];
+    case "visualize": {
+      // LLM emits a VisualizationIntent (already structurally validated by the
+      // agent runtime). Re-validate at the placement boundary so a corrupt or
+      // drifted payload cannot reach the chalkboard as a malformed block.
+      const intent = args.intent;
+      const result = validateVisualizationIntent(intent);
+      if (!result.valid) {
+        return null;
+      }
       return {
         id,
-        kind: "graph2d" as const,
-        fn: text("fn") || "parabola",
-        domainX: [Number(dx[0]) || 0, Number(dx[1]) || 1] as [number, number],
-        caption: text("caption") || undefined,
-        curves: Array.isArray(args.curves) ? args.curves.map(String) : undefined,
+        kind: "visualization" as const,
+        intent: intent as VisualizationIntent,
       };
     }
-    case "plot_3d":
-      return {
-        id,
-        kind: "graph3d" as const,
-        surface: (text("surface") as "saddle" | "well" | "ripple") || "saddle",
-        caption: text("caption") || undefined,
-      };
-    case "draw_diagram":
-      return {
-        id,
-        kind: "diagram" as const,
-        variant: (text("variant") as "orbit" | "atom" | "cell" | "stack" | "beaker") || "orbit",
-        caption: text("caption") || undefined,
-      };
     case "write_callout":
       return { id, kind: "callout" as const, text: text("text") };
     default:

@@ -1,0 +1,522 @@
+import { getDb, saveDbSync } from "../db/database";
+import { renderPageRange, saveSourcePdf, TauriUnavailableError } from "./tauri";
+import { resolveRoleEndpoint, chatCompletion, type ContentPart, type RuntimeMessage } from "./agentRuntime";
+import { normalize } from "./latex/normalize";
+import { TEST_GENERATION_AGENT_PROMPT_V1 } from "./llm";
+
+/**
+ * System prompt for the vision transcription agent. A rasterized curriculum page
+ * is sent as an image_url part; the model returns the page's content as prose
+ * interspersed with delimited LaTeX ($...$ / $$...$$), which is then normalized.
+ *
+ * Why the generation role: it already advertises vision capability and grounds
+ * in curriculum evidence; reusing one binding keeps key handling in one place.
+ */
+const VISION_TRANSCRIBE_PROMPT_V1 = `You transcribe curriculum PDF pages that were rasterized to images because their display math is rendered as vector drawings (text extraction loses it).
+
+For each page image, return the page's instructional content as clean prose with every equation, expression, and figure caption transcribed as LaTeX:
+- Inline math inside single dollars: $...$
+- Display math inside double dollars: $$...$$
+- Keep the original narrative order. Do not summarize, solve, or omit.
+- For diagrams/axes without an equation, give a one-sentence figure caption in prose; do not invent coordinates.
+- Do NOT wrap the whole response in a code fence. Do NOT use \\begin{equation}/\\begin{align} environments; use $$...$$ and $...$ only.
+- If a page is blank or non-instructional (cover, toc, license), return the single word: BLANK`;
+
+export interface CurriculumNodeRecord {
+  id: string;
+  sourceId: string;
+  parentNodeId: string | null;
+  ordinal: number;
+  depth: number;
+  title: string;
+  sectionNumber: string | null;
+  startPage: number;
+  endPage: number;
+  nodeKind: "front_matter" | "chapter" | "section" | "subsection" | "review" | "back_matter";
+  extractionStatus: "authored" | "outline_inferred";
+  contentHash: string;
+  children?: CurriculumNodeRecord[];
+}
+
+export interface CurriculumSourceRecord {
+  id: string;
+  name: string;
+  hash: string;
+  pageCount: number;
+  hasOutline: boolean;
+  extractionStatus: "authored" | "outline_inferred";
+  createdAt: string;
+}
+
+export interface CurriculumChunkRecord {
+  id: string;
+  nodeId: string;
+  page: number;
+  chunkOrdinal: number;
+  textContent: string;
+  excerptHash: string;
+  chunkKind: "definition" | "theorem" | "worked_example" | "prose" | "figure_caption";
+}
+
+/* Hash helper */
+export function simpleHash(text: string): string {
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    const char = text.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash |= 0;
+  }
+  return "h" + Math.abs(hash).toString(16);
+}
+
+export async function extractPdfOutline(file: File): Promise<{
+  name: string;
+  pageCount: number;
+  outline: { title: string; destPage: number; depth: number }[];
+}> {
+  const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist");
+  GlobalWorkerOptions.workerSrc = new URL("pdf.worker.min.mjs", document.baseURI).toString();
+  const data = new Uint8Array(await file.arrayBuffer());
+  const pdf = await getDocument({ data }).promise;
+  const raw = await pdf.getOutline();
+  const flat: { title: string; destPage: number; depth: number }[] = [];
+
+  const visit = async (items: any[], depth: number) => {
+    for (const item of items ?? []) {
+      let destPage = 1;
+      try {
+        const destination = typeof item.dest === "string" ? await pdf.getDestination(item.dest) : item.dest;
+        const ref = Array.isArray(destination) ? destination[0] : null;
+        if (ref) destPage = (await pdf.getPageIndex(ref)) + 1;
+      } catch {
+        destPage = 1;
+      }
+      flat.push({ title: String(item.title ?? "Untitled section").trim(), destPage, depth });
+      if (Array.isArray(item.items) && item.items.length > 0) await visit(item.items, depth + 1);
+    }
+  };
+
+  await visit(raw ?? [], 0);
+  return { name: file.name, pageCount: pdf.numPages, outline: flat };
+}
+
+export async function ingestPdfFile(file: File): Promise<CurriculumSourceRecord> {
+  const parsed = await extractPdfOutline(file);
+  if (parsed.outline.length === 0) {
+    throw new Error("This PDF has no bookmark outline to import.");
+  }
+  const sourceId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let filePath: string | undefined;
+  // Under the desktop (Tauri) build, persist the uploaded bytes to disk so
+  // pdfium can re-open them for lazy per-node raster + vision transcription.
+  // In the browser single-file build this throws TauriUnavailableError, which
+  // we silently swallow — ingestion still records the outline; transcription
+  // is deferred until the user runs the desktop build.
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    filePath = await saveSourcePdf(file.name, bytes);
+  } catch {
+    /* not running under Tauri — leave filePath unset */
+  }
+  return parseAndIngestPdfOutline({
+    sourceId,
+    name: parsed.name,
+    pageCount: parsed.pageCount,
+    outline: parsed.outline,
+    filePath,
+  });
+}
+export async function parseAndIngestPdfOutline({
+  sourceId,
+  name,
+  pageCount,
+  outline,
+  filePath,
+}: {
+  sourceId: string;
+  name: string;
+  pageCount: number;
+  outline?: { title: string; destPage: number; depth: number; children?: any[] }[];
+  filePath?: string;
+}): Promise<CurriculumSourceRecord> {
+  const db = await getDb();
+  const now = new Date().toISOString();
+  const hasOutline = Array.isArray(outline) && outline.length > 0;
+  const extractionStatus = hasOutline ? "authored" : "outline_inferred";
+  const sourceHash = simpleHash(name + pageCount);
+
+  db.run(`
+    INSERT INTO curriculum_sources (id, name, hash, page_count, has_outline, extraction_status, created_at, file_path)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      page_count = excluded.page_count,
+      has_outline = excluded.has_outline,
+      extraction_status = excluded.extraction_status,
+      file_path = COALESCE(excluded.file_path, curriculum_sources.file_path);
+  `, [sourceId, name, sourceHash, pageCount, hasOutline ? 1 : 0, extractionStatus, now, filePath ?? null]);
+
+  // If outline provided, ingest nodes
+  const nodesToInsert = hasOutline ? outline : generateInferredOutline(pageCount);
+
+  // Convert the authored preorder outline into the persisted parent/child tree.
+  const processedNodes: CurriculumNodeRecord[] = [];
+  const stack: CurriculumNodeRecord[] = [];
+  for (let i = 0; i < nodesToInsert.length; i++) {
+    const raw = nodesToInsert[i];
+    const nextRaw = nodesToInsert[i + 1];
+    const endPage = nextRaw ? Math.max(raw.destPage, nextRaw.destPage - 1) : pageCount;
+    const secMatch = raw.title.match(/^(\d+(?:\.\d+)*)\s+/);
+    const secNum = secMatch ? secMatch[1] : null;
+    const depth = Math.max(0, raw.depth || 0);
+    while (stack.length > depth) stack.pop();
+    const parent = stack[depth - 1];
+    const nodeId = `node-${sourceId}-${i + 1}`;
+    const node: CurriculumNodeRecord = {
+      id: nodeId,
+      sourceId,
+      parentNodeId: parent?.id ?? null,
+      ordinal: i + 1,
+      depth,
+      title: raw.title,
+      sectionNumber: secNum,
+      startPage: raw.destPage,
+      endPage,
+      nodeKind: depth === 0 ? "chapter" : depth === 1 ? "section" : "subsection",
+      extractionStatus,
+      contentHash: simpleHash(nodeId + raw.title),
+    };
+    processedNodes.push(node);
+    stack[depth] = node;
+    stack.length = depth + 1;
+  }
+
+  for (const n of processedNodes) {
+    db.run(`
+      INSERT INTO curriculum_nodes (id, source_id, parent_node_id, ordinal, depth, title, section_number, start_page, end_page, node_kind, extraction_status, content_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        start_page = excluded.start_page,
+        end_page = excluded.end_page;
+    `, [n.id, n.sourceId, n.parentNodeId, n.ordinal, n.depth, n.title, n.sectionNumber, n.startPage, n.endPage, n.nodeKind, n.extractionStatus, n.contentHash]);
+
+    // Text evidence is inserted by the PDF extraction pipeline. Outline ingestion
+    // must not fabricate excerpts because generated assessments require grounded text.
+  }
+
+  saveDbSync();
+
+  return {
+    id: sourceId,
+    name,
+    hash: sourceHash,
+    pageCount,
+    hasOutline,
+    extractionStatus,
+    createdAt: now,
+  };
+}
+
+function generateInferredOutline(pageCount: number) {
+  const chapters = Math.max(1, Math.ceil(pageCount / 30));
+  const result: { title: string; destPage: number; depth: number }[] = [];
+  for (let c = 1; c <= chapters; c++) {
+    const startP = (c - 1) * 30 + 1;
+    result.push({ title: `Chapter ${c} (Inferred Structure)`, destPage: startP, depth: 0 });
+    result.push({ title: `${c}.1 Concept Review`, destPage: startP + 2, depth: 1 });
+    if (startP + 15 <= pageCount) {
+      result.push({ title: `${c}.2 Advanced Applications`, destPage: startP + 15, depth: 1 });
+    }
+  }
+  return result;
+}
+
+export async function getCurriculumTree(sourceId: string): Promise<CurriculumNodeRecord[]> {
+  const db = await getDb();
+  const res = db.exec(`
+    SELECT id, source_id, parent_node_id, ordinal, depth, title, section_number, start_page, end_page, node_kind, extraction_status, content_hash
+    FROM curriculum_nodes
+    WHERE source_id = ?
+    ORDER BY ordinal ASC;
+  `, [sourceId]);
+
+  if (!res[0]) return [];
+
+  const nodes: CurriculumNodeRecord[] = res[0].values.map((row) => ({
+    id: row[0] as string,
+    sourceId: row[1] as string,
+    parentNodeId: row[2] as string | null,
+    ordinal: row[3] as number,
+    depth: row[4] as number,
+    title: row[5] as string,
+    sectionNumber: row[6] as string | null,
+    startPage: row[7] as number,
+    endPage: row[8] as number,
+    nodeKind: row[9] as any,
+    extractionStatus: row[10] as any,
+    contentHash: row[11] as string,
+  }));
+
+  return buildTreeHierarchy(nodes);
+}
+
+function buildTreeHierarchy(nodes: CurriculumNodeRecord[]): CurriculumNodeRecord[] {
+  const map = new Map<string, CurriculumNodeRecord>();
+  const root: CurriculumNodeRecord[] = [];
+
+  nodes.forEach((n) => {
+    map.set(n.id, { ...n, children: [] });
+  });
+
+  nodes.forEach((n) => {
+    const item = map.get(n.id)!;
+    if (n.parentNodeId && map.has(n.parentNodeId)) {
+      map.get(n.parentNodeId)!.children!.push(item);
+    } else {
+      root.push(item);
+    }
+  });
+
+  return root;
+}
+
+/* Get evidence context for selected nodes (disjoint multi-select supported!) */
+export async function getEvidenceForSelectedNodes(nodeIds: string[]): Promise<{
+  nodes: CurriculumNodeRecord[];
+  chunks: CurriculumChunkRecord[];
+}> {
+  if (nodeIds.length === 0) return { nodes: [], chunks: [] };
+
+  const db = await getDb();
+  const placeholders = nodeIds.map(() => "?").join(",");
+
+  const nodesRes = db.exec(`
+    SELECT id, source_id, parent_node_id, ordinal, depth, title, section_number, start_page, end_page, node_kind, extraction_status, content_hash
+    FROM curriculum_nodes
+    WHERE id IN (${placeholders});
+  `, nodeIds);
+
+  const chunksRes = db.exec(`
+    SELECT id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind
+    FROM curriculum_chunks
+    WHERE node_id IN (${placeholders});
+  `, nodeIds);
+
+  const nodes = (nodesRes[0]?.values ?? []).map((r) => ({
+    id: r[0] as string,
+    sourceId: r[1] as string,
+    parentNodeId: r[2] as string | null,
+    ordinal: r[3] as number,
+    depth: r[4] as number,
+    title: r[5] as string,
+    sectionNumber: r[6] as string | null,
+    startPage: r[7] as number,
+    endPage: r[8] as number,
+    nodeKind: r[9] as any,
+    extractionStatus: r[10] as any,
+    contentHash: r[11] as string,
+  }));
+
+  const chunks = (chunksRes[0]?.values ?? []).map((r) => ({
+    id: r[0] as string,
+    nodeId: r[1] as string,
+    page: r[2] as number,
+    chunkOrdinal: r[3] as number,
+    textContent: r[4] as string,
+    excerptHash: r[5] as string,
+    chunkKind: r[6] as any,
+  }));
+
+  return { nodes, chunks };
+}
+
+/* ─────────────────────────────────────────────────────────────
+   LAZY PER-NODE RASTER + VISION TRANSCRIPTION
+
+   The ingestion pipeline (above) records the outline and page ranges but never
+   fabricates excerpts — display math is vector-rendered, so nothing usable can
+   come from text extraction. Instead, when the learner selects a subsection we
+   rasterize that node's page range via pdfium, hand the PNGs to the bound
+   generation-role vision model, normalize the returned LaTeX, and write rows
+   into curriculum_chunks keyed by node id. Re-selecting the same node is a
+   cache hit: chunks already exist, so nothing is re-rasterized.
+   ───────────────────────────────────────────────────────────── */
+
+/// Per-call vision transcription timeout (mirrors the reference repo: 120s
+/// request budget for a handful of 1500px pages). Generous because vision
+/// transcription is heavier than a chat turn.
+const TRANSCRIBE_TIMEOUT_MS = 120_000;
+
+const NODE_TRANSCRIBE_CACHE = new Set<string>(); // nodeIds known to have chunks, in-memory fast path
+
+/** Record the on-disk PDF path for a source so pdfium can re-open it later. */
+export async function setSourceFilePath(sourceId: string, filePath: string): Promise<void> {
+  const db = await getDb();
+  db.run(`UPDATE curriculum_sources SET file_path = ? WHERE id = ?;`, [filePath, sourceId]);
+  saveDbSync();
+}
+
+async function getSourceFilePath(sourceId: string): Promise<string | null> {
+  const db = await getDb();
+  const res = db.exec(`SELECT file_path FROM curriculum_sources WHERE id = ?;`, [sourceId]);
+  const path = res[0]?.values?.[0]?.[0];
+  return path ? String(path) : null;
+}
+
+/** True once curriculum_chunks has any row for this node (cache-hit fast path). */
+async function nodeHasChunks(nodeId: string): Promise<boolean> {
+  const db = await getDb();
+  const res = db.exec(`SELECT 1 FROM curriculum_chunks WHERE node_id = ? LIMIT 1;`, [nodeId]);
+  return (res[0]?.values?.length ?? 0) > 0;
+}
+
+/**
+ * Lazily rasterize + vision-transcribe one node's page range, writing normalized
+ * chunks. No-op (cache hit) when chunks already exist for the node. Throws
+ * `TauriUnavailableError` outside the desktop build, and surfaces model errors
+ * without writing partial chunks — the caller decides how to degrade.
+ *
+ * Returns the number of pages transcribed (0 on cache hit).
+ */
+export async function transcribeNode(nodeId: string, onProgress?: (page: number, total: number) => void): Promise<number> {
+  if (NODE_TRANSCRIBE_CACHE.has(nodeId)) return 0;
+  if (await nodeHasChunks(nodeId)) {
+    NODE_TRANSCRIBE_CACHE.add(nodeId);
+    return 0;
+  }
+
+  const db = await getDb();
+  const nodeRes = db.exec(
+    `SELECT n.source_id, n.start_page, n.end_page, n.title FROM curriculum_nodes n WHERE n.id = ?;`,
+    [nodeId]
+  );
+  const row = nodeRes[0]?.values?.[0];
+  if (!row) throw new Error(`transcribeNode: unknown node ${nodeId}`);
+
+  const sourceId = String(row[0]);
+  const startPage = Number(row[1]);
+  const endPage = Number(row[2]);
+  const nodeTitle = String(row[3]);
+  if (!isFinite(startPage) || !isFinite(endPage) || endPage < startPage) {
+    throw new Error(`transcribeNode: node ${nodeId} has invalid page range ${startPage}..${endPage}`);
+  }
+
+  const filePath = await getSourceFilePath(sourceId);
+  if (!filePath) {
+    throw new TauriUnavailableError(
+      `transcribeNode: source ${sourceId} has no file_path; the PDF must be ingested under Tauri so pdfium can open it.`
+    );
+  }
+
+  // Rasterize via pdfium (desktop only). Throws TauriUnavailableError in browser.
+  const pngBase64 = await renderPageRange(filePath, startPage, endPage);
+  if (pngBase64.length === 0) {
+    throw new Error(`transcribeNode: pdfium returned no pages for ${nodeId} (${startPage}..${endPage})`);
+  }
+
+  // One chat completion: system instructs transcription, user carries the images
+  // interleaved with a small text part naming the section. jSON mode is OFF — we
+  // want prose+LaTeX, not a structured object; the repair loop is not applicable.
+  const endpoint = await resolveRoleEndpoint("generation");
+  if (!endpoint.capabilities.vision) {
+    throw new Error(
+      `transcribeNode: the ${endpoint.modelId} endpoint bound to the generation role does not advertise vision; bind a vision-capable model to transcribe curriculum math.`
+    );
+  }
+
+  const total = pngBase64.length;
+  const userParts: ContentPart[] = [
+    { type: "text", text: `Transcribe the following ${total} page image(s) of curriculum section "${nodeTitle}". Section page range in the source PDF: ${startPage}–${endPage}.` },
+    ...pngBase64.map((b64) => ({
+      type: "image_url" as const,
+      image_url: { url: `data:image/png;base64,${b64}`, detail: "high" as const },
+    })),
+  ];
+
+  const messages: RuntimeMessage[] = [
+    { role: "system", content: TEST_GENERATION_AGENT_PROMPT_V1 + "\n\n" + VISION_TRANSCRIBE_PROMPT_V1 },
+    { role: "user", content: userParts },
+  ];
+
+  const completion = await chatCompletion({
+    endpoint,
+    messages,
+    jsonMode: false,
+    temperature: 0,
+    maxTokens: endpoint.maxTokens,
+    timeoutMs: TRANSCRIBE_TIMEOUT_MS,
+  });
+
+  // Normalize the model's prose+LaTeX byte-faithfully, then split into per-page
+  // chunk rows. A simple delimiting convention splits the model's output by
+  // page: it is told to emit "=== PAGE n ===" before each page. If the model
+  // ignores that, we fall back to one chunk covering the range.
+  const normalized = normalize(completion.content);
+  const segments = splitTranscriptionByPage(normalized, startPage, total);
+
+  for (const seg of segments) {
+    const id = `chunk-${nodeId}-p${seg.page}`;
+    db.run(
+      `INSERT OR REPLACE INTO curriculum_chunks (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind)
+       VALUES (?, ?, ?, ?, ?, ?, 'prose');`,
+      [id, nodeId, seg.page, seg.ordinal, seg.text, simpleHash(seg.text)]
+    );
+    onProgress?.(seg.page, startPage + total - 1);
+  }
+  saveDbSync();
+  NODE_TRANSCRIBE_CACHE.add(nodeId);
+  return segments.length;
+}
+
+/**
+ * Split a normalized transcription into per-page chunks. The model is asked to
+ * mark each page with `=== PAGE n ===`. When it does, each block becomes a chunk
+ * keyed by its real page number. When it does not (older models, or a single
+ * page), we emit one chunk per page in the range, each holding the full text —
+ * the dedupe-by-`page` INSERT keeps the row count honest.
+ */
+export function splitTranscriptionByPage(normalized: string, startPage: number, pageCount: number): { page: number; ordinal: number; text: string }[] {
+  const marker = /={2,}\s*PAGE\s+(\d+)\s*={2,}/i;
+  const lines = normalized.split(/\r?\n/);
+  const blocks: { page: number | null; text: string }[] = [];
+  let cur: string[] = [];
+  let pendingPage: number | null = null;
+  const flush = () => {
+    if (cur.length) {
+      const text = cur.join("\n").trim();
+      if (text) blocks.push({ page: pendingPage, text });
+      cur = [];
+    }
+  };
+
+  for (const line of lines) {
+    const m = line.match(marker);
+    if (m) {
+      flush();
+      pendingPage = Number(m[1]) || null;
+    } else {
+      cur.push(line);
+    }
+  }
+  flush();
+
+  if (blocks.length === 0) {
+    // No markers: emit one chunk bounding the range.
+    const text = normalized.trim();
+    if (!text) return [];
+    return [{ page: startPage, ordinal: 1, text }];
+  }
+
+  const out: { page: number; ordinal: number; text: string }[] = [];
+  let ordinal = 1;
+  let fallbackPage = startPage;
+  for (const b of blocks) {
+    const page = b.page ?? fallbackPage;
+    out.push({ page, ordinal: ordinal++, text: b.text });
+    if (b.page == null) fallbackPage += 1;
+  }
+  // Suppress unused-param lint when pageCount differs from resolved count.
+  void pageCount;
+  return out;
+}

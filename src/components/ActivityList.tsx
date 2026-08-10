@@ -1,29 +1,44 @@
-import { useEffect, useRef } from "react";
-import { ChevronRight } from "lucide-react";
-import { RECENT_SESSIONS, SUBJECTS } from "../data/tutor";
-import { SubjectIcon } from "./SubjectIcon";
+import { useEffect, useRef, useState } from "react";
+import { Trash2 } from "lucide-react";
+import { listStudySessions, deleteStudySession } from "../state/studySessionStore";
+import { deleteChalkboardSession } from "../api";
 
-export function ActivityList({ onOpen }: { onOpen: (title: string) => void }) {
+export function ActivityList({ onOpen, onNotify }: { onOpen: (id: string, title: string) => void; onNotify?: (t: string) => void }) {
+  const [sessions, setSessions] = useState(() => listStudySessions());
   const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const refresh = () => setSessions(listStudySessions());
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, []);
+
+  // Remove a finished session everywhere it is persisted: the localStorage
+  // study-session snapshot (what this list reads) AND the SQLite chalkboard
+  // session + its cascaded transcript. Both are keyed by the same id.
+  const remove = (id: string, title: string) => {
+    deleteStudySession(id);
+    void deleteChalkboardSession(id).catch(() => {
+      /* SQLite row may not exist for an old snapshot — the localStorage delete
+         above already removed it from this list, so this is non-fatal. */
+    });
+    setSessions(listStudySessions());
+    onNotify?.(`Deleted "${title}"`);
+  };
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const rows = Array.from(el.querySelectorAll<HTMLElement>(".reveal"));
-    const io = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((e) => {
-          if (e.isIntersecting) {
-            e.target.classList.add("is-in");
-            io.unobserve(e.target);
-          }
-        });
-      },
-      { threshold: 0.15 }
-    );
-    rows.forEach((r) => io.observe(r));
+    const io = new IntersectionObserver((entries) => entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add("is-in");
+        io.unobserve(entry.target);
+      }
+    }), { threshold: 0.15 });
+    rows.forEach((row) => io.observe(row));
     return () => io.disconnect();
-  }, []);
+  }, [sessions.length]);
 
   return (
     <section ref={ref} className="mx-auto mt-16 w-full max-w-[720px] pb-28">
@@ -32,31 +47,31 @@ export function ActivityList({ onOpen }: { onOpen: (title: string) => void }) {
         <button className="text-[12px] text-mut transition-colors hover:text-fg">View all</button>
       </div>
       <div className="space-y-0.5">
-        {RECENT_SESSIONS.map((s, i) => {
-          const subject = SUBJECTS.find((x) => x.id === s.subject)!;
-          return (
-            <button
-              key={s.title}
-              onClick={() => onOpen(s.title)}
-              className="reveal group flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors hover:bg-white/[0.035]"
-              style={{ transitionDelay: `${i * 70}ms` }}
-            >
-              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-edge bg-raise text-mut transition-colors group-hover:text-fg">
-                <SubjectIcon icon={subject.icon} size={15} />
-              </span>
+        {sessions.length === 0 ? (
+          <div className="rounded-md border border-dashed border-edge px-3 py-5 text-center text-[12px] text-dim">Your finished chalkboard sessions will appear here.</div>
+        ) : sessions.map((session, index) => (
+          <div key={session.id} className="reveal group flex w-full items-center gap-3 rounded-md px-3 py-2.5 transition-colors hover:bg-white/[0.035]" style={{ transitionDelay: `${index * 70}ms` }}>
+            <button onClick={() => onOpen(session.id, session.title)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-edge bg-raise text-mut"><span className="text-[11px]">✦</span></span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[14px] font-medium text-fg">{s.title}</span>
-                <span className="block truncate text-[12px] text-dim">{s.detail}</span>
+                <span className="block truncate text-[14px] font-medium text-fg">{session.title}</span>
+                <span className="block truncate text-[12px] text-dim">{session.messages.length} messages · {session.boards.length} boards</span>
               </span>
-              <span className="hidden font-mono text-[11px] text-dim sm:block">{s.minutes} min</span>
-              <span className="w-20 text-right font-mono text-[11px] text-dim">{s.when}</span>
-              <ChevronRight
-                size={14}
-                className="-translate-x-1 text-dim opacity-0 transition-all group-hover:translate-x-0 group-hover:opacity-100"
-              />
+              <span className="w-24 text-right font-mono text-[11px] text-dim">{new Date(session.updatedAt).toLocaleDateString()}</span>
             </button>
-          );
-        })}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                remove(session.id, session.title);
+              }}
+              aria-label={`Delete ${session.title}`}
+              title="Delete session"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-dim opacity-0 transition-all hover:bg-[#c42b1c]/15 hover:text-[#ff8b80] group-hover:opacity-100"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
       </div>
     </section>
   );

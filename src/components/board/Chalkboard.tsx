@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
-import { Latex, Graph2D, Graph3D, Diagram, ChalkStrong } from "./Visuals";
+import { Latex, ChalkStrong } from "./Visuals";
+import { VisualizationSurface } from "./VisualizationSurface";
+import type { VisualizationState } from "../../lib/visualization/types";
 
 export interface BoardTheme {
   id: "classic" | "blueprint" | "carbon";
@@ -65,6 +67,9 @@ interface Props {
   onViewChange?: (view: BoardView) => void;
   initialStrokes?: Stroke[];
   onStrokesChange?: (strokes: Stroke[]) => void;
+  /** Persist a visualization block's interactive state (e.g. dragged point
+   * positions) back into the board so it survives a session reopen. */
+  onBlockStateChange?: (blockId: string, state: VisualizationState) => void;
 }
 
 export interface Stroke {
@@ -99,6 +104,7 @@ export function Chalkboard({
   onViewChange,
   initialStrokes,
   onStrokesChange,
+  onBlockStateChange,
 }: Props) {
   const [view, setView] = useState<BoardView>(initialView ?? { x: 48, y: 36, s: 1 });
   const [revealed, setRevealed] = useState(writing ? 0 : board.blocks.length);
@@ -324,17 +330,8 @@ export function Chalkboard({
       >
         <div className="space-y-7">
           {board.blocks.length === 0 && (
-            <div className="anim-chalk max-w-[640px]" style={{ opacity: 0.75 }}>
+            <div className="anim-chalk max-w-[640px]" style={{ opacity: 0.85 }}>
               <div style={{ fontSize: 34, lineHeight: 1.25 }}>{board.title}</div>
-              <p className="mt-3" style={{ fontSize: 17, lineHeight: 1.6, opacity: 0.7 }}>
-                Empty chalkboard. Ask the tutor a question in the chat — the agent
-                will write equations, diagrams and graphs here as it explains.
-              </p>
-              <ul className="mt-3 space-y-1.5" style={{ fontSize: 15, opacity: 0.55 }}>
-                <li>— configure a model in Settings first</li>
-                <li>— then type a question in the chat box</li>
-                <li>— the agent replies + writes on the board</li>
-              </ul>
             </div>
           )}
 
@@ -345,7 +342,7 @@ export function Chalkboard({
               className="anim-chalk cursor-text select-text"
               style={{ animationDelay: `${Math.min(i, 4) * 40}ms` }}
             >
-              <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} />
+              <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} blockId={b.id} />
             </div>
           ))}
 
@@ -451,12 +448,16 @@ function BlockView({
   accent,
   scale,
   latex,
+  onBlockStateChange,
+  blockId,
 }: {
   block: Block;
   chalk: string;
   accent: string;
   scale: number;
   latex: boolean;
+  onBlockStateChange?: (blockId: string, state: VisualizationState) => void;
+  blockId: string;
 }) {
   switch (block.kind) {
     case "title":
@@ -504,12 +505,17 @@ function BlockView({
           )}
         </div>
       );
-    case "graph2d":
-      return <Graph2D fn={block.fn} domainX={block.domainX} caption={block.caption} curves={block.curves} color={chalk} accent={accent} />;
-    case "graph3d":
-      return <Graph3D surface={block.surface} caption={block.caption} color={chalk} accent={accent} />;
-    case "diagram":
-      return <Diagram variant={block.variant} caption={block.caption} color={chalk} accent={accent} />;
+    case "visualization":
+      return (
+        <VisualizationSurface
+          intent={block.intent}
+          state={block.state}
+          chalk={chalk}
+          accent={accent}
+          scale={scale}
+          onState={onBlockStateChange ? (next) => onBlockStateChange(blockId, next) : undefined}
+        />
+      );
     case "callout":
       return (
         <div
@@ -524,7 +530,7 @@ function BlockView({
         <div className="grid grid-cols-1 gap-8 md:grid-cols-2 md:items-start">
           {block.children.map((child) => (
             <div key={child.id} data-block className="min-w-0">
-              <BlockView block={child} chalk={chalk} accent={accent} scale={scale} latex={latex} />
+              <BlockView block={child} chalk={chalk} accent={accent} scale={scale} latex={latex} onBlockStateChange={onBlockStateChange} blockId={child.id} />
             </div>
           ))}
         </div>

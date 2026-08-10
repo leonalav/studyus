@@ -14,9 +14,17 @@ import {
   AtSign,
   X,
 } from "lucide-react";
-import { SCRIPTS, shape, type Intent, type Subject } from "../data/tutor";
-import { detectDomain, prepSteps } from "../data/boards";
-import { CURRICULA, SUBJECT_LIST, type SubjectKey } from "../data/curriculum";
+import {
+  renderOnboardingQuestions,
+  pairOnboardingReply,
+  type Intent,
+  type OnboardingAnswers,
+  type OnboardingQuestion,
+} from "../data/tutor";
+import { generateOnboardingQuestions, transcribeNode } from "../api";
+import { countBoundAgents } from "../lib/agentRuntime";
+import { SUBJECT_LIST, type SubjectKey } from "../data/curriculum";
+import { useCurricula, type StoredCurriculum } from "../state/curriculumStore";
 
 interface Msg {
   id: number;
@@ -24,13 +32,29 @@ interface Msg {
   text: string;
 }
 
+/** Onboarding is delivered through the chat itself, not a bolted-on form, and
+ *  the questions are written by the tutor agent for the concept the learner
+ *  picked — there is no fixed question script. After the first prompt Studyus
+ *  asks the agent for an interview, posts it as a normal tutor message, and the
+ *  learner replies in the same chat input (one answer per line). Those answers
+ *  are paired back onto the generated questions and threaded to the tutor as a
+ *  consistent system reminder for the session. */
+type OnboardingStage = "idle" | "generating" | "asking" | "preparing" | "done";
+
+interface PendingOnboarding {
+  concept: string;
+  agentCount: number;
+  boundNodes: string[];
+  prompt: string;
+  questions: OnboardingQuestion[];
+}
+
 type Depth = "auto" | "simple" | "detailed";
 
 interface Props {
-  subject: Subject;
   notify: (text: string) => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
-  onPrepare: (prompt: string) => void;
+  onPrepare: (prompt: string, boundNodes?: string[], onboarding?: OnboardingAnswers) => void;
 }
 
 const DEPTHS: { id: Depth; label: string; desc: string }[] = [
@@ -48,11 +72,11 @@ const COMMANDS: { token: string; label: string; desc: string; intent: Intent; de
   { token: "focus", label: "Focus", desc: "Pull out the one idea to remember", intent: "explain", depth: "simple" },
 ];
 
-export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
+export function SessionCard({ notify, inputRef, onPrepare }: Props) {
+  const { curricula } = useCurricula();
   const [started, setStarted] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [typing, setTyping] = useState(false);
-  const [streaming, setStreaming] = useState(false);
   const [input, setInput] = useState("");
   const [notesOpen, setNotesOpen] = useState(false);
   const [notes, setNotes] = useState<string[]>([]);
@@ -66,9 +90,14 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
   const [commandPosition, setCommandPosition] = useState({ left: 0, top: 0 });
   const [ctxSubject, setCtxSubject] = useState<SubjectKey | null>(null);
   const [ctxDoc, setCtxDoc] = useState<string | null>(null);
+  const [ctxSubsection, setCtxSubsection] = useState<string | null>(null);
+  const [onboardingStage, setOnboardingStage] = useState<OnboardingStage>("idle");
+  const [pendingOnboarding, setPendingOnboarding] = useState<PendingOnboarding | null>(null);
+  /** Real preparation progress shown in the chatbox after onboarding answers:
+   *  transcribing the chosen subsection + readying the chalkboard. */
+  const [prep, setPrep] = useState<{ pct: number; stage: string }>({ pct: 0, stage: "" });
 
   const idRef = useRef(0);
-  const streamRef = useRef<number | null>(null);
   const timersRef = useRef<number[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const depthRef = useRef<HTMLDivElement>(null);
@@ -78,27 +107,28 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
 
-  const busy = typing || streaming;
+  // Input is locked while the tutor drafts questions, while the preparation
+  // pass runs, and whenever the tutor is typing — no second submit can slip in.
+  const busy = typing || onboardingStage === "generating" || onboardingStage === "preparing";
 
   // reset on subject change
   useEffect(() => {
-    stopStream();
     timersRef.current.forEach(clearTimeout);
     timersRef.current = [];
     setStarted(false);
     setMessages([]);
     setNotes([]);
     setTyping(false);
-    setStreaming(false);
     setInput("");
     setSpeaking(false);
     setCommandOpen(false);
     setRecording(false);
     setAttachments([]);
+    setOnboardingStage("idle");
+    setPendingOnboarding(null);
+    setPrep({ pct: 0, stage: "" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subject.id]);
-
-  useEffect(() => () => stopStream(), []);
+  }, []);
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
@@ -144,52 +174,10 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
     };
   }, [commandOpen, input]);
 
-  function stopStream() {
-    if (streamRef.current !== null) {
-      clearInterval(streamRef.current);
-      streamRef.current = null;
-    }
-  }
-
-  function streamTutor(full: string, newNotes: string[]) {
-    stopStream();
-    const id = ++idRef.current;
-    setMessages((m) => [...m, { id, role: "tutor", text: "" }]);
-    setStreaming(true);
-    let i = 0;
-    streamRef.current = window.setInterval(() => {
-      i = Math.min(full.length, i + 2 + Math.floor(Math.random() * 3));
-      const slice = full.slice(0, i);
-      setMessages((m) => m.map((msg) => (msg.id === id ? { ...msg, text: slice } : msg)));
-      if (i >= full.length) {
-        stopStream();
-        setStreaming(false);
-        if (newNotes.length) {
-          setNotesOpen(true);
-          setNotes((n) => [...n, ...newNotes]);
-        }
-      }
-    }, 16);
-  }
-
-  function respond(intent: Intent) {
-    respondWithScript(SCRIPTS[subject.id][intent]);
-  }
-
-  function respondWithScript(script: { text: string; notes: string[] }, responseDepth = depth) {
-    setTyping(true);
-    const t = window.setTimeout(() => {
-      setTyping(false);
-      streamTutor(shape(script.text, responseDepth), script.notes);
-    }, 620 + Math.random() * 480);
-    timersRef.current.push(t);
-  }
-
   function start() {
     setStarted(true);
     setNotes([]);
     setMessages([]);
-    respond("greet");
   }
 
   function submit(raw?: string, intent?: Intent) {
@@ -202,43 +190,137 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
       ? COMMANDS.find((item) => item.token === commandMatch[1].toLowerCase())
       : undefined;
     const displayText = command ? text.replace(commandMatch![0], "").trim() || `@${command.token}` : text;
+
+    // Onboarding is collected through the chat, not a form. When we're waiting
+    // for the answers, this submit IS the learner's reply: pair it back onto the
+    // AI-generated questions, then run the real preparation pass (transcribe the
+    // chosen subsection, ready the chalkboard) behind a progress bar.
+    if (onboardingStage === "asking" && pendingOnboarding) {
+      setMessages((m) => [...m, { id: ++idRef.current, role: "user", text: displayText }]);
+      setInput("");
+      setCommandOpen(false);
+      const answers = pairOnboardingReply(
+        pendingOnboarding.concept,
+        pendingOnboarding.questions,
+        displayText
+      );
+      void runPreparation(pendingOnboarding, answers);
+      return;
+    }
+
     setMessages((m) => [...m, { id: ++idRef.current, role: "user", text: displayText }]);
     setInput("");
     setCommandOpen(false);
     void intent;
     void command;
 
-    // Prep appears as sequential agent messages inside the session — no black overlay.
-    const fullPrompt = `${displayText} — ${subject.topic}`;
-    const domain = detectDomain(fullPrompt);
-    const steps = prepSteps(domain);
-    setStreaming(true);
+    // First prompt of a fresh session: ask the tutor agent to write the
+    // onboarding interview, then post it and wait for the learner's reply.
+    if (onboardingStage === "idle" && messages.length === 0) {
+      void beginOnboarding(displayText);
+    }
+  }
 
-    let step = 0;
-    const runStep = () => {
-      if (step >= steps.length) {
-        setStreaming(false);
-        const t = window.setTimeout(() => onPrepare(fullPrompt), 480);
-        timersRef.current.push(t);
-        return;
-      }
-      const id = ++idRef.current;
-      const content = steps[step];
-      setMessages((m) => [...m, { id, role: "tutor", text: "" }]);
-      let i = 0;
-      stopStream();
-      streamRef.current = window.setInterval(() => {
-        i = Math.min(content.length, i + 2 + Math.floor(Math.random() * 2));
-        setMessages((m) => m.map((msg) => (msg.id === id ? { ...msg, text: content.slice(0, i) } : msg)));
-        if (i >= content.length) {
-          stopStream();
-          step += 1;
-          const t = window.setTimeout(runStep, 320);
-          timersRef.current.push(t);
+  /** Ask the tutor agent to write this session's onboarding interview for the
+   *  chosen concept, then post it as a normal tutor chat message and arm the
+   *  next submit to pair the reply. The questions are AI-generated per concept —
+   *  never a fixed script. If the agent is unbound or errors, we fall back to
+   *  starting the session directly (no fabricated questions) and surface why. */
+  async function beginOnboarding(prompt: string) {
+    const boundNodes = collectBoundNodeIds(curricula, ctxDoc, ctxSubsection);
+    const concept = resolveConcept(curricula, ctxDoc, ctxSubsection, prompt);
+    const agentCount = await safeAgentCount();
+
+    setOnboardingStage("generating");
+    setTyping(true);
+    try {
+      const { intro, questions } = await generateOnboardingQuestions({
+        concept,
+        boundNodes,
+        agentCount,
+      });
+      const script = renderOnboardingQuestions(intro, questions, agentCount);
+      setPendingOnboarding({ concept, agentCount, boundNodes, prompt, questions });
+      setOnboardingStage("asking");
+      setTyping(false);
+      setMessages((m) => [...m, { id: ++idRef.current, role: "tutor", text: script }]);
+    } catch (error) {
+      // No canned fallback questions — if the interviewer can't run, tell the
+      // learner why and take them straight into the session.
+      setTyping(false);
+      setOnboardingStage("done");
+      notify(
+        error instanceof Error
+          ? `Couldn't generate onboarding (${error.message}) — starting the session directly.`
+          : "Couldn't generate onboarding — starting the session directly."
+      );
+      onPrepare(prompt, boundNodes);
+    }
+  }
+
+  /**
+   * Real preparation pass, run after the learner answers the onboarding
+   * questions and before the chalkboard opens.
+   *
+   * Every step below is actual work, and the bar only advances when a step
+   * genuinely completes — there is no timed fake animation. The long pole is
+   * transcribing the chosen subsection: `transcribeNode` rasterizes that node's
+   * pages and vision-transcribes them into curriculum_chunks, reporting real
+   * per-page progress. A node that was already transcribed is a cache hit and
+   * passes through in a tick.
+   */
+  async function runPreparation(pending: PendingOnboarding, answers: OnboardingAnswers) {
+    const { prompt, boundNodes, concept } = pending;
+    setOnboardingStage("preparing");
+    setPendingOnboarding(null);
+    setPrep({ pct: 4, stage: "Reading your answers…" });
+
+    try {
+      // Transcribe every bound node so the tutor has real evidence to ground on.
+      // Progress is apportioned across nodes; within a node we get page-level
+      // callbacks, so the bar tracks actual pages processed.
+      if (boundNodes.length > 0) {
+        const span = 86; // 4% → 90%
+        for (let i = 0; i < boundNodes.length; i++) {
+          const base = 4 + (span * i) / boundNodes.length;
+          const slice = span / boundNodes.length;
+          setPrep({
+            pct: Math.round(base),
+            stage:
+              boundNodes.length > 1
+                ? `Reading ${concept} · section ${i + 1} of ${boundNodes.length}…`
+                : `Reading ${concept} from your curriculum…`,
+          });
+          await transcribeNode(boundNodes[i], (page, last) => {
+            const within = last > 0 ? Math.min(1, Math.max(0, page / last)) : 1;
+            setPrep({
+              pct: Math.round(base + slice * within),
+              stage: `Transcribing page ${page} of ${concept}…`,
+            });
+          });
         }
-      }, 18);
-    };
-    runStep();
+      } else {
+        setPrep({ pct: 45, stage: "No curriculum bound — preparing free study…" });
+      }
+
+      setPrep({ pct: 94, stage: "Preparing the chalkboard…" });
+      setPrep({ pct: 100, stage: "Ready" });
+      setOnboardingStage("done");
+      onPrepare(prompt, boundNodes, answers);
+    } catch (error) {
+      // Transcription is best-effort: the desktop-only pdfium path is absent in
+      // the browser build, and a node may have no readable pages. Enter the
+      // session anyway with whatever evidence exists, and say what happened.
+      setOnboardingStage("done");
+      notify(
+        error instanceof Error
+          ? `Could not read the curriculum section (${error.message}) — starting with what's available.`
+          : "Could not read the curriculum section — starting with what's available."
+      );
+      onPrepare(prompt, boundNodes, answers);
+    } finally {
+      setPrep({ pct: 0, stage: "" });
+    }
   }
 
   function copyTranscript() {
@@ -284,13 +366,18 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
   return (
     <section className="anim-fade-up overflow-hidden rounded-lg border border-edge bg-card shadow-[0_1px_3px_rgba(0,0,0,0.45)]">
       {/* header */}
-      <div className="relative flex items-center gap-2.5 border-b border-edge-soft px-4 py-3">
-        <h3 className="text-[15px] font-semibold text-fg">Tutor</h3>
+      <div className="relative flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-edge-soft px-4 py-3">
+        <h3 className="shrink-0 text-[15px] font-semibold text-fg">Tutor</h3>
         <ContextPicker
           subject={ctxSubject}
           setSubject={setCtxSubject}
           doc={ctxDoc}
-          setDoc={setCtxDoc}
+          setDoc={(value) => {
+            setCtxDoc(value);
+            setCtxSubsection(null);
+          }}
+          subsection={ctxSubsection}
+          setSubsection={setCtxSubsection}
           notify={notify}
         />
         <span className="ml-auto flex items-center gap-1.5 font-mono text-[11px] text-dim">
@@ -339,9 +426,6 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
                   <div className="mb-0.5 font-mono text-[10px] uppercase tracking-wider text-dim">Studyus</div>
                   <p className="whitespace-pre-wrap text-[14px] leading-relaxed text-fg/90">
                     {m.text}
-                    {streaming && m.id === messages[messages.length - 1]?.id && (
-                      <span className="caret ml-0.5 inline-block h-3.5 w-[7px] translate-y-0.5 bg-accent" />
-                    )}
                   </p>
                 </div>
               ) : (
@@ -364,6 +448,28 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
                 ))}
               </div>
             )}
+
+            {/* Post-onboarding preparation: a real progress bar for transcribing
+                the chosen subsection and readying the chalkboard. The bar only
+                advances on actual completed work (per-page transcription
+                callbacks), never a timed animation. */}
+            {onboardingStage === "preparing" && (
+              <div className="anim-msg rounded-md border border-edge bg-raise/60 px-3 py-2.5">
+                <div className="mb-1.5 flex items-center gap-2">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+                  <span className="font-mono text-[10.5px] uppercase tracking-wider text-dim">
+                    {prep.stage || "Preparing…"}
+                  </span>
+                  <span className="ml-auto font-mono text-[10px] text-dim">{prep.pct}%</span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-edge">
+                  <div
+                    className="h-full rounded-full bg-accent transition-[width] duration-300 ease-out"
+                    style={{ width: `${Math.max(2, prep.pct)}%` }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -374,7 +480,15 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
           }`}
         >
           <div className="pointer-events-none absolute left-3.5 top-3 font-mono text-[10px] uppercase tracking-wider text-dim">
-            {started ? "Your next prompt" : "Write to Studyus"}
+            {onboardingStage === "generating"
+              ? "Onboarding · preparing your questions"
+              : onboardingStage === "asking"
+                ? "Onboarding · answer each line"
+                : onboardingStage === "preparing"
+                  ? "Preparing your session…"
+                  : started
+                    ? "Your next prompt"
+                    : "Write to Studyus"}
           </div>
           <textarea
             ref={inputRef}
@@ -394,9 +508,15 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
               }
             }}
             placeholder={
-              busy
-                ? "Studyus is drafting..."
-                : `Ask anything about ${subject.topic.toLowerCase()}, paste a problem, or type @...`
+              onboardingStage === "generating"
+                ? "Studyus is preparing your onboarding questions…"
+                : onboardingStage === "preparing"
+                  ? "Studyus is reading your curriculum and setting up the chalkboard…"
+                  : busy
+                    ? "Studyus is drafting..."
+                    : onboardingStage === "asking"
+                      ? "Answer each question — one per line — then press Enter to begin"
+                      : "Tell Studyus what to study, paste a problem, or type @..."
             }
             rows={5}
             className="min-h-[180px] w-full resize-none bg-transparent px-3.5 pb-3 pt-8 text-[14px] leading-relaxed text-fg outline-none placeholder:text-faint disabled:cursor-not-allowed"
@@ -627,22 +747,32 @@ export function SessionCard({ subject, notify, inputRef, onPrepare }: Props) {
   );
 }
 
-/* ── Subject → curriculum picker that lives where "@Today" used to be ── */
+/* ── Subject → curriculum → concept picker. Sits between the "Tutor" heading
+      and the session-status pill; its title IS the chosen subconcept. ── */
 
 function ContextPicker({
   subject,
   setSubject,
   doc,
   setDoc,
+  subsection,
+  setSubsection,
   notify,
 }: {
   subject: SubjectKey | null;
   setSubject: (s: SubjectKey | null) => void;
   doc: string | null;
   setDoc: (d: string | null) => void;
+  subsection: string | null;
+  setSubsection: (s: string | null) => void;
   notify: (t: string) => void;
 }) {
+  const { curricula } = useCurricula();
   const [open, setOpen] = useState(false);
+  /** Which step of the drill-down is showing. Choosing a PDF advances to
+   *  "concepts", which renders that PDF's real bookmarks. */
+  const [step, setStep] = useState<"subject" | "docs" | "concepts">("subject");
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -653,11 +783,24 @@ function ContextPicker({
     return () => document.removeEventListener("mousedown", close);
   }, []);
 
-  const meta = SUBJECT_LIST.find((s) => s.id === subject);
-  const docs = subject ? CURRICULA.filter((c) => c.subject === subject) : [];
-  const docName = doc ? CURRICULA.find((c) => c.id === doc)?.name.replace(/\.pdf$/i, "") : null;
+  // Reopening lands on the deepest step that still has a selection, so the
+  // learner sees the concept list they were last browsing.
+  useEffect(() => {
+    if (!open) return;
+    setStep(doc ? "concepts" : subject ? "docs" : "subject");
+  }, [open, doc, subject]);
 
-  const label = docName ?? meta?.label ?? "@Today";
+  const meta = SUBJECT_LIST.find((s) => s.id === subject);
+  const docs = subject ? curricula.filter((c) => c.subject === subject) : [];
+  const selectedDoc = curricula.find((c) => c.id === doc);
+  const docName = selectedDoc?.name.replace(/\.pdf$/i, "") ?? null;
+
+  const selectedNode = selectedDoc ? findNodeDeep(selectedDoc.nodes, subsection) : null;
+  // The picker's title is the chosen subconcept — that is what replaces
+  // "Add context" once a concept is picked from the PDF's bookmarks.
+  const label = selectedNode
+    ? [selectedNode.sectionNumber, selectedNode.title].filter(Boolean).join(" ")
+    : docName ?? meta?.label ?? "Add context";
 
   return (
     <div className="relative" ref={wrapRef}>
@@ -672,7 +815,7 @@ function ContextPicker({
 
       {open && (
         <div className="anim-toast absolute left-0 top-9 z-40 w-[290px] overflow-hidden rounded-lg border border-edge bg-raise shadow-[0_18px_50px_rgba(0,0,0,0.55)]">
-          {!subject ? (
+          {step === "subject" ? (
             <>
               <div className="border-b border-edge-soft px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-dim">
                 Choose a subject
@@ -684,6 +827,7 @@ function ContextPicker({
                     onClick={() => {
                       setSubject(s.id);
                       setDoc(null);
+                      setStep("docs");
                     }}
                     className="flex w-full items-center gap-2.5 rounded px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07]"
                   >
@@ -694,13 +838,14 @@ function ContextPicker({
                 ))}
               </div>
             </>
-          ) : (
+          ) : step === "docs" ? (
             <>
               <div className="flex items-center gap-2 border-b border-edge-soft px-3 py-2">
                 <button
                   onClick={() => {
                     setSubject(null);
                     setDoc(null);
+                    setStep("subject");
                   }}
                   className="font-mono text-[10px] uppercase tracking-wider text-dim transition-colors hover:text-fg"
                 >
@@ -722,9 +867,13 @@ function ContextPicker({
                   <button
                     key={d.id}
                     onClick={() => {
+                      // Picking a PDF opens its Concepts list rather than closing
+                      // the menu — the learner still has to choose a subconcept,
+                      // and that choice becomes this picker's title.
                       setDoc(d.id);
-                      setOpen(false);
-                      notify(`Context set to ${d.name.replace(/\.pdf$/i, "")}`);
+                      setSubsection(null);
+                      setExpanded(new Set(d.nodes.slice(0, 1).map((n) => n.id)));
+                      setStep("concepts");
                     }}
                     className={`flex w-full items-start gap-2.5 rounded px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07] ${
                       doc === d.id ? "bg-white/[0.06]" : ""
@@ -733,15 +882,16 @@ function ContextPicker({
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[12.5px] text-fg">{d.name.replace(/\.pdf$/i, "")}</span>
                       <span className="block font-mono text-[10px] text-dim">
-                        {d.pages} pages · {d.sections.length} sections
+                        {d.pageCount} pages · {d.nodes.length} sections
                       </span>
                     </span>
-                    {doc === d.id && <Check size={12} className="mt-0.5 shrink-0 text-accent" />}
+                    <ChevronRightSmall />
                   </button>
                 ))}
                 <button
                   onClick={() => {
                     setDoc(null);
+                    setSubsection(null);
                     setOpen(false);
                     notify("Studying without a curriculum");
                   }}
@@ -751,6 +901,56 @@ function ContextPicker({
                 </button>
               </div>
             </>
+          ) : (
+            /* Concepts — the chosen PDF's real bookmark tree. Selecting a leaf
+               sets the subconcept that titles this picker. */
+            <>
+              <div className="flex items-center gap-2 border-b border-edge-soft px-3 py-2">
+                <button
+                  onClick={() => setStep("docs")}
+                  className="font-mono text-[10px] uppercase tracking-wider text-dim transition-colors hover:text-fg"
+                >
+                  ← PDFs
+                </button>
+                <span className="ml-auto min-w-0 truncate text-[11.5px] font-medium text-fg">
+                  {docName}
+                </span>
+              </div>
+              <div className="px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
+                Concepts
+              </div>
+              <div className="max-h-[260px] overflow-y-auto p-1 pt-0">
+                {(selectedDoc?.nodes.length ?? 0) === 0 && (
+                  <p className="px-2.5 py-3 text-[12px] text-dim">
+                    This PDF has no indexed bookmarks yet.
+                  </p>
+                )}
+                {selectedDoc?.nodes.map((node) => (
+                  <ConceptRow
+                    key={node.id}
+                    node={node}
+                    depth={0}
+                    selectedId={subsection}
+                    expanded={expanded}
+                    onToggleExpand={(id) =>
+                      setExpanded((cur) => {
+                        const next = new Set(cur);
+                        if (next.has(id)) next.delete(id);
+                        else next.add(id);
+                        return next;
+                      })
+                    }
+                    onPick={(picked) => {
+                      setSubsection(picked.id);
+                      setOpen(false);
+                      notify(
+                        `Studying ${[picked.sectionNumber, picked.title].filter(Boolean).join(" ")}`
+                      );
+                    }}
+                  />
+                ))}
+              </div>
+            </>
           )}
         </div>
       )}
@@ -758,6 +958,161 @@ function ContextPicker({
   );
 }
 
+/** One bookmark row in the Concepts tree. Renders its children recursively so
+ *  nested subsections stay reachable; the caret expands, the label picks. */
+function ConceptRow({
+  node,
+  depth,
+  selectedId,
+  expanded,
+  onToggleExpand,
+  onPick,
+}: {
+  node: StoredCurriculum["nodes"][number];
+  depth: number;
+  selectedId: string | null;
+  expanded: Set<string>;
+  onToggleExpand: (id: string) => void;
+  onPick: (node: StoredCurriculum["nodes"][number]) => void;
+}) {
+  const hasChildren = (node.children?.length ?? 0) > 0;
+  const isOpen = expanded.has(node.id);
+  const selected = node.id === selectedId;
+
+  return (
+    <>
+      <div
+        className={`flex items-center gap-1 rounded transition-colors hover:bg-white/[0.07] ${
+          selected ? "bg-white/[0.08]" : ""
+        }`}
+        style={{ paddingLeft: depth * 12 }}
+      >
+        {hasChildren ? (
+          <button
+            onClick={() => onToggleExpand(node.id)}
+            className="grid h-5 w-5 shrink-0 place-items-center rounded text-dim transition-colors hover:text-fg"
+            aria-label={isOpen ? "Collapse" : "Expand"}
+          >
+            <ChevronDown size={11} className={`transition-transform ${isOpen ? "" : "-rotate-90"}`} />
+          </button>
+        ) : (
+          <span className="h-5 w-5 shrink-0" />
+        )}
+        <button
+          onClick={() => onPick(node)}
+          className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pr-2 text-left"
+        >
+          <span className={`min-w-0 flex-1 truncate text-[12.5px] ${selected ? "text-fg" : "text-mut"}`}>
+            {[node.sectionNumber, node.title].filter(Boolean).join(" ")}
+          </span>
+          {selected && <Check size={12} className="shrink-0 text-accent" />}
+        </button>
+      </div>
+      {hasChildren && isOpen &&
+        node.children!.map((child) => (
+          <ConceptRow
+            key={child.id}
+            node={child}
+            depth={depth + 1}
+            selectedId={selectedId}
+            expanded={expanded}
+            onToggleExpand={onToggleExpand}
+            onPick={onPick}
+          />
+        ))}
+    </>
+  );
+}
+
+/** Find a node anywhere in the bookmark tree by id. */
+function findNodeDeep(
+  nodes: StoredCurriculum["nodes"],
+  id: string | null
+): StoredCurriculum["nodes"][number] | null {
+  if (!id) return null;
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    const deeper = findNodeDeep(node.children ?? [], id);
+    if (deeper) return deeper;
+  }
+  return null;
+}
+
 function ChevronRightSmall() {
   return <ChevronDown size={12} className="-rotate-90 text-dim" />;
+}
+
+/** Concept shown to the learner during onboarding: the picked subsection's
+ *  title when a curriculum node is selected, otherwise the free-form prompt
+ *  (or a neutral default when the prompt is empty). */
+function resolveConcept(
+  curricula: StoredCurriculum[],
+  docId: string | null,
+  subsectionId: string | null,
+  prompt: string
+): string {
+  if (subsectionId) {
+    const doc = curricula.find((c) => c.id === docId);
+    const node = doc?.nodes.find((n) => n.id === subsectionId);
+    if (node) return [node.sectionNumber, node.title].filter(Boolean).join(" ") || node.title;
+  }
+  if (docId) {
+    const doc = curricula.find((c) => c.id === docId);
+    if (doc) return doc.name.replace(/\.pdf$/i, "");
+  }
+  return prompt.trim() || "this section";
+}
+
+async function safeAgentCount(): Promise<number> {
+  try {
+    return await countBoundAgents();
+  } catch {
+    return 0;
+  }
+}
+
+/** Collect the curriculum node ids the tutor should ground on for a study turn.
+ *  A picked subsection anchors the tutor to that section AND every node nested
+ *  beneath it. A picked doc with no subsection anchors to the whole document.
+ *  Free-form study (no doc) yields no bound nodes — the tutor gets no evidence. */
+function collectBoundNodeIds(
+  curricula: StoredCurriculum[],
+  docId: string | null,
+  subsectionId: string | null
+): string[] {
+  if (!docId) return [];
+  const doc = curricula.find((c) => c.id === docId);
+  if (!doc) return [];
+  if (!subsectionId) return doc.nodes.map((n) => n.id);
+  const ids: string[] = [];
+  const walk = (node: StoredCurriculum["nodes"][number]): void => {
+    ids.push(node.id);
+    node.children?.forEach(walk);
+  };
+  const roots = doc.nodes;
+  for (const root of roots) {
+    if (root.id === subsectionId) {
+      walk(root);
+      return ids;
+    }
+    const found = findInChildren(root, subsectionId);
+    if (found) {
+      walk(found);
+      return ids;
+    }
+  }
+  return [subsectionId];
+}
+
+function findInChildren(
+  node: StoredCurriculum["nodes"][number],
+  target: string
+): StoredCurriculum["nodes"][number] | null {
+  if (!node.children) return null;
+  for (const child of node.children) {
+    if (child.id === target) return child;
+    const deeper = findInChildren(child, target);
+    if (deeper) return deeper;
+  }
+  return null;
 }

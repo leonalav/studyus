@@ -6,26 +6,39 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "tauri": "cross-env CARGO_TARGET_DIR=C:/rust_targets STUDYUS_TAURI=1 tauri",
+    "tauri:dev": "cross-env CARGO_TARGET_DIR=C:/rust_targets STUDYUS_TAURI=1 tauri dev",
+    "tauri:build": "cross-env CARGO_TARGET_DIR=C:/rust_targets STUDYUS_TAURI=1 tauri build"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@types/sql.js": "^1.4.11",
     "clsx": "2.1.1",
     "html-to-image": "^1.11.13",
+    "jsxgraph": "^1.13.1",
     "katex": "^0.18.1",
     "lucide-react": "^1.28.0",
+    "pdfjs-dist": "^6.2.108",
     "react": "19.2.6",
     "react-dom": "19.2.6",
+    "sql.js": "^1.14.1",
     "tailwind-merge": "3.4.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.1.17",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/katex": "^0.16.8",
     "@types/node": "22.19.17",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
+    "cross-env": "^10.1.0",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.3.2",
-    "vite-plugin-singlefile": "2.3.0"
+    "vite-plugin-singlefile": "2.3.0",
+    "vitest": "^4.1.10"
   }
 }

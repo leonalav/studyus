@@ -253,3 +253,48 @@ body {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* ── JSXGraph chalkboard adaptation ──
+   JSXGraph's default stylesheet paints infoboxes and labels black-on-white and
+   shows navigation/copyright chrome. We render on a themed chalkboard instead,
+   so we make the board transparent and force all JSXGraph text to inherit the
+   container's chalk color. This replaces importing the package CSS (whose
+   exports map blocks the subpath anyway) and keeps the single-file build clean. */
+
+.JSXGraph,
+.jsxcell {
+  background: transparent !important;
+  font-family: monospace;
+}
+
+.JSXGraph svg,
+.jsxcell svg {
+  background: transparent !important;
+}
+
+/* Text (point labels, axis ticks, free text) inherits chalk color. */
+.JXGtext,
+.JXGtext tspan {
+  fill: currentColor !important;
+  color: currentColor !important;
+  stroke: none !important;
+  font-family: monospace !important;
+}
+
+/* Hide the copyright line and navigation/zoom buttons; we disabled them in
+   the board config, but the CSS is belt-and-suspenders. */
+.JXG_board_logo,
+.JXG_navigation,
+.JXG_infobox {
+  display: none !important;
+}
+
+/* The transient hover infobox; if it ever shows, keep it chalk-themed. */
+.JXGinfobox {
+  background: rgba(0, 0, 0, 0.5) !important;
+  color: currentColor !important;
+  border: none !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  font-family: monospace !important;
+}

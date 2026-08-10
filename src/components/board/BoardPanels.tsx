@@ -6,20 +6,11 @@ import {
   Paperclip,
   Image as ImageIcon,
   Mic,
-  Code2,
-  Volume2,
-  Sparkles,
+  X,
 } from "lucide-react";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
 import { THEMES, FONTS, type BoardTheme } from "./Chalkboard";
-
-export interface AgentEndpoint {
-  baseUrl: string;
-  model: string;
-  apiKey: string;
-  enabled: boolean;
-}
 
 /* ══ Threads ══ */
 
@@ -40,11 +31,24 @@ export function ThreadsPanel({
   onPick: (id: string) => void;
   onClose: () => void;
 }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
-    <div className="absolute inset-0 z-50 grid place-items-center bg-black/55 backdrop-blur-sm" onClick={onClose}>
+    <div className="absolute inset-0 z-50 grid place-items-center bg-transparent" onClick={onClose}>
       <div
+        role="dialog"
+        aria-modal="true"
         onClick={(e) => e.stopPropagation()}
-        className="anim-toast w-[min(900px,92vw)] overflow-hidden rounded-xl border border-edge bg-[#161616] shadow-[0_30px_80px_rgba(0,0,0,0.65)]"
+        className="anim-toast w-[min(900px,92vw)] overflow-hidden rounded-xl border border-white/15 bg-white/[0.07] shadow-[0_24px_70px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/10 backdrop-blur-2xl backdrop-saturate-150"
       >
         <div className="flex items-center justify-between border-b border-edge px-4 py-3">
           <h3 className="text-[13.5px] font-semibold text-fg">Select a board to bring on screen</h3>
@@ -137,17 +141,16 @@ function MiniBlock({ block }: { block: Block }) {
       return <div><div className="font-mono text-[22px]">{block.tex}</div><div className="text-[14px] opacity-60">{block.caption}</div></div>;
     case "callout":
       return <div className="inline-block rounded-lg border-2 border-dashed border-current px-4 py-2 text-[18px] opacity-80">{block.text}</div>;
-    case "diagram":
-      return <div className="grid h-[150px] w-[260px] place-items-center rounded-[50%] border-2 border-current text-[18px] opacity-70">{block.caption ?? block.variant}</div>;
-    case "graph2d":
-    case "graph3d":
-      return <div className="h-[150px] w-[280px] border-b-2 border-l-2 border-current p-4 text-[17px] opacity-70">{block.caption}</div>;
+    case "visualization": {
+      const title = "title" in block.intent && block.intent.title ? block.intent.title : block.intent.type;
+      return <div className="inline-block rounded-lg border border-current/50 px-3 py-2 text-[16px] opacity-80">∿ {title}</div>;
+    }
     case "row":
       return <div className="grid grid-cols-2 gap-8">{block.children.map((child) => <MiniBlock key={child.id} block={child} />)}</div>;
   }
 }
 
-/* ══ Settings ══ */
+/* ══ Settings (Temporary Agent Endpoint section removed completely) ══ */
 
 export function SettingsPanel({
   theme,
@@ -158,8 +161,6 @@ export function SettingsPanel({
   setFontScale,
   latex,
   setLatex,
-  endpoint,
-  setEndpoint,
   onClose,
 }: {
   theme: BoardTheme;
@@ -170,8 +171,6 @@ export function SettingsPanel({
   setFontScale: (n: number) => void;
   latex: boolean;
   setLatex: (b: boolean) => void;
-  endpoint: AgentEndpoint;
-  setEndpoint: (e: AgentEndpoint) => void;
   onClose: () => void;
 }) {
   return (
@@ -231,7 +230,7 @@ export function SettingsPanel({
 
         <button
           onClick={() => setLatex(!latex)}
-          className="mb-4 flex w-full items-center gap-2.5 rounded-md border border-edge bg-raise px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07]"
+          className="flex w-full items-center gap-2.5 rounded-md border border-edge bg-raise px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07]"
         >
           <span className="flex-1">
             <span className="block text-[12.5px] text-fg">LaTeX rendering</span>
@@ -241,50 +240,6 @@ export function SettingsPanel({
             <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${latex ? "translate-x-3" : ""}`} />
           </span>
         </button>
-
-        <div className="mb-1 flex items-center justify-between">
-          <Label>Agent endpoint (temporary)</Label>
-          <span className={`rounded-full px-1.5 py-[1px] text-[9.5px] font-medium ${
-            endpoint.enabled ? "bg-accent/20 text-accent" : "bg-white/8 text-dim"
-          }`}>
-            {endpoint.enabled ? "Live" : "Off"}
-          </span>
-        </div>
-        <p className="mb-2 text-[10.5px] text-dim">
-          OpenAI-compatible chat endpoint. Used by the agent to reply in the chat box and write on the chalkboard.
-        </p>
-        <div className="mb-2 flex gap-1.5">
-          <input
-            value={endpoint.baseUrl}
-            onChange={(e) => setEndpoint({ ...endpoint, baseUrl: e.target.value })}
-            placeholder="https://api.openai.com/v1"
-            className="min-w-0 flex-1 rounded-md border border-edge bg-black/30 px-2 py-1.5 font-mono text-[10.5px] text-fg outline-none placeholder:text-dim focus:border-accent/60"
-          />
-          <button
-            onClick={() => setEndpoint({ ...endpoint, enabled: !endpoint.enabled })}
-            className={`rounded-md px-2.5 py-1.5 text-[10.5px] font-medium transition-colors ${
-              endpoint.enabled ? "bg-accent text-white" : "border border-edge bg-white/[0.06] text-mut hover:text-fg"
-            }`}
-          >
-            {endpoint.enabled ? "Disable" : "Enable"}
-          </button>
-        </div>
-        <input
-          value={endpoint.model}
-          onChange={(e) => setEndpoint({ ...endpoint, model: e.target.value })}
-          placeholder="Model (e.g. gpt-4o-mini, llama-3, etc.)"
-          className="mb-2 w-full rounded-md border border-edge bg-black/30 px-2 py-1.5 font-mono text-[10.5px] text-fg outline-none placeholder:text-dim focus:border-accent/60"
-        />
-        <input
-          type="password"
-          value={endpoint.apiKey}
-          onChange={(e) => setEndpoint({ ...endpoint, apiKey: e.target.value })}
-          placeholder="API key (kept in-session only)"
-          className="w-full rounded-md border border-edge bg-black/30 px-2 py-1.5 font-mono text-[10.5px] text-fg outline-none placeholder:text-dim focus:border-accent/60"
-        />
-        <p className="mt-2 font-mono text-[9.5px] text-dim">
-          Resets when the session ends.
-        </p>
       </div>
     </div>
   );
@@ -323,6 +278,7 @@ export interface ChatMsg {
   id: number;
   role: "tutor" | "user" | "system";
   text: string;
+  imageData?: string;
 }
 
 export function ChatDock({
@@ -335,30 +291,62 @@ export function ChatDock({
   attachments,
   onAddAttachment,
   onClearAttachments,
-  onSpeakLast,
-  onInlineAction,
+  onRemoveAttachment,
   agentStatus,
 }: {
+  chatOpen?: boolean;
   messages: ChatMsg[];
-  onSend: (t: string) => void;
+  onSend: (t: string, imgData?: string) => void;
   collapsed: boolean;
   setCollapsed: (b: boolean) => void;
   onClose: () => void;
   typing: boolean;
-  attachments: { name: string; kind: "file" | "image" | "audio" | "code" }[];
-  onAddAttachment: (kind: "file" | "image" | "audio" | "code") => void;
+  attachments: { name: string; kind: "file" | "image" | "audio" | "code"; url?: string }[];
+  onAddAttachment: (kind: "file" | "image" | "audio" | "code", name?: string, url?: string) => void;
   onClearAttachments: () => void;
+  onRemoveAttachment: (index: number) => void;
   onSpeakLast: () => void;
-  onInlineAction: (a: "ask-tutor" | "explain" | "example" | "redo") => void;
   agentStatus?: "idle" | "thinking" | "writing" | "error";
 }) {
   const [val, setVal] = useState("");
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  /* draggable position — null means "use the default anchored spot" */
+  /* draggable position */
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const dragRef = useRef<{ dx: number; dy: number } | null>(null);
   const shellRef = useRef<HTMLDivElement>(null);
+
+  const toggleVoiceDictation = () => {
+    if (isRecordingVoice) {
+      setIsRecordingVoice(false);
+      onSend("I finished recording an audio note. Please use the attached recording as context.");
+    } else {
+      setIsRecordingVoice(true);
+      onAddAttachment("audio", `voice-${Date.now()}.m4a`);
+    }
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const url = evt.target?.result as string;
+        onAddAttachment("image", file.name, url);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      onAddAttachment("file", file.name);
+    }
+  };
 
   const startDrag = (e: React.MouseEvent) => {
     const box = shellRef.current?.getBoundingClientRect();
@@ -398,21 +386,30 @@ export function ChatDock({
   }, [messages, typing]);
 
   const send = () => {
-    if (!val.trim()) return;
-    onSend(val.trim());
+    if (!val.trim() && attachments.length === 0) return;
+    const imgAtt = attachments.find((a) => a.kind === "image");
+    onSend(val.trim(), imgAtt?.url);
     setVal("");
   };
 
   const attachmentsBar = (
     <div className="flex items-center gap-1.5 overflow-x-auto border-b border-white/[0.08] px-2.5 py-1.5">
       {attachments.length === 0 ? (
-        <span className="font-mono text-[9.5px] text-white/30">No attachments · use the row below to add a file, image, voice or code</span>
+        <span className="font-mono text-[9.5px] text-white/30">No attachments · click File, Image, or Voice below</span>
       ) : (
         <>
           {attachments.map((a, i) => (
-            <span key={i} className="flex items-center gap-1 rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[9.5px] text-white/75">
+            <span key={i} className="flex items-center gap-1.5 rounded bg-white/[0.07] px-2 py-1 font-mono text-[10px] text-white/85">
               <span className="h-1.5 w-1.5 rounded-full bg-accent" />
               {a.name}
+              <button
+                onClick={() => onRemoveAttachment(i)}
+                aria-label={`Remove ${a.name}`}
+                title={`Remove ${a.name}`}
+                className="grid h-3.5 w-3.5 place-items-center rounded text-white/45 transition-colors hover:bg-white/10 hover:text-white"
+              >
+                <X size={9} />
+              </button>
             </span>
           ))}
           <button onClick={onClearAttachments} className="ml-auto font-mono text-[9.5px] text-white/40 hover:text-white">
@@ -424,46 +421,70 @@ export function ChatDock({
   );
 
   const multimodalRow = (
-    <div className="flex items-center gap-0.5 px-2 py-1">
-      <MMButton onClick={() => onAddAttachment("file")} title="Attach a file" label="File">
+    <div className="relative flex items-center gap-0.5 px-2 py-1">
+      <input
+        ref={fileInputRef}
+        type="file"
+        hidden
+        onChange={handleFileUpload}
+      />
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={handleImageUpload}
+      />
+
+      <MMButton onClick={() => fileInputRef.current?.click()} title="Attach a file" label="File">
         <Paperclip size={13} />
       </MMButton>
-      <MMButton onClick={() => onAddAttachment("image")} title="Attach an image" label="Image">
+      <MMButton onClick={() => imageInputRef.current?.click()} title="Attach an image" label="Image">
         <ImageIcon size={13} />
       </MMButton>
-      <MMButton onClick={() => onAddAttachment("audio")} title="Voice input" label="Voice">
-        <Mic size={13} />
-      </MMButton>
-      <MMButton onClick={() => onAddAttachment("code")} title="Paste a code snippet" label="Code">
-        <Code2 size={13} />
-      </MMButton>
-      <span className="mx-1 h-4 w-px bg-white/8" />
-      <MMButton onClick={() => onInlineAction("ask-tutor")} title="Ask the tutor to expand on the board" label="Ask">
-        <Sparkles size={13} />
-      </MMButton>
-      <MMButton onClick={onSpeakLast} title="Read the last tutor answer aloud" label="Read">
-        <Volume2 size={13} />
+      <MMButton onClick={toggleVoiceDictation} title="Voice input / Dictation" label="Voice">
+        <Mic size={13} className={isRecordingVoice ? "text-accent animate-pulse" : ""} />
       </MMButton>
     </div>
   );
 
-  /* Collapsed = only the thin bar. It stays collapsed while typing;
-     only the Chat button expands it. */
+  /* Collapsed = only the thin bar */
   if (collapsed) {
+    // While the agent is thinking/writing, the "Chat" button becomes an
+    // animated typing bubble so the collapsed bar still signals activity.
+    const busy = typing || (agentStatus != null && agentStatus !== "idle" && agentStatus !== "error");
     return (
       <div ref={shellRef} className={shellClass} style={shellStyle}>
         <div
           onMouseDown={startDrag}
           className="flex cursor-grab items-center gap-2 rounded-md border border-white/8 bg-[#343436]/58 px-2 py-1.5 shadow-[0_8px_24px_rgba(0,0,0,0.25)] active:cursor-grabbing"
         >
-          <button
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={() => setCollapsed(false)}
-            title="Expand the AI Response panel"
-            className="rounded bg-white/10 px-2 py-1 text-[10px] font-medium text-white/75 transition-colors hover:bg-white/20 hover:text-white"
-          >
-            Chat
-          </button>
+          {busy ? (
+            <span
+              className="grid h-[22px] place-items-center rounded bg-white/10 px-2"
+              title={agentStatus === "writing" ? "Agent writing on the board…" : "Agent thinking…"}
+              aria-label="Agent is responding"
+            >
+              <span className="flex items-center gap-1">
+                {[0, 1, 2].map((i) => (
+                  <span
+                    key={i}
+                    className="typing-dot h-1.5 w-1.5 rounded-full bg-white/80"
+                    style={{ animationDelay: `${i * 0.15}s` }}
+                  />
+                ))}
+              </span>
+            </span>
+          ) : (
+            <button
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => setCollapsed(false)}
+              title="Expand the AI Response panel"
+              className="rounded bg-white/10 px-2 py-1 text-[10px] font-medium text-white/75 transition-colors hover:bg-white/20 hover:text-white"
+            >
+              Chat
+            </button>
+          )}
           <input
             value={val}
             onChange={(e) => setVal(e.target.value)}
@@ -471,7 +492,7 @@ export function ChatDock({
             onKeyDown={(e) => {
               if (e.key === "Enter") send();
             }}
-            placeholder="Ask anything about the board…"
+            placeholder={busy ? "Studyus is responding…" : "Ask anything about the board…"}
             className="min-w-0 flex-1 cursor-text bg-transparent text-[11px] text-white outline-none placeholder:text-white/35"
           />
           <button
@@ -490,8 +511,29 @@ export function ChatDock({
 
   return (
     <div ref={shellRef} className={shellClass} style={shellStyle}>
+      {/* Floating Pill Window for Active Voice Soundwaves */}
+      {isRecordingVoice && (
+        <div className="anim-toast absolute -top-12 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 rounded-full border border-accent/40 bg-[#1c1c1e]/95 px-4 py-2 shadow-2xl backdrop-blur-md">
+          <span className="h-2.5 w-2.5 rounded-full bg-accent animate-ping" />
+          <span className="font-mono text-[11px] font-medium text-fg">Listening…</span>
+          <div className="flex items-center gap-1 h-4">
+            <span className="h-3 w-1 rounded bg-accent animate-bounce" style={{ animationDelay: "0ms" }} />
+            <span className="h-4 w-1 rounded bg-accent animate-bounce" style={{ animationDelay: "150ms" }} />
+            <span className="h-2 w-1 rounded bg-accent animate-bounce" style={{ animationDelay: "300ms" }} />
+            <span className="h-4 w-1 rounded bg-accent animate-bounce" style={{ animationDelay: "450ms" }} />
+            <span className="h-2.5 w-1 rounded bg-accent animate-bounce" style={{ animationDelay: "600ms" }} />
+          </div>
+          <button
+            onClick={toggleVoiceDictation}
+            className="ml-1 rounded-full bg-white/10 px-2 py-0.5 font-mono text-[9.5px] text-white hover:bg-white/20"
+          >
+            Done
+          </button>
+        </div>
+      )}
+
       <div className="anim-toast overflow-hidden rounded-md border border-white/8 bg-[#343436]/58 shadow-[0_12px_32px_rgba(0,0,0,0.25)]">
-        {/* compact title bar — drag handle */}
+        {/* compact title bar */}
         <div
           onMouseDown={startDrag}
           className="flex h-8 cursor-grab items-center gap-2 border-b border-white/[0.08] px-2.5 active:cursor-grabbing"
@@ -500,16 +542,6 @@ export function ChatDock({
           <div className="mx-auto max-w-[280px] flex-1 truncate rounded bg-white/[0.07] px-2 py-1 text-center font-mono text-[8.5px] text-white/52">
             Ask anything about the shared chalkboard
           </div>
-          {pos && (
-            <button
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={() => setPos(null)}
-              className="rounded px-1 py-0.5 font-mono text-[9px] text-white/35 transition-colors hover:bg-white/10 hover:text-white"
-              title="Snap back to the top"
-            >
-              reset
-            </button>
-          )}
           <button
             onMouseDown={(e) => e.stopPropagation()}
             onClick={() => setCollapsed(true)}
@@ -529,11 +561,6 @@ export function ChatDock({
 
         {/* message stream */}
         <div className="max-h-[210px] space-y-2 overflow-y-auto px-3 py-2.5">
-          {messages.length === 0 && (
-              <p className="text-[10.5px] leading-relaxed text-white/40">
-              Ask about anything on the board. Answers stay here — writing happens on the chalkboard.
-            </p>
-          )}
           {messages.map((m) => {
             if (m.role === "system") {
               return (
@@ -544,10 +571,17 @@ export function ChatDock({
             }
             if (m.role === "user") {
               return (
-                <div key={m.id} className="anim-msg">
-                  <div className="mb-0.5 text-right text-[8.5px] uppercase tracking-[0.12em] text-white/30">You</div>
+                <div key={m.id} className="anim-msg space-y-1">
+                  <div className="text-right text-[8.5px] uppercase tracking-[0.12em] text-white/30">You</div>
                   <div className="ml-auto max-w-[90%] rounded bg-white/[0.07] px-2 py-1.5 text-[10.5px] leading-relaxed text-white/82">
                     {m.text}
+                    {m.imageData && (
+                      <img
+                        src={m.imageData}
+                        alt="User uploaded attachment"
+                        className="mt-2 max-w-full rounded-md object-contain max-h-[160px] border border-white/10"
+                      />
+                    )}
                   </div>
                 </div>
               );
@@ -593,9 +627,9 @@ export function ChatDock({
             />
             <button
               onClick={send}
-              disabled={!val.trim()}
+              disabled={!val.trim() && attachments.length === 0}
               className={`rounded px-2.5 py-1.5 text-[9.5px] font-medium transition-all ${
-                val.trim() ? "bg-white text-black active:scale-95" : "bg-white/10 text-white/30"
+                val.trim() || attachments.length > 0 ? "bg-white text-black active:scale-95" : "bg-white/10 text-white/30"
               }`}
             >
               Submit
