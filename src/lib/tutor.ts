@@ -46,12 +46,13 @@ import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
 
-export const TUTOR_PROMPT_VERSION = "tutor_v3";
-export const TUTOR_SCHEMA_VERSION = "tutor_turn_v2";
+export const TUTOR_PROMPT_VERSION = "tutor_v4";
+export const TUTOR_SCHEMA_VERSION = "tutor_turn_v3";
 export const ONBOARDING_PROMPT_VERSION = "tutor_onboarding_v1";
 export const ONBOARDING_SCHEMA_VERSION = "onboarding_questions_v1";
 export const MAX_HINT_LEVEL = 3;
 export const MAX_BOARD_OPS_PER_TURN = 12;
+export const MAX_THREAD_INITIAL_BLOCKS = 6;
 /** Bounds on the generated onboarding interview, so a model cannot return a
  *  one-question stub or a 40-question intake form. */
 export const MIN_ONBOARDING_QUESTIONS = 3;
@@ -106,7 +107,13 @@ export type BoardOp =
   | ({ op: "insert_after"; block: BoardBlockSpec } & BoardTargetSpec)
   | ({ op: "delete_block" } & BoardTargetSpec)
   | ({ op: "update_visualization"; intent?: VisualizationIntent; statePatch?: VisualizationStatePatch } & BoardTargetSpec)
-  | ({ op: "revise_text"; find: string; replace: string; replaceAll?: boolean } & BoardTargetSpec);
+  | ({ op: "revise_text"; find: string; replace: string; replaceAll?: boolean } & BoardTargetSpec)
+  | {
+      op: "spawn_thread";
+      title: string;
+      reason: string;
+      initialBlocks: BoardBlockSpec[];
+    };
 
 export interface TutorDiagnosis {
   misconceptions: string[];
@@ -400,6 +407,7 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
     "delete_block",
     "update_visualization",
     "revise_text",
+    "spawn_thread",
   ], `${path}.op`, errors);
   if (!op) return null;
 
@@ -499,6 +507,24 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
       }
       return { op, ...target, find, replace, replaceAll: rec.replaceAll === true };
     }
+    case "spawn_thread": {
+      const title = textOf("title");
+      const reason = textOf("reason");
+      const rawBlocks = asArray(rec.initial_blocks ?? rec.initialBlocks, `${path}.initial_blocks`, errors);
+      if (!title || !reason || !rawBlocks) return null;
+      if (title.length > 120) errors.push(`${path}.title must be at most 120 characters`);
+      if (reason.length > 320) errors.push(`${path}.reason must be at most 320 characters`);
+      if (rawBlocks.length > MAX_THREAD_INITIAL_BLOCKS) {
+        errors.push(`${path}.initial_blocks may contain at most ${MAX_THREAD_INITIAL_BLOCKS} blocks`);
+      }
+      const initialBlocks: BoardBlockSpec[] = [];
+      rawBlocks.slice(0, MAX_THREAD_INITIAL_BLOCKS).forEach((entry, index) => {
+        const block = validateBoardBlockSpec(entry, `${path}.initial_blocks[${index}]`, errors);
+        if (block) initialBlocks.push(block);
+      });
+      if (errors.some((error) => error.startsWith(path))) return null;
+      return { op, title, reason, initialBlocks };
+    }
   }
 }
 
@@ -533,6 +559,10 @@ export function validateTutorPayload(
     const op = validateBoardOp(entry, `board_ops[${i}]`, errors);
     if (op) boardOps.push(op);
   });
+  const spawnedThreads = boardOps.filter((operation) => operation.op === "spawn_thread").length;
+  if (spawnedThreads > 1) {
+    errors.push(`board_ops may contain at most one spawn_thread operation per turn (got ${spawnedThreads})`);
+  }
 
   let diagnosis: TutorDiagnosis | undefined;
   if (root.diagnosis !== undefined && root.diagnosis !== null) {
@@ -701,6 +731,7 @@ export function recoverTutorPayload(
   }
 
   const boardOps: BoardOp[] = [];
+  let recoveredThread = false;
   const rawOps = root?.board_ops ?? root?.boardOps ?? root?.operations;
   if (Array.isArray(rawOps)) {
     for (const entry of rawOps.slice(0, maxBoardOps)) {
@@ -713,7 +744,13 @@ export function recoverTutorPayload(
       }
       const errors: string[] = [];
       const operation = validateBoardOp(candidate, `board_ops[${boardOps.length}]`, errors);
-      if (operation && errors.length === 0) boardOps.push(operation);
+      if (operation && errors.length === 0) {
+        if (operation.op === "spawn_thread") {
+          if (recoveredThread) continue;
+          recoveredThread = true;
+        }
+        boardOps.push(operation);
+      }
     }
   }
 
@@ -778,6 +815,17 @@ export interface SessionMessage {
   timestamp: string;
 }
 
+export interface SessionThreadLog {
+  id: string;
+  sessionId: string;
+  boardId: string;
+  parentBoardId: string | null;
+  title: string;
+  reason: string;
+  createdBy: "learner" | "agent";
+  createdAt: string;
+}
+
 export async function ensureChalkboardSession(session: {
   id: string;
   title: string;
@@ -804,6 +852,74 @@ export async function ensureChalkboardSession(session: {
     now,
   ]);
   saveDbSync();
+}
+
+/** Record a branch in the durable session ledger. Board content is stored in
+ * the resumable study-session document; this row is the compact creation log. */
+export async function recordSessionThread(params: {
+  id?: string;
+  sessionId: string;
+  boardId: string;
+  parentBoardId?: string | null;
+  title: string;
+  reason: string;
+  createdBy: "learner" | "agent";
+  createdAt?: string;
+}): Promise<SessionThreadLog> {
+  const db = await getDb();
+  const entry: SessionThreadLog = {
+    id: params.id ?? `thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    sessionId: params.sessionId,
+    boardId: params.boardId,
+    parentBoardId: params.parentBoardId ?? null,
+    title: params.title.trim().slice(0, 120) || "Study thread",
+    reason: params.reason.trim().slice(0, 320) || "Follow-up investigation",
+    createdBy: params.createdBy,
+    createdAt: params.createdAt ?? new Date().toISOString(),
+  };
+  db.run(
+    `INSERT INTO session_threads
+      (id, session_id, board_id, parent_board_id, title, reason, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(session_id, board_id) DO UPDATE SET
+       parent_board_id = excluded.parent_board_id,
+       title = excluded.title,
+       reason = excluded.reason,
+       created_by = excluded.created_by;`,
+    [
+      entry.id,
+      entry.sessionId,
+      entry.boardId,
+      entry.parentBoardId,
+      entry.title,
+      entry.reason,
+      entry.createdBy,
+      entry.createdAt,
+    ]
+  );
+  saveDbSync();
+  return entry;
+}
+
+export async function getSessionThreads(sessionId: string): Promise<SessionThreadLog[]> {
+  const db = await getDb();
+  const res = db.exec(
+    `SELECT id, session_id, board_id, parent_board_id, title, reason, created_by, created_at
+     FROM session_threads
+     WHERE session_id = ?
+     ORDER BY created_at ASC;`,
+    [sessionId]
+  );
+  return (res[0]?.values ?? []).map((row) => ({
+    id: String(row[0]),
+    sessionId: String(row[1]),
+    boardId: String(row[2]),
+    parentBoardId: row[3] == null ? null : String(row[3]),
+    title: String(row[4]),
+    reason: String(row[5]),
+    createdBy: row[6] === "agent" ? "agent" : "learner",
+    createdAt: String(row[7]),
+  }));
 }
 
 export async function createChalkboardSession(title: string, domain: Domain, boundNodes?: string[]): Promise<string> {
@@ -970,7 +1086,7 @@ export function buildTutorUserPrompt(params: {
     `Return JSON only, in this exact shape:\n` +
       `{\n` +
       `  "speech": "<your reply to the learner — one or two sentences, direct and helpful. When the learner explicitly asked for a visualization, confirm what you drew instead of asking a question>",\n` +
-      `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text", ...fields }, ... ],\n` +
+      `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text" | "spawn_thread", ...fields }, ... ],\n` +
       `  "diagnosis": { "misconceptions": [string], "weak_criteria": [string], "hint_dependence": "none"|"low"|"medium"|"high", "calibration": "under"|"over"|"accurate" } /* optional */,\n` +
       `  "evidence_refs": [ "<one of the supplied E-handles>" ],\n` +
       `  "requested_level": <0..${MAX_HINT_LEVEL}> /* optional: request a higher unlocked hint level when the learner is stuck */\n` +
@@ -979,6 +1095,7 @@ export function buildTutorUserPrompt(params: {
       `- write_title / write_text / write_callout: { "op", "text": string }\n` +
       `- write_bullets: { "op", "items": string[] }\n` +
       `- write_latex: { "op", "tex": string, "caption"?: string }\n` +
+      `- spawn_thread: { "op", "title": string, "reason": string, "initial_blocks": BoardBlockSpec[] } — creates a logged child board in Threads without leaving the current board. Use it only when a substantial, separable investigation would clutter or derail the current explanation; never spawn a thread for a routine answer. Create at most one per turn, keep title/reason learner-facing, and include at most ${MAX_THREAD_INITIAL_BLOCKS} useful starter blocks.\n` +
       `- visualize: { "op", "intent": VisualizationIntent } — appends a new visualization block. Use this immediately when the learner explicitly asks for a diagram, graph, plot, or structure. ` +
       `Describe what the figure IS, not how to draw it; the renderer handles rendering. ` +
       `Geometry figures are auto-fitted to the available board space from their actual objects. Do not emit a geometry "viewport"; this build intentionally ignores it so shapes stay tight, fully visible, and draggable without a big empty interaction rectangle. ` +

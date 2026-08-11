@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState, useCallback } from "react";
+import { Minus, Plus } from "lucide-react";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
 import { Latex, ChalkStrong } from "./Visuals";
@@ -85,6 +86,10 @@ export interface BoardView {
   y: number;
   s: number;
 }
+
+const MIN_BOARD_ZOOM = 0.4;
+const MAX_BOARD_ZOOM = 2.2;
+const BOARD_ZOOM_STEP = 0.15;
 
 export function Chalkboard({
   board,
@@ -189,11 +194,34 @@ export function Chalkboard({
     if (target.closest("[data-nopan]")) return;
     if (e.ctrlKey || e.metaKey) {
       const delta = -e.deltaY * 0.0016;
-      setView((v) => ({ ...v, s: Math.min(2.2, Math.max(0.4, v.s + delta)) }));
+      setView((v) => ({ ...v, s: Math.min(MAX_BOARD_ZOOM, Math.max(MIN_BOARD_ZOOM, v.s + delta)) }));
     } else {
       setView((v) => ({ ...v, x: v.x - e.deltaX, y: v.y - e.deltaY }));
     }
   };
+
+  const zoomBoard = useCallback((direction: -1 | 1) => {
+    const box = wrapRef.current?.getBoundingClientRect();
+    setView((current) => {
+      const nextScale = Math.min(
+        MAX_BOARD_ZOOM,
+        Math.max(MIN_BOARD_ZOOM, Number((current.s + direction * BOARD_ZOOM_STEP).toFixed(2)))
+      );
+      if (nextScale === current.s) return current;
+
+      // Keep the same board point under the viewport center while zooming so
+      // keyboard/trackpad-free controls do not make the notes jump away.
+      const centerX = (box?.width ?? 0) / 2;
+      const centerY = (box?.height ?? 0) / 2;
+      const boardX = (centerX - current.x) / current.s;
+      const boardY = (centerY - current.y) / current.s;
+      return {
+        x: centerX - boardX * nextScale,
+        y: centerY - boardY * nextScale,
+        s: nextScale,
+      };
+    });
+  }, []);
 
   const checkSelection = useCallback(() => {
     if (annotating) return;
@@ -446,8 +474,44 @@ export function Chalkboard({
         </div>
       )}
 
-      <div className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-black/45 px-2 py-1 font-mono text-[10px] text-white/65 backdrop-blur-sm">
-        {Math.round(view.s * 100)}% · drag empty space to pan · ⌘/ctrl + scroll to zoom
+      <div
+        data-nopan
+        className="absolute bottom-3 left-3 z-30 flex items-center overflow-hidden rounded-lg border border-white/15 bg-[#171819]/88 text-white shadow-[0_8px_24px_rgba(0,0,0,0.3)] backdrop-blur-md"
+        role="group"
+        aria-label="Board zoom controls"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          onClick={() => zoomBoard(-1)}
+          disabled={view.s <= MIN_BOARD_ZOOM}
+          className="grid h-8 w-8 place-items-center transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:text-white/20"
+          aria-label="Zoom out"
+          title="Zoom out"
+        >
+          <Minus size={15} strokeWidth={2.2} />
+        </button>
+        <output
+          className="min-w-[48px] border-x border-white/10 px-2 text-center font-mono text-[10px] text-white/70"
+          aria-live="polite"
+          aria-label={`Board zoom ${Math.round(view.s * 100)} percent`}
+        >
+          {Math.round(view.s * 100)}%
+        </output>
+        <button
+          type="button"
+          onClick={() => zoomBoard(1)}
+          disabled={view.s >= MAX_BOARD_ZOOM}
+          className="grid h-8 w-8 place-items-center transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:text-white/20"
+          aria-label="Zoom in"
+          title="Zoom in"
+        >
+          <Plus size={15} strokeWidth={2.2} />
+        </button>
+      </div>
+
+      <div className="pointer-events-none absolute bottom-3 left-[138px] rounded-md bg-black/40 px-2 py-1 font-mono text-[9.5px] text-white/55 backdrop-blur-sm">
+        drag empty space to pan · ⌘/ctrl + scroll to zoom
       </div>
     </div>
   );

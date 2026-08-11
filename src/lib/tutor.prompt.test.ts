@@ -40,6 +40,14 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(prompt).toMatch(/stable anchor/i);
   });
 
+  it("documents conservative, logged thread spawning", () => {
+    expect(prompt).toMatch(/spawn_thread/);
+    expect(prompt).toMatch(/substantial, separable investigation/i);
+    expect(prompt).toMatch(/never spawn a thread for a routine answer/i);
+    expect(prompt).toMatch(/at most one per turn/i);
+    expect(prompt).toMatch(/creates a logged child board in Threads/i);
+  });
+
   it("tells the tutor to draw on explicit visualization requests instead of asking questions", () => {
     expect(prompt).toMatch(/comply first with a best-effort board rendering/i);
     expect(prompt).toMatch(/confirm what you drew instead of asking a question/i);

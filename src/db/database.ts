@@ -416,6 +416,37 @@ function runMigrations(db: Database) {
     db.run("COMMIT;");
   }
 
+  if (currentVersion < 4) {
+    db.run("BEGIN TRANSACTION;");
+
+    // Boards themselves remain in the resumable study-session document, while
+    // this compact ledger makes thread creation auditable alongside model calls
+    // and chat messages. `board_id` links back to the persisted BoardDoc.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS session_threads (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        board_id TEXT NOT NULL,
+        parent_board_id TEXT,
+        title TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES chalkboard_sessions(id) ON DELETE CASCADE,
+        UNIQUE(session_id, board_id)
+      );
+    `);
+
+    const v4Now = new Date().toISOString();
+    db.run(
+      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
+      [4, "Audit log for learner- and agent-created study threads", v4Now, "Rule: every spawned thread records its parent board, reason, creator, and timestamp under the owning chalkboard session."]
+    );
+
+    db.run("PRAGMA user_version = 4;");
+    db.run("COMMIT;");
+  }
+
   // No legacy assessment fixtures are seeded in production. A fresh profile
   // starts with no forms/attempts so AvailableTests shows its empty state
   // (see plan §3 / verification: "Fresh profile shows no … seeded recent

@@ -309,3 +309,48 @@ body {
   border-radius: 4px !important;
   font-family: monospace !important;
 }
+
+/* ── live tutor response/activity ── */
+@keyframes agent-activity-sheen {
+  0% { transform: translateX(-130%); opacity: 0; }
+  18% { opacity: 0.7; }
+  72% { opacity: 0.35; }
+  100% { transform: translateX(220%); opacity: 0; }
+}
+.agent-activity-active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 35%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(125, 211, 252, 0.08), transparent);
+  animation: agent-activity-sheen 2.2s ease-in-out infinite;
+}
+
+@keyframes generative-text-in {
+  from { opacity: 0.72; filter: blur(0.5px); }
+  to { opacity: 1; filter: blur(0); }
+}
+.generative-text {
+  animation: generative-text-in 0.24s ease-out both;
+}
+
+@keyframes generative-caret-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+.generative-caret {
+  animation: generative-caret-pulse 0.75s ease-in-out infinite;
+  box-shadow: 0 0 7px rgba(125, 211, 252, 0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-activity-active::after,
+  .generative-text,
+  .generative-caret {
+    animation: none !important;
+  }
+  .generative-caret {
+    display: none;
+  }
+}

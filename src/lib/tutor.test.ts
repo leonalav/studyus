@@ -6,10 +6,13 @@ import {
   recoverTutorPayload,
   buildTutorEvidenceCards,
   ensureChalkboardSession,
+  getSessionThreads,
+  recordSessionThread,
   setSessionHintLevel,
   getSessionHintLevel,
   MAX_HINT_LEVEL,
   MAX_BOARD_OPS_PER_TURN,
+  MAX_THREAD_INITIAL_BLOCKS,
   type BoardOp,
 } from "./tutor";
 
@@ -98,6 +101,59 @@ describe("Tutor turn schema validation", () => {
     if (res.ok) expect(res.value.boardOps).toHaveLength(turns.length);
   });
 
+  it("accepts and normalizes a bounded agent thread operation", () => {
+    const res = validateTutorPayload(validTurn({
+      board_ops: [{
+        op: "spawn_thread",
+        title: "Alternative derivation",
+        reason: "This derivation is useful but would interrupt the current explanation.",
+        initial_blocks: [
+          { kind: "title", text: "Alternative derivation" },
+          { kind: "latex", tex: "F = ma" },
+        ],
+      }],
+    }), EVIDENCE);
+
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value.boardOps).toEqual([{
+        op: "spawn_thread",
+        title: "Alternative derivation",
+        reason: "This derivation is useful but would interrupt the current explanation.",
+        initialBlocks: [
+          { kind: "title", text: "Alternative derivation" },
+          { kind: "latex", tex: "F = ma", caption: undefined },
+        ],
+      }]);
+    }
+  });
+
+  it("rejects oversized, malformed, or repeated thread operations", () => {
+    const tooManyBlocks = Array.from(
+      { length: MAX_THREAD_INITIAL_BLOCKS + 1 },
+      (_, index) => ({ kind: "text", text: `Block ${index}` })
+    );
+    const oversized = validateTutorPayload(validTurn({
+      board_ops: [{ op: "spawn_thread", title: "Extra", reason: "Separate investigation", initial_blocks: tooManyBlocks }],
+    }), EVIDENCE);
+    expect(oversized.ok).toBe(false);
+    if (!oversized.ok) expect(oversized.errors.join(" ")).toMatch(/at most 6 blocks/);
+
+    const malformed = validateTutorPayload(validTurn({
+      board_ops: [{ op: "spawn_thread", title: "Extra", reason: "Separate investigation", initial_blocks: [{ kind: "html", text: "unsafe" }] }],
+    }), EVIDENCE);
+    expect(malformed.ok).toBe(false);
+
+    const repeated = validateTutorPayload(validTurn({
+      board_ops: [
+        { op: "spawn_thread", title: "One", reason: "First investigation", initial_blocks: [] },
+        { op: "spawn_thread", title: "Two", reason: "Second investigation", initial_blocks: [] },
+      ],
+    }), EVIDENCE);
+    expect(repeated.ok).toBe(false);
+    if (!repeated.ok) expect(repeated.errors.join(" ")).toMatch(/at most one spawn_thread/);
+  });
+
   it("rejects an unknown board operation rather than rendering it", () => {
     const res = validateTutorPayload(validTurn({ board_ops: [{ op: "explode_board", text: "x" }] }), EVIDENCE);
     expect(res.ok).toBe(false);
@@ -184,6 +240,30 @@ describe("Tutor turn deterministic recovery", () => {
     expect(recovered.requestedLevel).toBe(2);
   });
 
+  it("recovers at most one independently valid spawned thread", () => {
+    const recovered = recoverTutorPayload({
+      speech: "I separated the optional derivation for later.",
+      board_ops: [
+        {
+          op: "spawn_thread",
+          title: "Optional derivation",
+          reason: "It is substantial and separable.",
+          initial_blocks: [{ kind: "text", text: "Start from conservation of energy." }],
+        },
+        {
+          op: "spawn_thread",
+          title: "Duplicate branch",
+          reason: "This must not create a second thread in the same turn.",
+          initial_blocks: [],
+        },
+      ],
+      evidence_refs: [],
+    }, "", new Set());
+
+    expect(recovered.boardOps).toHaveLength(1);
+    expect(recovered.boardOps[0]).toMatchObject({ op: "spawn_thread", title: "Optional derivation" });
+  });
+
   it("extracts completed speech from JSON truncated during a later board operation", () => {
     const raw = `{"speech":"Keep the explanation, even if the diagram was truncated.","board_ops":[{"op":"visualize","intent":{"type":"geometry","objects":[`;
     const recovered = recoverTutorPayload(undefined, raw, new Set(), "Draw the diagram");
@@ -263,6 +343,32 @@ describe("Tutor evidence cards", () => {
     expect(cards[1].section).toContain("Limits");
     expect(cards[0].excerpt).toContain("f'(x)=2x");
     expect(cards[1].excerpt).toContain("Limits describe");
+  });
+});
+
+describe("Tutor session thread persistence", () => {
+  const SESSION_ID = "session-thread-ledger-test";
+
+  beforeEach(async () => {
+    const db = await getDb();
+    db.run("DELETE FROM chalkboard_sessions WHERE id = ?;", [SESSION_ID]);
+    await ensureChalkboardSession({ id: SESSION_ID, title: "Forces", domain: "physics" });
+  });
+
+  it("records creator provenance and returns the session thread ledger", async () => {
+    const created = await recordSessionThread({
+      id: "thread-ledger-test-1",
+      sessionId: SESSION_ID,
+      boardId: "board-thread-test-1",
+      parentBoardId: "board-main-test-1",
+      title: "Free-body diagram variants",
+      reason: "Compare a second substantial setup without crowding the main board.",
+      createdBy: "agent",
+      createdAt: "2026-08-11T10:00:00.000Z",
+    });
+
+    expect(created.createdBy).toBe("agent");
+    expect(await getSessionThreads(SESSION_ID)).toEqual([created]);
   });
 });
 
