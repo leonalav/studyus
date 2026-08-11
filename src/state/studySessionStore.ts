@@ -2,6 +2,13 @@ import type { BoardDoc } from "../data/boards";
 import type { BoardView, Stroke } from "../components/board/Chalkboard";
 import type { ChatMsg } from "../components/board/BoardPanels";
 
+export interface StoredBoardAppearance {
+  themeId: "classic" | "blueprint" | "carbon";
+  fontId: string;
+  fontScale: number;
+  latex: boolean;
+}
+
 export interface StoredStudySession {
   id: string;
   title: string;
@@ -12,6 +19,8 @@ export interface StoredStudySession {
   messages: ChatMsg[];
   viewMap: Record<string, BoardView>;
   strokeMap: Record<string, Stroke[]>;
+  /** Presentation settings are part of the saved board, not viewer defaults. */
+  appearance?: StoredBoardAppearance;
   updatedAt: string;
 }
 

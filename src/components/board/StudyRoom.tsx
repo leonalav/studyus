@@ -16,12 +16,12 @@ import {
 } from "../../lib/tutor";
 import { ContextMenu, ContextMenuTarget } from "../ContextMenu";
 import { toPng } from "html-to-image";
-import { saveStudySession } from "../../state/studySessionStore";
+import { saveStudySession, type StoredStudySession } from "../../state/studySessionStore";
 import type { OnboardingAnswers } from "../../data/tutor";
 
 interface Props {
   initialBoard: BoardDoc;
-  initialSession?: import("../../state/studySessionStore").StoredStudySession;
+  initialSession?: StoredStudySession;
   /** Curriculum node ids the tutor may ground its replies on. Restored from
    *  the stored session when reopening; empty means no curriculum is bound. */
   boundNodes?: string[];
@@ -38,10 +38,12 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const [activeId, setActiveId] = useState(initialSession?.activeId ?? initialBoard.id);
   const [written, setWritten] = useState<Set<string>>(new Set((initialSession?.boards ?? []).map((item) => item.id)));
 
-  const [theme, setTheme] = useState<BoardTheme>(THEMES[0]);
-  const [fontId, setFontId] = useState("gloria");
-  const [fontScale, setFontScale] = useState(1);
-  const [latex, setLatex] = useState(true);
+  const [theme, setTheme] = useState<BoardTheme>(
+    () => THEMES.find((item) => item.id === initialSession?.appearance?.themeId) ?? THEMES[0]
+  );
+  const [fontId, setFontId] = useState(initialSession?.appearance?.fontId ?? "gloria");
+  const [fontScale, setFontScale] = useState(initialSession?.appearance?.fontScale ?? 1);
+  const [latex, setLatex] = useState(initialSession?.appearance?.latex ?? true);
 
   const [panel, setPanel] = useState<PanelId>(null);
   const [chatOpen, setChatOpen] = useState(true);
@@ -105,23 +107,35 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const board = boards.find((b) => b.id === activeId) ?? boards[0];
   const fontCss = FONTS.find((f) => f.id === fontId)?.css ?? FONTS[0].css;
 
+  const sessionSnapshot = useMemo<StoredStudySession>(() => ({
+    id: sessionId,
+    title: board.title,
+    domain: board.domain,
+    boundNodes: resolvedBoundNodes,
+    boards,
+    activeId,
+    messages,
+    viewMap,
+    strokeMap,
+    appearance: {
+      themeId: theme.id,
+      fontId,
+      fontScale,
+      latex,
+    },
+    updatedAt: new Date().toISOString(),
+  }), [sessionId, board.title, board.domain, resolvedBoundNodes, boards, activeId, messages, viewMap, strokeMap, theme.id, fontId, fontScale, latex]);
+  const latestSessionSnapshot = useRef(sessionSnapshot);
+  latestSessionSnapshot.current = sessionSnapshot;
+
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      saveStudySession({
-        id: sessionId,
-        title: board.title,
-        domain: board.domain,
-        boundNodes: resolvedBoundNodes,
-        boards,
-        activeId,
-        messages,
-        viewMap,
-        strokeMap,
-        updatedAt: new Date().toISOString(),
-      });
-    }, 500);
+    const timer = window.setTimeout(() => saveStudySession(sessionSnapshot), 500);
     return () => window.clearTimeout(timer);
-  }, [sessionId, board.title, board.domain, boards, activeId, messages, viewMap, strokeMap, resolvedBoundNodes]);
+  }, [sessionSnapshot]);
+
+  // A learner can leave within the debounce window. Flush the latest complete
+  // board/chat state on unmount so Past Notes is always the exact final frame.
+  useEffect(() => () => saveStudySession(latestSessionSnapshot.current), []);
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();

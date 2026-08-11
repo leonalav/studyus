@@ -80,20 +80,12 @@ export default function App() {
   }, [notify]);
 
   const openTab = useCallback((incoming: { id: string; title: string; kind: Tab["kind"] }) => {
-    // Past-notes (Sidebar → "note" tabs) are live chalkboard sessions, not a
-    // read-only transcript: reopen the same fullscreen StudyRoom from the
-    // persisted session store instead of opening a note tab.
-    if (incoming.kind === "note") {
-      const sessionId = incoming.id.replace(/^note-/, "");
-      openStoredSession(sessionId);
-      return;
-    }
     setTabs((current) => {
       if (current.some((t) => t.id === incoming.id)) return current;
       return [...current, incoming];
     });
     setActiveTabId(incoming.id);
-  }, [openStoredSession]);
+  }, []);
 
   const closeTab = useCallback(
     (id: string) => {
@@ -217,6 +209,7 @@ export default function App() {
           onNotify={notify}
           onStartTest={startTest}
           onExitTest={exitTest}
+          onReopenSession={openStoredSession}
           activeTest={activeTest}
         />
         <DragBar />
@@ -294,6 +287,7 @@ export default function App() {
                 setActiveTabId(HOME_TAB_ID);
                 notify(`Switched to Tutor @[${sectionTitle}]`);
               }}
+              onReopenSession={openStoredSession}
               activeTest={activeTest}
               availableTestsRefreshKey={availableTestsRefreshKey}
             />
@@ -306,8 +300,8 @@ export default function App() {
         onClose={() => setSearchOpen(false)}
         onPick={(item) => {
           if (item.type === "note" && item.noteId) {
-            openStoredSession(item.noteId);
-            notify(`Reopening "${item.label}"…`);
+            openTab({ id: `note-${item.noteId}`, title: item.label, kind: "note" });
+            notify(`Opened past note "${item.label}"`);
           } else if (item.type === "setting" && item.settingId) {
             // A settings pick opens the Settings modal landed on that section,
             // never a note tab. Validate against the known section ids before

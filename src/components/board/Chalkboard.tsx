@@ -71,6 +71,8 @@ interface Props {
   /** Persist a visualization block's interactive state (e.g. dragged point
    * positions) back into the board so it survives a session reopen. */
   onBlockStateChange?: (blockId: string, state: VisualizationState) => void;
+  /** Render the canonical board without mutation, pan, zoom, or selection UI. */
+  readOnly?: boolean;
 }
 
 export interface Stroke {
@@ -85,6 +87,9 @@ export interface BoardView {
   x: number;
   y: number;
   s: number;
+  /** Original viewport dimensions let Past Notes scale the saved view exactly. */
+  viewportWidth?: number;
+  viewportHeight?: number;
 }
 
 const MIN_BOARD_ZOOM = 0.4;
@@ -110,6 +115,7 @@ export function Chalkboard({
   initialStrokes,
   onStrokesChange,
   onBlockStateChange,
+  readOnly = false,
 }: Props) {
   const [view, setView] = useState<BoardView>(initialView ?? { x: 48, y: 36, s: 1 });
   const [revealed, setRevealed] = useState(writing ? 0 : board.blocks.length);
@@ -120,6 +126,8 @@ export function Chalkboard({
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
+  const viewRef = useRef(view);
+  viewRef.current = view;
   const accent = DOMAIN_META[board.domain].accent;
 
   useEffect(() => {
@@ -156,11 +164,16 @@ export function Chalkboard({
   }, [board.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    onViewChange?.(view);
+    const viewport = wrapRef.current;
+    onViewChange?.({
+      ...view,
+      viewportWidth: viewport?.clientWidth,
+      viewportHeight: viewport?.clientHeight,
+    });
   }, [view, onViewChange]);
 
   const onDown = (e: React.MouseEvent) => {
-    if (annotating) return;
+    if (readOnly || annotating) return;
     const t = e.target as HTMLElement;
     if (e.button !== 0 && e.button !== 1) return;
     if (t.closest("[data-nopan]")) return;
@@ -189,7 +202,7 @@ export function Chalkboard({
   }, [panning]);
 
   const onWheel = (e: React.WheelEvent) => {
-    if (annotating) return;
+    if (readOnly || annotating) return;
     const target = e.target as HTMLElement;
     if (target.closest("[data-nopan]")) return;
     if (e.ctrlKey || e.metaKey) {
@@ -224,7 +237,7 @@ export function Chalkboard({
   }, []);
 
   const checkSelection = useCallback(() => {
-    if (annotating) return;
+    if (readOnly || annotating) return;
     const s = window.getSelection();
     const text = s?.toString().trim() ?? "";
     if (!text || text.length < 3 || !wrapRef.current) {
@@ -236,13 +249,14 @@ export function Chalkboard({
     const box = wrapRef.current.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) return;
     setSel({ text, x: r.left - box.left + r.width / 2, y: r.top - box.top });
-  }, [annotating, askOpen]);
+  }, [annotating, askOpen, readOnly]);
 
   useEffect(() => {
+    if (readOnly) return;
     const h = () => window.setTimeout(checkSelection, 10);
     document.addEventListener("mouseup", h);
     return () => document.removeEventListener("mouseup", h);
-  }, [checkSelection]);
+  }, [checkSelection, readOnly]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokes = useRef<Stroke[]>([]);
@@ -279,12 +293,19 @@ export function Chalkboard({
       c.width = w.clientWidth;
       c.height = w.clientHeight;
       redraw();
+      if (!readOnly) {
+        onViewChange?.({
+          ...viewRef.current,
+          viewportWidth: w.clientWidth,
+          viewportHeight: w.clientHeight,
+        });
+      }
     };
     fit();
     const ro = new ResizeObserver(fit);
     ro.observe(w);
     return () => ro.disconnect();
-  }, [redraw]);
+  }, [onViewChange, readOnly, redraw]);
 
   useEffect(() => {
     strokes.current = initialStrokes ? initialStrokes.map((stroke) => ({ ...stroke, pts: [...stroke.pts] })) : [];
@@ -301,7 +322,7 @@ export function Chalkboard({
   }, [onClearRef, onStrokesChange, redraw]);
 
   const annDown = (e: React.MouseEvent) => {
-    if (!annotating) return;
+    if (readOnly || !annotating) return;
     const r = canvasRef.current!.getBoundingClientRect();
     const p = { x: e.clientX - r.left, y: e.clientY - r.top };
     cur.current = {
@@ -335,8 +356,9 @@ export function Chalkboard({
       className="relative h-full w-full overflow-hidden select-none"
       style={{
         background: theme.bg,
-        cursor: annotating ? "crosshair" : panning ? "grabbing" : "grab",
+        cursor: readOnly ? "default" : annotating ? "crosshair" : panning ? "grabbing" : "grab",
       }}
+      aria-label={readOnly ? "Read-only chalkboard snapshot" : "Interactive chalkboard"}
     >
       {/* ordered grid behind the content */}
       <div
@@ -378,7 +400,7 @@ export function Chalkboard({
             <div
               key={b.id}
               data-block
-              className={`${containsVisualization(b) ? "anim-chalk-visual" : "anim-chalk"} cursor-text select-text`}
+              className={`${readOnly ? "" : containsVisualization(b) ? "anim-chalk-visual" : "anim-chalk"} ${readOnly ? "cursor-default" : "cursor-text select-text"}`}
               style={{ animationDelay: `${Math.min(i, 4) * 40}ms` }}
             >
               <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} blockId={b.id} />
@@ -474,6 +496,8 @@ export function Chalkboard({
         </div>
       )}
 
+      {!readOnly && (
+        <>
       <div
         data-nopan
         className="absolute bottom-3 left-3 z-30 flex items-center overflow-hidden rounded-lg border border-white/15 bg-[#171819]/88 text-white shadow-[0_8px_24px_rgba(0,0,0,0.3)] backdrop-blur-md"
@@ -513,6 +537,8 @@ export function Chalkboard({
       <div className="pointer-events-none absolute bottom-3 left-[138px] rounded-md bg-black/40 px-2 py-1 font-mono text-[9.5px] text-white/55 backdrop-blur-sm">
         drag empty space to pan · ⌘/ctrl + scroll to zoom
       </div>
+        </>
+      )}
     </div>
   );
 }

@@ -100,6 +100,83 @@ export async function extractPdfOutline(file: File): Promise<{
   return { name: file.name, pageCount: pdf.numPages, outline: flat };
 }
 
+const ORIGINAL_PDF_DB = "studyus-curriculum-files";
+const ORIGINAL_PDF_STORE = "pdfs";
+const inMemoryOriginalPdfs = new Map<string, Blob>();
+
+/**
+ * Keep the original import available to the document viewer's Download action.
+ * SQLite stores the outline and metadata, while IndexedDB is the browser-safe
+ * place for the (potentially large) binary. The small in-memory fallback keeps
+ * the action working for the current run when IndexedDB is unavailable.
+ */
+async function persistOriginalPdf(sourceId: string, file: File): Promise<void> {
+  const blob = file.slice(0, file.size, "application/pdf");
+  inMemoryOriginalPdfs.set(sourceId, blob);
+  if (typeof indexedDB === "undefined") return;
+
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open(ORIGINAL_PDF_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(ORIGINAL_PDF_STORE)) {
+        db.createObjectStore(ORIGINAL_PDF_STORE);
+      }
+    };
+    request.onerror = () => reject(request.error ?? new Error("Could not open curriculum file storage"));
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction(ORIGINAL_PDF_STORE, "readwrite");
+      transaction.objectStore(ORIGINAL_PDF_STORE).put(blob, sourceId);
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error ?? new Error("Could not store the curriculum PDF"));
+      };
+    };
+  });
+}
+
+/** Return the exact imported PDF bytes when they are available in this client. */
+export async function getOriginalCurriculumPdf(sourceId: string): Promise<Blob | null> {
+  const cached = inMemoryOriginalPdfs.get(sourceId);
+  if (cached) return cached;
+  if (typeof indexedDB === "undefined") return null;
+
+  return new Promise<Blob | null>((resolve, reject) => {
+    const request = indexedDB.open(ORIGINAL_PDF_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(ORIGINAL_PDF_STORE)) {
+        db.createObjectStore(ORIGINAL_PDF_STORE);
+      }
+    };
+    request.onerror = () => reject(request.error ?? new Error("Could not open curriculum file storage"));
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction(ORIGINAL_PDF_STORE, "readonly");
+      const getRequest = transaction.objectStore(ORIGINAL_PDF_STORE).get(sourceId);
+      getRequest.onsuccess = () => {
+        const value = getRequest.result;
+        db.close();
+        if (value instanceof Blob) {
+          inMemoryOriginalPdfs.set(sourceId, value);
+          resolve(value);
+        } else {
+          resolve(null);
+        }
+      };
+      getRequest.onerror = () => {
+        db.close();
+        reject(getRequest.error ?? new Error("Could not read the curriculum PDF"));
+      };
+    };
+  });
+}
+
 export async function ingestPdfFile(file: File): Promise<CurriculumSourceRecord> {
   const parsed = await extractPdfOutline(file);
   if (parsed.outline.length === 0) {
@@ -118,13 +195,22 @@ export async function ingestPdfFile(file: File): Promise<CurriculumSourceRecord>
   } catch {
     /* not running under Tauri — leave filePath unset */
   }
-  return parseAndIngestPdfOutline({
+  const source = await parseAndIngestPdfOutline({
     sourceId,
     name: parsed.name,
     pageCount: parsed.pageCount,
     outline: parsed.outline,
     filePath,
   });
+  // Binary persistence is deliberately best-effort: a browser with storage
+  // disabled can still index and study the outline, while ordinary clients get
+  // a durable Download original action.
+  try {
+    await persistOriginalPdf(source.id, file);
+  } catch {
+    inMemoryOriginalPdfs.set(source.id, file);
+  }
+  return source;
 }
 export async function parseAndIngestPdfOutline({
   sourceId,
