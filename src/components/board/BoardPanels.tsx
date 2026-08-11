@@ -11,7 +11,6 @@ import {
   Paperclip,
   Image as ImageIcon,
   Mic,
-  Sparkles,
   X,
 } from "lucide-react";
 import type { SessionThreadLog } from "../../lib/tutor";
@@ -382,7 +381,11 @@ function AgentActivityWidget({ activity }: { activity: AgentActivity }) {
             done ? "bg-[#4fb477]/15 text-[#86efac]" : failed ? "bg-[#f87171]/15 text-[#fca5a5]" : "bg-[#2383e2]/20 text-[#7dd3fc]"
           }`}
         >
-          <Icon size={14} className={active && Icon === LoaderCircle ? "animate-spin motion-reduce:animate-none" : ""} />
+          <Icon
+            size={14}
+            aria-hidden="true"
+            className={active && Icon === LoaderCircle ? "animate-spin" : ""}
+          />
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center justify-between gap-2">
@@ -754,8 +757,7 @@ export function ChatDock({
             }
             return (
               <div key={m.id} className="anim-msg">
-                <div className="mb-0.5 flex items-center gap-1 text-[8.5px] uppercase tracking-[0.12em] text-white/30">
-                  <Sparkles size={9} className="text-[#7dd3fc]/70" />
+                <div className="mb-0.5 text-[8.5px] uppercase tracking-[0.12em] text-white/30">
                   AI Response
                 </div>
                 <GenerativeTutorText text={m.text} animate={!initialMessageIds.current.has(m.id)} />
