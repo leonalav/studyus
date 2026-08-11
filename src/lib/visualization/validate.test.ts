@@ -252,3 +252,72 @@ describe("validateVisualizationIntent — geometry notation fields", () => {
     expect(badNotation.valid).toBe(false);
   });
 });
+
+describe("validateVisualizationIntent — chart renderer compatibility", () => {
+  it("rejects series kinds that do not exactly match chartType", () => {
+    const result = validateVisualizationIntent({
+      type: "chart",
+      chartType: "bar",
+      series: [{ kind: "line", id: "s1", name: "wrong", values: [1, 2] }],
+    });
+    expect(result.valid).toBe(false);
+    if (!result.valid) expect(result.reason).toMatch(/requires bar series/i);
+  });
+
+  it("limits legacy data to chart types it can safely normalize", () => {
+    const result = validateVisualizationIntent({
+      type: "chart",
+      chartType: "pie",
+      data: [{ id: "s1", label: "legacy", values: [1, 2] }],
+    });
+    expect(result.valid).toBe(false);
+    if (!result.valid) expect(result.reason).toMatch(/legacy chart data/i);
+  });
+
+  it("rejects empty cartesian data and malformed grids", () => {
+    expect(validateVisualizationIntent({
+      type: "chart",
+      chartType: "line",
+      series: [{ kind: "line", id: "s1", name: "empty", values: [] }],
+    }).valid).toBe(false);
+
+    expect(validateVisualizationIntent({
+      type: "chart",
+      chartType: "heatmap",
+      series: [{
+        kind: "heatmap",
+        id: "h1",
+        grid: { x: [0, 1], y: [0, 1], values: [[1, 2], [3]] },
+      }],
+    }).valid).toBe(false);
+  });
+
+  it("accepts a finite rectangular grid and enforces radar dimensions", () => {
+    expect(validateVisualizationIntent({
+      type: "chart",
+      chartType: "contour",
+      series: [{
+        kind: "contour",
+        id: "c1",
+        grid: { x: [0, 1], y: [0, 1], values: [[1, 2], [3, 4]] },
+      }],
+    })).toEqual({ valid: true });
+
+    expect(validateVisualizationIntent({
+      type: "chart",
+      chartType: "radar",
+      indicators: [{ name: "A" }, { name: "B" }],
+      series: [{ kind: "radar", id: "r1", name: "R", values: [1] }],
+    }).valid).toBe(false);
+  });
+
+  it("bounds recursive tree chart complexity", () => {
+    let root: any = { name: "leaf", value: 1 };
+    for (let index = 0; index < 21; index += 1) root = { name: `level-${index}`, children: [root] };
+    expect(validateVisualizationIntent({
+      type: "chart",
+      chartType: "sunburst",
+      series: [{ kind: "sunburst", id: "tree", nodes: [root] }],
+    }).valid).toBe(false);
+  });
+});

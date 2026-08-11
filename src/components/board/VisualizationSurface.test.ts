@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { compileExpression, computeBoundingBox, fitBoxToAspect, resolveDisplayMode } from "./VisualizationSurface";
+import {
+  GRAPH3D_MESH_VERTEX_BUDGET,
+  GRAPH3D_VECTOR_BUDGET,
+  buildChartOption,
+  compileExpression,
+  computeBoundingBox,
+  fitBoxToAspect,
+  getGraph3DSamplingPlan,
+  getVisualizationPrewarmTargets,
+  resolveDisplayMode,
+} from "./VisualizationSurface";
 
 /** Close to zero tolerance for float comparisons. */
 const TOL = 1e-9;
@@ -272,5 +282,141 @@ describe("fitBoxToAspect — figure is never cropped, only grown", () => {
   it("returns the box unchanged when the container has no measured size", () => {
     const box: [number, number, number, number] = [-1, 1, 1, -1];
     expect(fitBoxToAspect(box, 0, 0)).toEqual(box);
+  });
+});
+
+describe("chart option compilation safeguards", () => {
+  it("compiles validated grid, radar, and sankey series without throwing", () => {
+    const intents = [
+      {
+        type: "chart",
+        chartType: "contour",
+        series: [{ kind: "contour", id: "c", grid: { x: [0, 1], y: [0, 1], values: [[1, 2], [3, 4]] } }],
+      },
+      {
+        type: "chart",
+        chartType: "radar",
+        indicators: [{ name: "A" }, { name: "B" }],
+        series: [{ kind: "radar", id: "r", name: "R", values: [2, 3] }],
+      },
+      {
+        type: "chart",
+        chartType: "sankey",
+        series: [{ kind: "sankey", id: "s", nodes: [{ id: "a" }, { id: "b" }], links: [{ source: "a", target: "b", value: 2 }] }],
+      },
+    ];
+    for (const intent of intents) {
+      expect(() => buildChartOption(intent as any, undefined, "#fff", "#60a5fa")).not.toThrow();
+    }
+  });
+
+  it("defensively refuses an incompatible series even if called without validation", () => {
+    expect(() => buildChartOption({
+      type: "chart",
+      chartType: "bar",
+      series: [{ kind: "line", id: "wrong", name: "wrong", values: [1] }],
+    } as any, undefined, "#fff", "#60a5fa")).toThrow(/incompatible/i);
+  });
+});
+
+describe("aggregate 3D sampling safeguards", () => {
+  it("scales both mesh dimensions under one aggregate vertex budget", () => {
+    const intent = {
+      type: "graph3d",
+      sampling: { xSteps: 200, ySteps: 100 },
+      surfaces: Array.from({ length: 12 }, (_, index) => ({ kind: "surface", id: `s${index}`, z: "x+y" })),
+    } as any;
+    const plan = getGraph3DSamplingPlan(intent);
+    const total = plan.reduce((sum, [x, y]) => sum + (x + 1) * (y + 1), 0);
+    expect(total).toBeLessThanOrEqual(GRAPH3D_MESH_VERTEX_BUDGET);
+    expect(plan[0][0]).toBeLessThan(200);
+    expect(plan[0][1]).toBeLessThan(100);
+    expect(plan[0][0] / plan[0][1]).toBeCloseTo(2, 1);
+  });
+
+  it("shares a bounded arrow budget across vector fields", () => {
+    const intent = {
+      type: "graph3d",
+      sampling: { xSteps: 200, ySteps: 200, tSteps: 200 },
+      surfaces: Array.from({ length: 12 }, (_, index) => ({
+        kind: "vector_field",
+        id: `v${index}`,
+        xDomain: [-1, 1], yDomain: [-1, 1], zDomain: [-1, 1],
+        fx: "x", fy: "y", fz: "z",
+      })),
+    } as any;
+    const plan = getGraph3DSamplingPlan(intent);
+    const total = plan.reduce((sum, [x, y, z]) => sum + x * y * z, 0);
+    expect(total).toBeLessThanOrEqual(GRAPH3D_VECTOR_BUDGET);
+  });
+});
+
+describe("visualization adapter prewarming", () => {
+  it("prewarms only adapters implied by explicit heavy-renderer terms", () => {
+    expect(getVisualizationPrewarmTargets("plot a scatter chart")).toEqual(["chart"]);
+    expect(getVisualizationPrewarmTargets("draw a protein pathway network")).toEqual(["network"]);
+    expect(getVisualizationPrewarmTargets("make a Sankey chart")).toEqual(["chart"]);
+  });
+
+  it("does not speculate for generic, JSXGraph, or Three.js diagrams", () => {
+    expect(getVisualizationPrewarmTargets("draw a triangle diagram")).toEqual([]);
+    expect(getVisualizationPrewarmTargets("graph y = x squared")).toEqual([]);
+    expect(getVisualizationPrewarmTargets("show a 3D surface")).toEqual([]);
+  });
+});
+
+describe("ECharts initialization smoke test", () => {
+  it("accepts compiled options for every supported chart type", async () => {
+    const echarts = await import("echarts");
+    const intents = [
+      { type: "chart", chartType: "bar", series: [{ kind: "bar", id: "bar", name: "Bar", values: [1, 2] }] },
+      { type: "chart", chartType: "line", series: [{ kind: "line", id: "line", name: "Line", values: [1, 2] }] },
+      { type: "chart", chartType: "scatter", series: [{ kind: "scatter", id: "scatter", name: "Scatter", points: [[0, 1], [1, 2]] }] },
+      { type: "chart", chartType: "histogram", series: [{ kind: "histogram", id: "hist", name: "Histogram", values: [1, 2, 2, 3] }] },
+      { type: "chart", chartType: "box", series: [{ kind: "box", id: "box", name: "Box", values: [1, 2, 3, 4] }] },
+      { type: "chart", chartType: "heatmap", series: [{ kind: "heatmap", id: "heat", points: [[0, 0, 1], [1, 1, 2]] }] },
+      { type: "chart", chartType: "contour", series: [{ kind: "contour", id: "contour", grid: { x: [0, 1], y: [0, 1], values: [[1, 2], [3, 4]] } }] },
+      { type: "chart", chartType: "pie", series: [{ kind: "pie", id: "pie", name: "Pie", slices: [{ name: "A", value: 1 }, { name: "B", value: 2 }] }] },
+      { type: "chart", chartType: "donut", series: [{ kind: "donut", id: "donut", name: "Donut", slices: [{ name: "A", value: 1 }, { name: "B", value: 2 }] }] },
+      { type: "chart", chartType: "radar", indicators: [{ name: "A" }, { name: "B" }], series: [{ kind: "radar", id: "radar", name: "Radar", values: [2, 3] }] },
+      { type: "chart", chartType: "polar_line", series: [{ kind: "polar_line", id: "polar-line", name: "Polar line", points: [[0, 1], [1, 2]] }] },
+      { type: "chart", chartType: "polar_scatter", series: [{ kind: "polar_scatter", id: "polar-scatter", name: "Polar scatter", points: [[0, 1], [1, 2]] }] },
+      {
+        type: "chart", chartType: "sankey", series: [{ kind: "sankey", id: "sankey",
+          nodes: [{ id: "source-id", name: "Friendly source" }, { id: "target-id", name: "Friendly target" }],
+          links: [{ source: "source-id", target: "target-id", value: 2 }],
+        }],
+      },
+      { type: "chart", chartType: "treemap", series: [{ kind: "treemap", id: "treemap", nodes: [{ name: "Root", children: [{ name: "Leaf", value: 2 }] }] }] },
+      { type: "chart", chartType: "sunburst", series: [{ kind: "sunburst", id: "sunburst", nodes: [{ name: "Root", children: [{ name: "Leaf", value: 2 }] }] }] },
+      { type: "chart", chartType: "candlestick", series: [{ kind: "candlestick", id: "candles", name: "Candles", candles: [[1, 2, 0, 3]] }] },
+      { type: "chart", chartType: "ohlc", series: [{ kind: "ohlc", id: "ohlc", name: "OHLC", candles: [[1, 2, 0, 3]] }] },
+    ];
+
+    for (const intent of intents) {
+      const chart = echarts.init(null, undefined, { renderer: "svg", ssr: true, width: 500, height: 300 });
+      try {
+        const option = buildChartOption(intent as any, undefined, "#fff", "#60a5fa");
+        expect(() => chart.setOption(option, true)).not.toThrow();
+        expect(chart.renderToSVGString()).toContain("<svg");
+      } finally {
+        chart.dispose();
+      }
+    }
+  });
+
+  it("uses stable Sankey ids for both nodes and links", () => {
+    const option: any = buildChartOption({
+      type: "chart",
+      chartType: "sankey",
+      series: [{
+        kind: "sankey",
+        id: "s",
+        nodes: [{ id: "a", name: "Alpha" }, { id: "b", name: "Beta" }],
+        links: [{ source: "a", target: "b", value: 1 }],
+      }],
+    } as any, undefined, "#fff", "#60a5fa");
+    expect(option.series[0].data.map((node: any) => node.name)).toEqual(["a", "b"]);
+    expect(option.series[0].links[0]).toMatchObject({ source: "a", target: "b" });
   });
 });

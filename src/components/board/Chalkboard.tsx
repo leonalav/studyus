@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { memo, useEffect, useRef, useState, useCallback } from "react";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
 import { Latex, ChalkStrong } from "./Visuals";
@@ -122,17 +122,27 @@ export function Chalkboard({
     return () => onRootRef?.(null);
   }, [onRootRef]);
 
+  const blockCountRef = useRef(board.blocks.length);
+  blockCountRef.current = board.blocks.length;
+
+  // A restored board starts fully visible; a newly written board reveals from
+  // the beginning. Subsequent block arrivals never reset this progress.
   useEffect(() => {
     setRevealed(writing ? 0 : board.blocks.length);
-    if (!writing) return;
-    let i = 0;
+  }, [board.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    setRevealed((current) => Math.min(current, board.blocks.length));
+  }, [board.id, board.blocks.length]);
+
+  // Keep one ticker alive for the board identity. Tutor operations can arrive
+  // faster than the reveal cadence without repeatedly cancelling the timer.
+  useEffect(() => {
     const id = window.setInterval(() => {
-      i += 1;
-      setRevealed(i);
-      if (i >= board.blocks.length) window.clearInterval(id);
+      setRevealed((current) => current < blockCountRef.current ? current + 1 : current);
     }, 620);
     return () => window.clearInterval(id);
-  }, [board.id, writing, board.blocks.length]);
+  }, [board.id]);
 
   useEffect(() => {
     setView(initialView ?? { x: 48, y: 36, s: 1 });
@@ -340,7 +350,7 @@ export function Chalkboard({
             <div
               key={b.id}
               data-block
-              className="anim-chalk cursor-text select-text"
+              className={`${containsVisualization(b) ? "anim-chalk-visual" : "anim-chalk"} cursor-text select-text`}
               style={{ animationDelay: `${Math.min(i, 4) * 40}ms` }}
             >
               <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} blockId={b.id} />
@@ -443,7 +453,7 @@ export function Chalkboard({
   );
 }
 
-function BlockView({
+const BlockView = memo(function BlockView({
   block,
   chalk,
   accent,
@@ -460,6 +470,11 @@ function BlockView({
   onBlockStateChange?: (blockId: string, state: VisualizationState) => void;
   blockId: string;
 }) {
+  const handleVisualizationState = useCallback(
+    (next: VisualizationState) => onBlockStateChange?.(blockId, next),
+    [blockId, onBlockStateChange]
+  );
+
   switch (block.kind) {
     case "title":
       return (
@@ -514,7 +529,7 @@ function BlockView({
           chalk={chalk}
           accent={accent}
           scale={scale}
-          onState={onBlockStateChange ? (next) => onBlockStateChange(blockId, next) : undefined}
+          onState={onBlockStateChange ? handleVisualizationState : undefined}
         />
       );
     case "callout":
@@ -539,6 +554,10 @@ function BlockView({
     default:
       return null;
   }
+});
+
+function containsVisualization(block: Block): boolean {
+  return block.kind === "visualization" || (block.kind === "row" && block.children.some(containsVisualization));
 }
 
 /* `**bold**` and `*em*` markers become yellow-strong text in chalk. */

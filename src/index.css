@@ -194,6 +194,17 @@ body {
   text-shadow: 0 0 1px currentColor;
 }
 
+/* Canvas/WebGL adapters must not be blurred or transformed while mounting;
+   doing so can force oversized compositor layers and visible frame flashes. */
+@keyframes chalk-visual-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.anim-chalk-visual {
+  animation: chalk-visual-in 0.2s ease-out both;
+  text-shadow: 0 0 1px currentColor;
+}
+
 .katex-chalk .katex {
   color: inherit !important;
   font-size: 1em !important;

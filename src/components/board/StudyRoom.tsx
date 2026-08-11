@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chalkboard, THEMES, FONTS, type BoardTheme, type BoardView, type Stroke } from "./Chalkboard";
+import { getVisualizationPrewarmTargets, prewarmVisualizationAdapters } from "./VisualizationSurface";
 import { BoardToolbar, type PanelId, type PenTool } from "./BoardToolbar";
 import { ThreadsPanel, SettingsPanel, ChatDock, type ChatMsg } from "./BoardPanels";
 import { buildSubBoard, boardToMarkdown, DOMAIN_META, type BoardDoc } from "../../data/boards";
@@ -217,6 +218,12 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
       setAgentStatus("thinking");
       setTyping(true);
 
+      // Overlap only the likely heavy adapter with model latency. Generic
+      // diagrams, function graphs, and 3D scenes use other renderers and should
+      // not pay the ECharts/Cytoscape parse cost speculatively.
+      const prewarmTargets = getVisualizationPrewarmTargets(text);
+      if (prewarmTargets.length > 0) prewarmVisualizationAdapters(prewarmTargets);
+
       const controller = new AbortController();
       abortRef.current = controller;
       try {
@@ -327,7 +334,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           theme={theme}
           fontCss={fontCss}
           fontScale={fontScale}
-          writing={!written.has(board.id)}
+          writing={agentStatus === "writing" || !written.has(board.id)}
           latex={latex}
           onAsk={handleAsk}
           annotating={panel === "annotate"}
