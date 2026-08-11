@@ -66,6 +66,30 @@ describe("Tutor turn schema validation", () => {
         op: "visualize",
         intent: { type: "equation", latex: "F = \\frac{mv^2}{r}", caption: "centripetal" },
       },
+      {
+        op: "replace_block",
+        targetAnchor: "agent-aaa111",
+        block: { kind: "title", text: "Revised orbits" },
+      },
+      {
+        op: "insert_after",
+        targetMatchText: "Revised orbits",
+        targetKind: "title",
+        block: { kind: "text", text: "Inserted after the title." },
+      },
+      { op: "delete_block", targetIndex: 1 },
+      {
+        op: "update_visualization",
+        targetAnchor: "agent-vis-1",
+        statePatch: { pointPositions: { A: [2, 1] } },
+      },
+      {
+        op: "revise_text",
+        targetMatchText: "Remember the units",
+        targetKind: "callout",
+        find: "units",
+        replace: "dimensions",
+      },
       { op: "write_callout", text: "Remember the units" },
     ];
     const res = validateTutorPayload(validTurn({ board_ops: turns }), EVIDENCE);

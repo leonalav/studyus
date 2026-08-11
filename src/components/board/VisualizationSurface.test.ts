@@ -1,9 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { compileExpression, computeBoundingBox, fitBoxToAspect } from "./VisualizationSurface";
+import { compileExpression, computeBoundingBox, fitBoxToAspect, resolveDisplayMode } from "./VisualizationSurface";
 
 /** Close to zero tolerance for float comparisons. */
 const TOL = 1e-9;
 const close = (a: number, b: number) => Math.abs(a - b) < TOL;
+
+describe("resolveDisplayMode — graph vs graphless defaults", () => {
+  it("defaults geometry to graphless so plain diagrams do not get axes behind them", () => {
+    expect(resolveDisplayMode({ type: "geometry", objects: [] } as any)).toBe("graphless");
+  });
+
+  it("defaults function plots to graph mode", () => {
+    expect(resolveDisplayMode({ type: "function", domainX: [-5, 5], expressions: [] } as any)).toBe("graph");
+  });
+
+  it("respects an explicit override", () => {
+    expect(resolveDisplayMode({ type: "geometry", displayMode: "graph", objects: [] } as any)).toBe("graph");
+    expect(resolveDisplayMode({ type: "function", displayMode: "graphless", domainX: [-5, 5], expressions: [] } as any)).toBe("graphless");
+  });
+});
 
 describe("compileExpression — arithmetic & precedence", () => {
   it("evaluates a polynomial with explicit operators", () => {
@@ -133,16 +148,22 @@ describe("computeBoundingBox — figure is never clipped", () => {
     expect(yMax).toBeGreaterThanOrEqual(7);
   });
 
-  it("uses an explicit viewport as a hint but expands it to contain geometry", () => {
+  it("ignores an explicit viewport and fits the measured geometry itself", () => {
     const box = computeBoundingBox({
       type: "geometry",
-      viewport: { xMin: -2, xMax: 3, yMin: 0, yMax: 2 },
+      viewport: { xMin: -20, xMax: 20, yMin: -20, yMax: 20 },
       objects: [
         { kind: "point", id: "O", at: [0, 0] },
         { kind: "point", id: "A", at: [3, 0] },
         { kind: "circle", id: "c1", center: "O", through: "A" },
       ],
     } as any);
+    // The ignored viewport must not blow the figure out to a huge empty block.
+    expect(box[0]).toBeGreaterThan(-10);
+    expect(box[2]).toBeLessThan(10);
+    expect(box[3]).toBeGreaterThan(-10);
+    expect(box[1]).toBeLessThan(10);
+    // It still fully contains the actual circle.
     expect(box[0]).toBeLessThan(-3);
     expect(box[2]).toBeGreaterThan(3);
     expect(box[3]).toBeLessThan(-3);
@@ -190,6 +211,18 @@ describe("computeBoundingBox — figure is never clipped", () => {
     expect(xMax).toBeGreaterThan(4);
     expect(yMin).toBeLessThan(0);
     expect(yMax).toBeGreaterThan(4);
+  });
+
+  it("infers a function range from sampled expressions when rangeY is omitted", () => {
+    const [xMin, yMax, xMax, yMin] = computeBoundingBox({
+      type: "function",
+      domainX: [0, 4],
+      expressions: [{ id: "f", expression: "x^2" }],
+    } as any);
+    expect(xMin).toBeLessThan(0);
+    expect(xMax).toBeGreaterThan(4);
+    expect(yMin).toBeLessThanOrEqual(0);
+    expect(yMax).toBeGreaterThan(16);
   });
 });
 

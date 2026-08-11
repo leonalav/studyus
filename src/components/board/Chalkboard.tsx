@@ -175,6 +175,8 @@ export function Chalkboard({
 
   const onWheel = (e: React.WheelEvent) => {
     if (annotating) return;
+    const target = e.target as HTMLElement;
+    if (target.closest("[data-nopan]")) return;
     if (e.ctrlKey || e.metaKey) {
       const delta = -e.deltaY * 0.0016;
       setView((v) => ({ ...v, s: Math.min(2.2, Math.max(0.4, v.s + delta)) }));
@@ -329,11 +331,10 @@ export function Chalkboard({
         }}
       >
         <div className="space-y-7">
-          {board.blocks.length === 0 && (
-            <div className="anim-chalk max-w-[640px]" style={{ opacity: 0.85 }}>
-              <div style={{ fontSize: 34, lineHeight: 1.25 }}>{board.title}</div>
-            </div>
-          )}
+          {/* Intentionally render a blank chalkboard when a session opens.
+              The tutor fills the board with actual teaching content; we do not
+              echo the learner's prompt or even the session title onto the board
+              before any content exists. */}
 
           {board.blocks.slice(0, revealed).map((b, i) => (
             <div

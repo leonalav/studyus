@@ -224,6 +224,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           sessionId,
           sessionTitle: board.title,
           domain: board.domain,
+          board,
           boundNodes: resolvedBoundNodes,
           onboarding: onboarding ?? undefined,
           learnerMessage: text,
@@ -234,19 +235,23 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         const turn = result.value;
         setMessages((m) => [...m, { id: ++msgId.current, role: "tutor", text: turn.speech }]);
 
-        // Each validated board operation becomes a chalkboard block.
+        // Validated board operations may append, replace, delete, or update
+        // existing notebook content in place — the tutor can revise prior notes
+        // and visuals instead of only stacking more text below them.
         if (turn.boardOps.length > 0) {
           setAgentStatus("writing");
           for (const op of turn.boardOps) {
-            const block = toolCallToBlock({ name: op.op, args: op as unknown as Record<string, unknown> }, board.domain);
-            if (block) {
-              await new Promise((r) => window.setTimeout(r, 480));
-              setBoards((current) => {
-                const next = current.map((b) => (b.id === activeId ? appendBlock(b, block) : b));
+            await new Promise((r) => window.setTimeout(r, 320));
+            let changed = false;
+            setBoards((current) =>
+              current.map((b) => {
+                if (b.id !== activeId) return b;
+                const next = applyBoardOp(b, op as any, b.domain);
+                changed = changed || next !== b;
                 return next;
-              });
-              notify(`Tutor wrote: ${block.kind}`);
-            }
+              })
+            );
+            if (changed) notify(`Tutor updated board: ${op.op}`);
           }
         }
 
@@ -510,4 +515,174 @@ function toolCallToBlock(call: { name: string; args: Record<string, any> }, doma
 
 function appendBlock(board: BoardDoc, block: NonNullable<ReturnType<typeof toolCallToBlock>>): BoardDoc {
   return { ...board, blocks: [...board.blocks, block] };
+}
+
+function blockSpecToBlock(spec: Record<string, unknown>, domain: BoardDoc["domain"], existingId?: string) {
+  const kind = String(spec.kind ?? "");
+  const id = existingId ?? `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  switch (kind) {
+    case "title":
+      return { id, kind: "title" as const, text: String(spec.text ?? "Section") };
+    case "text":
+      return { id, kind: "text" as const, text: String(spec.text ?? "") };
+    case "bullets":
+      return { id, kind: "bullets" as const, items: Array.isArray(spec.items) ? spec.items.map(String) : [] };
+    case "latex":
+      return { id, kind: "latex" as const, tex: String(spec.tex ?? ""), caption: spec.caption ? String(spec.caption) : undefined };
+    case "visualization": {
+      const result = validateVisualizationIntent(spec.intent);
+      if (!result.valid) return null;
+      return { id, kind: "visualization" as const, intent: spec.intent as VisualizationIntent };
+    }
+    case "callout":
+      return { id, kind: "callout" as const, text: String(spec.text ?? "") };
+    default:
+      void domain;
+      return null;
+  }
+}
+
+function mergeVisualizationState(current: VisualizationState | undefined, patch: Record<string, unknown> | undefined): VisualizationState | undefined {
+  if (!patch) return current;
+  const next: VisualizationState = { ...(current ?? {}) };
+  if (patch.pointPositions && typeof patch.pointPositions === "object") {
+    next.pointPositions = { ...(current?.pointPositions ?? {}), ...(patch.pointPositions as Record<string, [number, number]>) };
+  }
+  if (patch.nodePositions && typeof patch.nodePositions === "object") {
+    next.nodePositions = { ...(current?.nodePositions ?? {}), ...(patch.nodePositions as Record<string, [number, number]>) };
+  }
+  if (patch.graph3dCamera && typeof patch.graph3dCamera === "object") {
+    next.graph3dCamera = patch.graph3dCamera as VisualizationState["graph3dCamera"];
+  }
+  if (patch.chartViewport && typeof patch.chartViewport === 'object') {
+    next.chartViewport = { ...(current?.chartViewport ?? {}), ...(patch.chartViewport as VisualizationState['chartViewport']) };
+  }
+  if (Array.isArray(patch.hiddenSeries)) {
+    next.hiddenSeries = patch.hiddenSeries as string[];
+  }
+  if (patch.seriesStyleOverrides && typeof patch.seriesStyleOverrides === 'object') {
+    next.seriesStyleOverrides = { ...(current?.seriesStyleOverrides ?? {}), ...(patch.seriesStyleOverrides as VisualizationState['seriesStyleOverrides']) };
+  }
+  if (typeof patch.scienceLayout === "string") next.scienceLayout = patch.scienceLayout;
+  if (typeof patch.equationValue === "string") next.equationValue = patch.equationValue;
+  return next;
+}
+
+function blockSearchText(block: BoardDoc["blocks"][number]): string {
+  switch (block.kind) {
+    case "title":
+    case "text":
+    case "callout":
+      return block.text;
+    case "bullets":
+      return block.items.join(" \n ");
+    case "latex":
+      return [block.caption ?? "", block.tex].join(" ");
+    case "visualization": {
+      const title = "title" in block.intent ? block.intent.title ?? "" : "";
+      const caption = "caption" in block.intent ? block.intent.caption ?? "" : "";
+      return [block.intent.type, title, caption].join(" ");
+    }
+    case "row":
+      return block.children.map(blockSearchText).join(" \n ");
+  }
+}
+
+function resolveBoardTargetIndex(board: BoardDoc, op: Record<string, any>): number {
+  if (typeof op.targetAnchor === "string" && op.targetAnchor.trim()) {
+    return board.blocks.findIndex((block) => block.id === op.targetAnchor.trim());
+  }
+  if (Number.isInteger(op.targetIndex)) {
+    return op.targetIndex >= 0 && op.targetIndex < board.blocks.length ? op.targetIndex : -1;
+  }
+  if (typeof op.targetMatchText === "string" && op.targetMatchText.trim()) {
+    const needle = op.targetMatchText.trim().toLowerCase();
+    const kind = typeof op.targetKind === "string" ? op.targetKind : null;
+    return board.blocks.findIndex((block) =>
+      (kind === null || block.kind === kind) && blockSearchText(block).toLowerCase().includes(needle)
+    );
+  }
+  return -1;
+}
+
+function reviseBlockText(block: BoardDoc["blocks"][number], find: string, replace: string, replaceAll: boolean) {
+  const rewrite = (text: string) => replaceAll ? text.split(find).join(replace) : text.replace(find, replace);
+  switch (block.kind) {
+    case "title":
+      return { ...block, text: rewrite(block.text) };
+    case "text":
+      return { ...block, text: rewrite(block.text) };
+    case "callout":
+      return { ...block, text: rewrite(block.text) };
+    case "latex":
+      return {
+        ...block,
+        tex: rewrite(block.tex),
+        caption: block.caption ? rewrite(block.caption) : block.caption,
+      };
+    case "bullets":
+      return { ...block, items: block.items.map(rewrite) };
+    default:
+      return block;
+  }
+}
+
+function applyBoardOp(board: BoardDoc, op: Record<string, any>, domain: BoardDoc["domain"]): BoardDoc {
+  switch (op.op) {
+    case "replace_block": {
+      const index = resolveBoardTargetIndex(board, op);
+      if (index < 0) return board;
+      const replacement = blockSpecToBlock(op.block ?? {}, domain, board.blocks[index]?.id);
+      if (!replacement) return board;
+      const blocks = board.blocks.slice();
+      blocks[index] = replacement;
+      return { ...board, blocks };
+    }
+    case "insert_after": {
+      const index = resolveBoardTargetIndex(board, op);
+      if (index < 0) return board;
+      const block = blockSpecToBlock(op.block ?? {}, domain);
+      if (!block) return board;
+      const blocks = board.blocks.slice();
+      blocks.splice(index + 1, 0, block);
+      return { ...board, blocks };
+    }
+    case "delete_block": {
+      const index = resolveBoardTargetIndex(board, op);
+      if (index < 0) return board;
+      return { ...board, blocks: board.blocks.filter((_, i) => i !== index) };
+    }
+    case "update_visualization": {
+      const index = resolveBoardTargetIndex(board, op);
+      if (index < 0) return board;
+      const target = board.blocks[index];
+      if (target.kind !== "visualization") return board;
+      if (op.intent) {
+        const result = validateVisualizationIntent(op.intent);
+        if (!result.valid) return board;
+      }
+      const blocks = board.blocks.slice();
+      blocks[index] = {
+        ...target,
+        intent: (op.intent as VisualizationIntent | undefined) ?? target.intent,
+        state: mergeVisualizationState(target.state, op.statePatch),
+      };
+      return { ...board, blocks };
+    }
+    case "revise_text": {
+      const index = resolveBoardTargetIndex(board, op);
+      if (index < 0 || typeof op.find !== "string") return board;
+      const block = board.blocks[index];
+      if (!["title", "text", "callout", "latex", "bullets"].includes(block.kind)) return board;
+      const revised = reviseBlockText(block, op.find, String(op.replace ?? ""), op.replaceAll === true);
+      if (revised === block) return board;
+      const blocks = board.blocks.slice();
+      blocks[index] = revised;
+      return { ...board, blocks };
+    }
+    default: {
+      const block = toolCallToBlock({ name: String(op.op ?? ""), args: op }, domain);
+      return block ? appendBlock(board, block) : board;
+    }
+  }
 }

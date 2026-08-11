@@ -42,8 +42,8 @@ import { TUTOR_AGENT_PROMPT_V1 } from "./llm";
 import { getActiveTutorContextLearnerSummary } from "./learnerModel";
 import { getEvidenceForSelectedNodes } from "./curriculum";
 import { buildOnboardingReminder, type OnboardingAnswers, type OnboardingQuestion } from "../data/tutor";
-import { DOMAIN_META, type Domain } from "../data/boards";
-import type { VisualizationIntent } from "./visualization/types";
+import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
+import type { VisualizationIntent, VisualizationState } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
 
 export const TUTOR_PROMPT_VERSION = "tutor_v2";
@@ -61,13 +61,52 @@ export const MAX_ONBOARDING_QUESTIONS = 6;
    TURN TYPES
    ───────────────────────────────────────────────────────────── */
 
+export type BoardBlockSpec =
+  | { kind: "title"; text: string }
+  | { kind: "text"; text: string }
+  | { kind: "bullets"; items: string[] }
+  | { kind: "latex"; tex: string; caption?: string }
+  | { kind: "visualization"; intent: VisualizationIntent }
+  | { kind: "callout"; text: string };
+
+export interface VisualizationStatePatch {
+  pointPositions?: Record<string, [number, number]>;
+  nodePositions?: Record<string, [number, number]>;
+  graph3dCamera?: {
+    position: [number, number, number];
+    target: [number, number, number];
+  };
+  chartViewport?: {
+    xStart?: number;
+    xEnd?: number;
+    yStart?: number;
+    yEnd?: number;
+  };
+  hiddenSeries?: string[];
+  seriesStyleOverrides?: Record<string, { color?: string; opacity?: number }>;
+  scienceLayout?: string;
+  equationValue?: string;
+}
+
+export interface BoardTargetSpec {
+  targetIndex?: number;
+  targetAnchor?: string;
+  targetMatchText?: string;
+  targetKind?: "title" | "text" | "bullets" | "latex" | "visualization" | "callout" | "row";
+}
+
 export type BoardOp =
   | { op: "write_title"; text: string }
   | { op: "write_text"; text: string }
   | { op: "write_bullets"; items: string[] }
   | { op: "write_latex"; tex: string; caption?: string }
   | { op: "visualize"; intent: VisualizationIntent }
-  | { op: "write_callout"; text: string };
+  | { op: "write_callout"; text: string }
+  | ({ op: "replace_block"; block: BoardBlockSpec } & BoardTargetSpec)
+  | ({ op: "insert_after"; block: BoardBlockSpec } & BoardTargetSpec)
+  | ({ op: "delete_block" } & BoardTargetSpec)
+  | ({ op: "update_visualization"; intent?: VisualizationIntent; statePatch?: VisualizationStatePatch } & BoardTargetSpec)
+  | ({ op: "revise_text"; find: string; replace: string; replaceAll?: boolean } & BoardTargetSpec);
 
 export interface TutorDiagnosis {
   misconceptions: string[];
@@ -140,11 +179,228 @@ export async function buildTutorEvidenceCards(boundNodes: string[]): Promise<Tut
 const HINT_DEPENDENCE = ["none", "low", "medium", "high"] as const;
 const CALIBRATION = ["under", "over", "accurate"] as const;
 
+function validateBoardBlockSpec(value: unknown, path: string, errors: string[]): BoardBlockSpec | null {
+  const rec = asRecord(value, path, errors);
+  if (!rec) return null;
+  const kind = asEnum(rec.kind, ["title", "text", "bullets", "latex", "visualization", "callout"], `${path}.kind`, errors);
+  if (!kind) return null;
+  const textOf = (key: string): string | null => asNonEmptyString(rec[key], `${path}.${key}`, errors);
+  const captionOf = (key: string): string | undefined => {
+    if (rec[key] === undefined || rec[key] === null) return undefined;
+    return asNonEmptyString(rec[key], `${path}.${key}`, errors) ?? undefined;
+  };
+
+  switch (kind) {
+    case "title":
+    case "text":
+    case "callout": {
+      const text = textOf("text");
+      if (!text) return null;
+      return { kind, text } as BoardBlockSpec;
+    }
+    case "bullets": {
+      const items = asArray(rec.items, `${path}.items`, errors);
+      if (!items) return null;
+      const out: string[] = [];
+      items.forEach((entry, i) => {
+        if (typeof entry !== "string" || !entry.trim()) errors.push(`${path}.items[${i}] must be a non-empty string`);
+        else out.push(entry.trim());
+      });
+      if (out.length === 0) {
+        errors.push(`${path}.items must contain at least one non-empty string`);
+        return null;
+      }
+      return { kind, items: out };
+    }
+    case "latex": {
+      const tex = textOf("tex");
+      if (!tex) return null;
+      return { kind, tex, caption: captionOf("caption") };
+    }
+    case "visualization": {
+      const intent = rec.intent;
+      if (!intent || typeof intent !== "object") {
+        errors.push(`${path}.intent must be an object`);
+        return null;
+      }
+      const result = validateVisualizationIntent(intent);
+      if (!result.valid) {
+        errors.push(`${path}.intent: ${result.reason}`);
+        return null;
+      }
+      return { kind, intent: intent as VisualizationIntent };
+    }
+  }
+}
+
+function validateVisualizationStatePatch(value: unknown, path: string, errors: string[]): VisualizationStatePatch | null {
+  const rec = asRecord(value, path, errors);
+  if (!rec) return null;
+  const out: VisualizationStatePatch = {};
+
+  const parse2DMap = (value: unknown, subPath: string): Record<string, [number, number]> | null => {
+    const pos = asRecord(value, subPath, errors);
+    if (!pos) return null;
+    const mapped: Record<string, [number, number]> = {};
+    for (const [id, coords] of Object.entries(pos)) {
+      if (!Array.isArray(coords) || coords.length !== 2 || !coords.every((n) => typeof n === "number" && Number.isFinite(n))) {
+        errors.push(`${subPath}.${id} must be [x, y] finite numbers`);
+      } else {
+        mapped[id] = [coords[0], coords[1]];
+      }
+    }
+    return mapped;
+  };
+
+  if (rec.pointPositions !== undefined) {
+    const mapped = parse2DMap(rec.pointPositions, `${path}.pointPositions`);
+    if (!mapped) return null;
+    out.pointPositions = mapped;
+  }
+
+  if (rec.nodePositions !== undefined) {
+    const mapped = parse2DMap(rec.nodePositions, `${path}.nodePositions`);
+    if (!mapped) return null;
+    out.nodePositions = mapped;
+  }
+
+  if (rec.graph3dCamera !== undefined) {
+    const camera = asRecord(rec.graph3dCamera, `${path}.graph3dCamera`, errors);
+    if (!camera) return null;
+    const position = camera.position;
+    const target = camera.target;
+    if (!Array.isArray(position) || position.length !== 3 || !position.every((n) => typeof n === "number" && Number.isFinite(n))) {
+      errors.push(`${path}.graph3dCamera.position must be [x,y,z] finite numbers`);
+    } else if (!Array.isArray(target) || target.length !== 3 || !target.every((n) => typeof n === "number" && Number.isFinite(n))) {
+      errors.push(`${path}.graph3dCamera.target must be [x,y,z] finite numbers`);
+    } else {
+      out.graph3dCamera = {
+        position: [position[0], position[1], position[2]],
+        target: [target[0], target[1], target[2]],
+      };
+    }
+  }
+
+  if (rec.chartViewport !== undefined) {
+    const viewport = asRecord(rec.chartViewport, `${path}.chartViewport`, errors);
+    if (!viewport) return null;
+    const next: VisualizationStatePatch['chartViewport'] = {};
+    for (const key of ['xStart', 'xEnd', 'yStart', 'yEnd'] as const) {
+      const value = viewport[key];
+      if (value !== undefined && value !== null) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+          errors.push(`${path}.chartViewport.${key} must be a finite number`);
+        } else {
+          next[key] = value;
+        }
+      }
+    }
+    out.chartViewport = next;
+  }
+
+  if (rec.hiddenSeries !== undefined) {
+    const hidden = asArray(rec.hiddenSeries, `${path}.hiddenSeries`, errors);
+    if (!hidden) return null;
+    if (!hidden.every((s) => typeof s === 'string')) {
+      errors.push(`${path}.hiddenSeries must be an array of strings`);
+    } else {
+      out.hiddenSeries = hidden as string[];
+    }
+  }
+
+  if (rec.seriesStyleOverrides !== undefined) {
+    const overrides = asRecord(rec.seriesStyleOverrides, `${path}.seriesStyleOverrides`, errors);
+    if (!overrides) return null;
+    const next: Record<string, { color?: string; opacity?: number }> = {};
+    for (const [id, value] of Object.entries(overrides)) {
+      const spec = asRecord(value, `${path}.seriesStyleOverrides.${id}`, errors);
+      if (!spec) return null;
+      const outSpec: { color?: string; opacity?: number } = {};
+      if (spec.color !== undefined) {
+        if (typeof spec.color !== 'string') errors.push(`${path}.seriesStyleOverrides.${id}.color must be string`);
+        else outSpec.color = spec.color;
+      }
+      if (spec.opacity !== undefined) {
+        if (typeof spec.opacity !== 'number' || !Number.isFinite(spec.opacity) || spec.opacity < 0 || spec.opacity > 1) errors.push(`${path}.seriesStyleOverrides.${id}.opacity must be between 0 and 1`);
+        else outSpec.opacity = spec.opacity;
+      }
+      next[id] = outSpec;
+    }
+    out.seriesStyleOverrides = next;
+  }
+
+  if (rec.scienceLayout !== undefined) {
+    const scienceLayout = asNonEmptyString(rec.scienceLayout, `${path}.scienceLayout`, errors);
+    if (scienceLayout) out.scienceLayout = scienceLayout;
+  }
+
+  if (rec.equationValue !== undefined) {
+    const equationValue = asNonEmptyString(rec.equationValue, `${path}.equationValue`, errors);
+    if (equationValue) out.equationValue = equationValue;
+  }
+
+  if (errors.some((e) => e.startsWith(path))) return null;
+  return out;
+}
+
+function validateBoardTarget(rec: Record<string, unknown>, path: string, errors: string[]): BoardTargetSpec | null {
+  const out: BoardTargetSpec = {};
+
+  if (rec.targetIndex !== undefined && rec.targetIndex !== null) {
+    const index = asFiniteNumber(rec.targetIndex, `${path}.targetIndex`, errors);
+    if (index === null || !Number.isInteger(index) || index < 0) {
+      errors.push(`${path}.targetIndex must be a non-negative integer`);
+    } else {
+      out.targetIndex = index;
+    }
+  }
+
+  if (rec.targetAnchor !== undefined && rec.targetAnchor !== null) {
+    const anchor = asNonEmptyString(rec.targetAnchor, `${path}.targetAnchor`, errors);
+    if (anchor) out.targetAnchor = anchor;
+  }
+
+  if (rec.targetMatchText !== undefined && rec.targetMatchText !== null) {
+    const match = asNonEmptyString(rec.targetMatchText, `${path}.targetMatchText`, errors);
+    if (match) out.targetMatchText = match;
+  }
+
+  if (rec.targetKind !== undefined && rec.targetKind !== null) {
+    const kind = asEnum(
+      rec.targetKind,
+      ["title", "text", "bullets", "latex", "visualization", "callout", "row"],
+      `${path}.targetKind`,
+      errors
+    );
+    if (kind) out.targetKind = kind;
+  }
+
+  if (!out.targetAnchor && out.targetIndex === undefined && !out.targetMatchText) {
+    errors.push(`${path} must include at least one of targetAnchor, targetIndex, or targetMatchText`);
+    return null;
+  }
+
+  if (errors.some((e) => e.startsWith(path))) return null;
+  return out;
+}
+
 function validateBoardOp(value: unknown, path: string, errors: string[]): BoardOp | null {
   const rec = asRecord(value, path, errors);
   if (!rec) return null;
 
-  const op = asEnum(rec.op, ["write_title", "write_text", "write_bullets", "write_latex", "visualize", "write_callout"], `${path}.op`, errors);
+  const op = asEnum(rec.op, [
+    "write_title",
+    "write_text",
+    "write_bullets",
+    "write_latex",
+    "visualize",
+    "write_callout",
+    "replace_block",
+    "insert_after",
+    "delete_block",
+    "update_visualization",
+    "revise_text",
+  ], `${path}.op`, errors);
   if (!op) return null;
 
   const textOf = (key: string): string | null => asNonEmptyString(rec[key], `${path}.${key}`, errors);
@@ -192,6 +448,56 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
         return null;
       }
       return { op, intent: intent as VisualizationIntent };
+    }
+    case "replace_block":
+    case "insert_after": {
+      const target = validateBoardTarget(rec, path, errors);
+      const block = validateBoardBlockSpec(rec.block, `${path}.block`, errors);
+      if (!target || !block) return null;
+      return { op, ...target, block } as BoardOp;
+    }
+    case "delete_block": {
+      const target = validateBoardTarget(rec, path, errors);
+      if (!target) return null;
+      return { op, ...target } as BoardOp;
+    }
+    case "update_visualization": {
+      const target = validateBoardTarget(rec, path, errors);
+      if (!target) return null;
+      let intent: VisualizationIntent | undefined;
+      if (rec.intent !== undefined) {
+        if (!rec.intent || typeof rec.intent !== "object") {
+          errors.push(`${path}.intent must be an object when provided`);
+          return null;
+        }
+        const result = validateVisualizationIntent(rec.intent);
+        if (!result.valid) {
+          errors.push(`${path}.intent: ${result.reason}`);
+          return null;
+        }
+        intent = rec.intent as VisualizationIntent;
+      }
+      let statePatch: VisualizationStatePatch | undefined;
+      if (rec.statePatch !== undefined) {
+        statePatch = validateVisualizationStatePatch(rec.statePatch, `${path}.statePatch`, errors) ?? undefined;
+        if (!statePatch) return null;
+      }
+      if (!intent && !statePatch) {
+        errors.push(`${path} must provide intent and/or statePatch`);
+        return null;
+      }
+      return { op, ...target, intent, statePatch } as BoardOp;
+    }
+    case "revise_text": {
+      const target = validateBoardTarget(rec, path, errors);
+      const find = textOf("find");
+      const replace = rec.replace === undefined || rec.replace === null ? "" : String(rec.replace);
+      if (!target || !find) return null;
+      if (rec.replaceAll !== undefined && typeof rec.replaceAll !== "boolean") {
+        errors.push(`${path}.replaceAll must be boolean`);
+        return null;
+      }
+      return { op, ...target, find, replace, replaceAll: rec.replaceAll === true };
     }
   }
 }
@@ -434,6 +740,7 @@ export function buildTutorUserPrompt(params: {
   learnerSummary: string;
   cards: TutorEvidenceCard[];
   history: SessionMessage[];
+  board?: BoardDoc;
   learnerMessage: string;
   attachmentsNote: string;
 }): string {
@@ -449,8 +756,8 @@ export function buildTutorUserPrompt(params: {
   parts.push(
     params.awaitingFirstAttempt
       ? `PHASE: awaiting_first_attempt — the learner has not yet made an independent attempt. ` +
-        `Open by locating what they have tried and ask the question whose answer distinguishes their misconception. ` +
-        `Do not teach ahead of their attempt.`
+        `However, if the learner explicitly asked you to draw, plot, visualize, or show a structure, comply first with a best-effort board rendering instead of asking a gating question. ` +
+        `Otherwise open by locating what they have tried and, only if necessary, ask the one question whose answer distinguishes misconceptions.`
       : `PHASE: in_flow — the learner is actively working with you. Continue from their latest message.`
   );
 
@@ -477,13 +784,21 @@ export function buildTutorUserPrompt(params: {
     );
   }
 
+  parts.push(
+    params.board
+      ? `CURRENT BOARD BLOCKS (top-level; each block has a stable anchor. Prefer targetAnchor for edits, fall back to targetIndex, and use targetMatchText for selection-based edits):\n${summarizeBoardBlocks(params.board)}`
+      : `CURRENT BOARD BLOCKS: unavailable`
+  );
+
   parts.push(`LEARNER MESSAGE:\n"""\n${params.learnerMessage}${params.attachmentsNote}\n"""`);
+
+  parts.push(`GLOBAL BEHAVIOR: If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question.`);
 
   parts.push(
     `Return JSON only, in this exact shape:\n` +
       `{\n` +
-      `  "speech": "<your reply to the learner — one or two sentences, Socratic>",\n` +
-      `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "write_callout", ...fields }, ... ],\n` +
+      `  "speech": "<your reply to the learner — one or two sentences, direct and helpful. When the learner explicitly asked for a visualization, confirm what you drew instead of asking a question>",\n` +
+      `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text", ...fields }, ... ],\n` +
       `  "diagnosis": { "misconceptions": [string], "weak_criteria": [string], "hint_dependence": "none"|"low"|"medium"|"high", "calibration": "under"|"over"|"accurate" } /* optional */,\n` +
       `  "evidence_refs": [ "<one of the supplied E-handles>" ],\n` +
       `  "requested_level": <0..${MAX_HINT_LEVEL}> /* optional: request a higher unlocked hint level when the learner is stuck */\n` +
@@ -492,31 +807,95 @@ export function buildTutorUserPrompt(params: {
       `- write_title / write_text / write_callout: { "op", "text": string }\n` +
       `- write_bullets: { "op", "items": string[] }\n` +
       `- write_latex: { "op", "tex": string, "caption"?: string }\n` +
-      `- visualize: { "op", "intent": VisualizationIntent } — use this for ANY diagram, plot, or geometric figure. ` +
+      `- visualize: { "op", "intent": VisualizationIntent } — appends a new visualization block. Use this immediately when the learner explicitly asks for a diagram, graph, plot, or structure. ` +
       `Describe what the figure IS, not how to draw it; the renderer handles rendering. ` +
-      `Geometry figures are auto-fitted to the available board space: omit "viewport" unless a specific teaching window is essential, and never use it to crop the figure. ` +
+      `Geometry figures are auto-fitted to the available board space from their actual objects. Do not emit a geometry "viewport"; this build intentionally ignores it so shapes stay tight, fully visible, and draggable without a big empty interaction rectangle. ` +
       `Use compact, readable coordinates (normally within about -10..10) so the shape remains prominent. ` +
+      `Geometry and function intents also support optional "displayMode": "graph" | "graphless". Use "graphless" for pure shapes/diagrams that should NOT have axes behind them; use "graph" when the coordinate plane itself is part of the lesson. Geometry defaults to graphless; function defaults to graph. ` +
       `Keep graphs bundled through this same visualize operation by emitting a separate "type":"function" intent when a lesson needs a plotted relationship; do not replace the requested geometric shape with a graph. ` +
-      `VisualizationIntent is a discriminated union on "type": "geometry" | "function" | "chart" | "equation" | "diagram" | "circuit" | "chemistry" | "graph_theory". ` +
+      `VisualizationIntent is a discriminated union on "type": "geometry" | "function" | "graph3d" | "chart" | "equation" | "diagram" | "physics" | "biology" | "circuit" | "chemistry" | "graph_theory". Use chart for generic data charts and graph_theory for abstract node-edge networks. ` +
       `Every geometry object in the "objects" array is itself discriminated on "kind". ` +
       `Example — a circle with center O and two points A, B:\n` +
-      `{ "op": "visualize", "intent": { "type": "geometry", "title": "Circle centered at O through A, with B nearby", "objects": [\n` +
+      `{ "op": "visualize", "intent": { "type": "geometry", "title": "Circle centered at O through A, with B nearby", "displayMode": "graphless", "objects": [\n` +
       `  { "kind": "point", "id": "O", "at": [0, 0], "label": "O" },\n` +
       `  { "kind": "point", "id": "A", "at": [3, 0], "label": "A" },\n` +
       `  { "kind": "point", "id": "B", "at": [-2, 2], "label": "B" },\n` +
       `  { "kind": "circle", "id": "c1", "center": "O", "through": "A" }\n` +
       `] } }\n` +
       `Example — a function plot:\n` +
-      `{ "op": "visualize", "intent": { "type": "function", "title": "f(x) = x^2 - 2x + 1", "domainX": [-5, 5], ` +
-      `"expressions": [ { "id": "f", "expression": "x^2 - 2*x + 1", "label": "f(x)" } ] } }\n` +
+      `{ "op": "visualize", "intent": { "type": "function", "title": "f(x) = x^2 - 2x + 1", "displayMode": "graph", "domainX": [-5, 5], "xLabel": "x", "yLabel": "y", ` +
+      `"expressions": [ { "id": "f", "expression": "x^2 - 2*x + 1", "label": "f(x)" } ], ` +
+      `"annotations": [ { "kind": "root", "id": "r1", "expressionId": "f", "nearX": 1, "label": "vertex root" } ] } }\n` +
+      `Example — a 3D surface plot:\n` +
+      `{ "op": "visualize", "intent": { "type": "graph3d", "title": "z = sin(x) cos(y)", "axes": { "xLabel": "x", "yLabel": "y", "zLabel": "z" }, "domain": { "x": [-5, 5], "y": [-5, 5] }, ` +
+      `"sampling": { "xSteps": 40, "ySteps": 40 }, "surfaces": [ { "kind": "surface", "id": "s1", "z": "sin(x) * cos(y)", "renderMode": "surface", "color": "#60a5fa" }, { "kind": "point", "id": "p1", "at": [0, 0, 0], "label": "O", "color": "#fbbf24" } ] } }\n` +
+      `Example — a generic chart with named series, colors, ranges, and annotation:\n` +
+      `{ "op": "visualize", "intent": { "type": "chart", "title": "Sales by quarter", "chartType": "bar", "legend": true, ` +
+      `"xAxis": { "label": "Quarter", "categories": ["Q1", "Q2", "Q3", "Q4"] }, "yAxis": { "label": "Revenue", "min": 0, "max": 100 }, ` +
+      `"series": [ { "kind": "bar", "id": "north", "name": "North", "values": [20, 35, 50, 65], "color": "#60a5fa" }, { "kind": "bar", "id": "south", "name": "South", "values": [18, 28, 44, 72], "color": "#f59e0b" } ], ` +
+      `"annotations": [ { "kind": "line", "y": 60, "label": "target" } ] } }\n` +
+      `Example — a graph-theory network:\n` +
+      `{ "op": "visualize", "intent": { "type": "graph_theory", "title": "Shortest-path example", "layout": "cose", "directed": true, ` +
+      `"nodes": [ { "id": "A", "label": "A", "color": "#60a5fa", "shape": "ellipse", "size": 34 }, { "id": "B", "label": "B", "color": "#f59e0b", "shape": "diamond", "size": 30 } ], ` +
+      `"edges": [ { "from": "A", "to": "B", "label": "5", "color": "#86efac", "width": 2, "style": "dashed" } ] } }\n` +
+      `Example — revise an existing visualization in place (prefer stable anchors when present):\n` +
+      `{ "op": "update_visualization", "targetAnchor": "agent-1234-abcd", "statePatch": { "pointPositions": { "A": [2, 1] } } }\n` +
+      `Example — patch a long note block in diff style:\n` +
+      `{ "op": "revise_text", "targetMatchText": "centripetal force depends", "targetKind": "text", "find": "depends only on speed", "replace": "depends on speed and radius" }\n` +
+      `Example — a starter physics free-body diagram:\n` +
+      `{ "op": "visualize", "intent": { "type": "physics", "title": "Block on a surface", "variant": "mechanics_scene", "bodies": [ { "id": "m", "label": "m", "at": [0, 0], "shape": "box" } ], "vectors": [ { "id": "w", "from": "m", "dx": 0, "dy": -2, "label": "mg", "kind": "force" }, { "id": "n", "from": "m", "dx": 0, "dy": 2, "label": "N", "kind": "force" } ], "decorations": [ { "kind": "ground", "id": "g", "fromX": -2, "toX": 2, "y": -1 } ] } }\n` +
+      `Example — a starter biology pathway:\n` +
+      `{ "op": "visualize", "intent": { "type": "biology", "title": "Gene to protein", "variant": "pathway", "layout": "cose", "style": { "directed": true, "nodeColorByKind": true }, "structures": [ { "id": "g", "label": "Gene", "at": [0, 0], "kind": "gene" }, { "id": "p", "label": "Protein", "at": [4, 0], "kind": "protein" } ], "connections": [ { "from": "g", "to": "p", "label": "expression" } ] } }\n` +
+      `Example — a chemistry reaction:\n` +
+      `{ "op": "visualize", "intent": { "type": "chemistry", "title": "Hydrogenation", "variant": "reaction", "reactants": [ { "id": "r1", "molecule": "C=C" }, { "id": "r2", "molecule": "[H][H]" } ], "products": [ { "id": "p1", "molecule": "CC" } ], "agents": [ "Ni catalyst" ] } }\n` +
       `Example — a standalone equation:\n` +
       `{ "op": "visualize", "intent": { "type": "equation", "latex": "E = mc^2" } }\n` +
-      `Geometry object kinds: point (at:[x,y], label?, draggable?), line (through:[id,id]), segment (from,to), circle (center, through?|radius?), polygon (vertices:[id,...>=3]), angle (from,at,to), label (text,anchor), text (text,at). ` +
-      `Only use "diagram", "circuit", "chemistry", or "graph_theory" types when the figure is genuinely that domain — never force geometry into another type.\n` +
+      `Geometry object kinds: point (at:[x,y], label?, draggable?), line (through:[id,id], parallelMarkCount?), segment (from,to, tickCount?, parallelMarkCount?, midpointMarker?, label?, labelLatex?), circle (center, through?|radius?), polygon (vertices:[id,...>=3]), angle (from,at,to, marker?:"arc"|"right_angle", arcCount?, label?, labelLatex?, showMeasure?), label (text,anchor), text (text,at), notation (variant-driven annotation object). ` +
+      `Use these notation fields for geometric expressions: set the same segment tickCount on equal sides, set line/segment parallelMarkCount on parallel edges, set midpointMarker:true when a midpoint should be marked, and set angle marker:"right_angle" for a 90° corner. Use labelLatex when a side or angle label should be rendered as TeX. If a polygon side needs congruence/parallel/midpoint notation or a side label, also emit that side as its own segment object. ` +
+      `For Phase-2 standalone annotations, use kind:"notation" with one of these variants: segment (from,to,tickCount?,parallelMarkCount?,midpointMarker?,label?,labelLatex?), angle (from,at,to,marker?,arcCount?,label?,labelLatex?,radius?,showMeasure?), parallel (from,to,markCount?), midpoint (from,to,label?,labelLatex?), perpendicular (at,arm1,arm2,size?,label?,labelLatex?), bisector (from,at,through,to,radius?,label?,labelLatex?). ` +
+      `Function plots may also specify xLabel, yLabel, showLegend, sampling:{samples?,adaptive?}, and annotations. Omit showGrid — the chalkboard background already provides the visual grid. Function annotation kinds: point (x, y?, label?, labelLatex?), root (expressionId, nearX?, label?), extremum (expressionId, nearX?, label?), intersection (expressionIds:[id,id], nearX?, label?), tangent (expressionId, atX, label?), area (expressionId, fromX, toX, label?), asymptote (orientation:"vertical"|"horizontal", value, label?). graph3d is rendered in a dedicated zoomable 3D viewport; use surfaces of kind surface, parametric_surface, parametric_curve, point (at:[x,y,z], label?, color?), point_cloud, or vector_field. ` +
+      `Charts support names, per-series colors, axis labels, explicit ranges, legend/tooltip toggles, annotations, and zoomable local viewports. Use chartType bar/line/scatter/histogram/box/heatmap/contour/pie/donut/radar/polar_line/polar_scatter/sankey/treemap/sunburst/candlestick/ohlc. Prefer series over legacy data. Series kinds: bar|line with values, scatter with points, histogram/box with values, heatmap/contour with points or grid{x,y,values}, pie/donut with slices{name,value,color?}, radar with values plus indicators, polar_* with points, sankey with nodes/links, treemap/sunburst with tree nodes, candlestick/ohlc with candles. Let the learner's requested naming, color, and range choices flow directly into series names/colors and axis min/max when stated. ` +
+      `Graph theory supports node and edge styling plus layouts. Nodes may specify label, color, shape, size, at, group, locked; edges may specify label, weight, color, width, style, directed, curvature; and the network may specify layout and directed/style defaults. ` +
+      `The chalkboard is a notebook, not a chat log: when revising or refining existing content, prefer edit operations over appending duplicates. Every top-level block has a stable anchor in CURRENT BOARD BLOCKS. Prefer targetAnchor, fall back to targetIndex, and use targetMatchText (optionally with targetKind) for selection-based editing when you need to find a block by its visible content. Edit ops: replace_block { "op", targetAnchor?|targetIndex?|targetMatchText?, targetKind?, "block": BoardBlockSpec }, insert_after { same target fields, "block": BoardBlockSpec }, delete_block { same target fields }, update_visualization { same target fields, "intent"?: VisualizationIntent, "statePatch"?: { "pointPositions"?: { id:[x,y] }, "nodePositions"?: { id:[x,y] }, "graph3dCamera"?: { "position":[x,y,z], "target":[x,y,z] }, "chartViewport"?: { "xStart"?: number, "xEnd"?: number, "yStart"?: number, "yEnd"?: number }, "hiddenSeries"?: string[], "seriesStyleOverrides"?: { seriesId: { "color"?: string, "opacity"?: number } }, "scienceLayout"?: string, "equationValue"?: string } }, revise_text { same target fields, "find": string, "replace": string, "replaceAll"?: boolean }. Use revise_text for diff-style changes inside long title/text/callout/latex blocks, and use update_visualization to move geometry points, preserve pathway/network node positions, preserve chart zoom/legend/style state, preserve 3D camera state, revise graphs, or replace a prior visualization while keeping its place on the board. BoardBlockSpec kinds are title/text/bullets/latex/visualization/callout. ` +
+      `Use physics for force/vector/ray scenes (including mechanics decorations like ground, incline, spring, pivot, and axes), biology for cell/DNA/pathway scenes (pathways may specify layout and style), circuit for circuit diagrams, and chemistry for atoms/bonds/reaction scenes. For chemistry structures, prefer chemistry over geometry; prefer reactants/products/agents or a molecule representation, and do not add angle or bond-type prose labels unless explicitly requested. Only use "diagram" or "graph_theory" when the figure is genuinely that domain — never force geometry into another type.\n` +
       `Emit at most ${MAX_BOARD_OPS_PER_TURN} board operations.`
   );
 
   return parts.join("\n\n");
+}
+
+function summarizeBoardBlocks(board: BoardDoc): string {
+  if (board.blocks.length === 0) return `- (board is empty)`;
+  return board.blocks
+    .map((block, index) => {
+      const prefix = `- [${index}] anchor=${block.id}`;
+      switch (block.kind) {
+        case "title":
+          return `${prefix} kind=title: ${excerpt(block.text)}`;
+        case "text":
+          return `${prefix} kind=text: ${excerpt(block.text)}`;
+        case "bullets":
+          return `${prefix} kind=bullets: ${block.items.length} item(s)`;
+        case "latex":
+          return `${prefix} kind=latex: ${excerpt(block.caption ?? block.tex)}`;
+        case "visualization": {
+          const label = "title" in block.intent && block.intent.title
+            ? block.intent.title
+            : block.intent.type;
+          return `${prefix} kind=visualization (${block.intent.type}): ${excerpt(label)}`;
+        }
+        case "callout":
+          return `${prefix} kind=callout: ${excerpt(block.text)}`;
+        case "row":
+          return `${prefix} kind=row: ${block.children.length} child block(s)`;
+      }
+    })
+    .join("\n");
+}
+
+function excerpt(text: string): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length > 80 ? `${clean.slice(0, 80)}…` : clean;
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -527,6 +906,7 @@ export interface TutorTurnRequest {
   sessionId: string;
   sessionTitle: string;
   domain: Domain;
+  board?: BoardDoc;
   boundNodes?: string[];
   assistancePolicy?: string;
   /** Pre-session onboarding answers. Composed into a consistent system reminder
@@ -599,6 +979,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
       learnerSummary,
       cards,
       history,
+      board: req.board,
       learnerMessage: req.learnerMessage,
       attachmentsNote: req.attachments?.length
         ? `\n\nAttached: ${req.attachments.map((a) => a.name).join(", ")}`

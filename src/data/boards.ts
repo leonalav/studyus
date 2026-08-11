@@ -106,6 +106,10 @@ function visualizationLabel(intent: VisualizationIntent): string {
       return "Equation";
     case "diagram":
       return intent.variant;
+    case "physics":
+      return intent.title ?? "Physics Diagram";
+    case "biology":
+      return intent.title ?? "Biology Diagram";
     case "circuit":
       return intent.title ?? "Circuit";
     case "chemistry":
@@ -123,8 +127,13 @@ function visualizationCaption(intent: VisualizationIntent): string {
       return intent.caption ?? intent.latex;
     case "diagram":
       return intent.caption ?? "";
+    case "physics":
+    case "biology":
+      return intent.caption ?? "";
+    case "circuit":
+      return intent.caption ?? "";
     case "chemistry":
-      return intent.molecule ?? intent.reaction ?? "";
+      return intent.caption ?? intent.molecule ?? intent.reaction ?? "";
     default:
       return "";
   }

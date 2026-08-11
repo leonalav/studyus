@@ -33,6 +33,18 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(prompt).not.toMatch(/plot_2d|plot_3d|draw_diagram/);
   });
 
+  it("documents notebook-style edit operations with anchors and diff-style revision", () => {
+    expect(prompt).toMatch(/targetAnchor/);
+    expect(prompt).toMatch(/targetMatchText/);
+    expect(prompt).toMatch(/revise_text/);
+    expect(prompt).toMatch(/stable anchor/i);
+  });
+
+  it("tells the tutor to draw on explicit visualization requests instead of asking questions", () => {
+    expect(prompt).toMatch(/comply first with a best-effort board rendering/i);
+    expect(prompt).toMatch(/confirm what you drew instead of asking a question/i);
+  });
+
   it("states the intent discriminant is `type`, not `kind`", () => {
     expect(prompt).toMatch(/discriminated union on "type"/);
     // The stale wording must be gone.
