@@ -46,7 +46,7 @@ import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
 
-export const TUTOR_PROMPT_VERSION = "tutor_v2";
+export const TUTOR_PROMPT_VERSION = "tutor_v3";
 export const TUTOR_SCHEMA_VERSION = "tutor_turn_v2";
 export const ONBOARDING_PROMPT_VERSION = "tutor_onboarding_v1";
 export const ONBOARDING_SCHEMA_VERSION = "onboarding_questions_v1";
@@ -596,6 +596,172 @@ function asStringList(value: unknown, path: string, errors: string[]): string[] 
   return out;
 }
 
+/** Extract one JSON string field even when the surrounding object was cut off
+ * or otherwise malformed. This preserves a tutor's completed speech when a
+ * later, complex visualization operation caused output truncation. */
+function extractRawStringField(raw: string, field: string): string | null {
+  const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`"${escapedField}"\\s*:\\s*"`, "i").exec(raw);
+  if (!match) return null;
+  const start = (match.index ?? 0) + match[0].length;
+  let escaped = false;
+  for (let index = start; index < raw.length; index++) {
+    const char = raw[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      const body = raw.slice(start, index);
+      try {
+        return JSON.parse(`"${body}"`);
+      } catch {
+        // Invalid LaTeX escapes (for example \theta instead of \\theta) are a
+        // common reason otherwise useful model JSON fails. Decode only the
+        // universally safe escapes and retain the rest as readable prose.
+        return body
+          .replace(/\\n/g, "\n")
+          .replace(/\\r/g, "\r")
+          .replace(/\\t/g, "\t")
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, "\\")
+          .trim();
+      }
+    }
+  }
+  return null;
+}
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function unwrapTutorPayload(payload: unknown): Record<string, unknown> | null {
+  const root = recordOrNull(payload);
+  if (!root) return null;
+  if (typeof root.speech === "string" || root.board_ops !== undefined || root.boardOps !== undefined) return root;
+  for (const key of ["response", "tutor_turn", "result", "data"] as const) {
+    const nested = recordOrNull(root[key]);
+    if (nested) return nested;
+  }
+  return root;
+}
+
+/**
+ * Last-resort recovery for an interactive tutor turn after bounded model repair
+ * attempts have failed. The learner-facing prose is preserved, but every board
+ * operation is independently passed through the same strict validator used by
+ * normal turns. Invalid operations and fabricated evidence handles are dropped;
+ * they are never rendered or persisted as authority.
+ *
+ * Unlike assessment generation/evaluation, a tutor conversation can safely
+ * degrade to speech plus the valid subset of board edits. Returning a complete
+ * TutorTurn here ensures a model formatting mistake never becomes the technical
+ * `tutor_turn_v2 after 3 attempts` message in the learner's chat.
+ */
+export function recoverTutorPayload(
+  payload: unknown,
+  raw: string,
+  allowedEvidence: ReadonlySet<string>,
+  learnerMessage = "",
+  maxBoardOps: number = MAX_BOARD_OPS_PER_TURN
+): TutorTurn {
+  const root = unwrapTutorPayload(payload);
+
+  let speech = typeof root?.speech === "string" ? root.speech.trim() : "";
+  if (!speech && root) {
+    for (const key of ["message", "content", "reply"] as const) {
+      if (typeof root[key] === "string" && root[key].trim()) {
+        speech = root[key].trim();
+        break;
+      }
+    }
+  }
+  if (!speech) {
+    speech = extractRawStringField(raw, "speech")
+      ?? extractRawStringField(raw, "message")
+      ?? extractRawStringField(raw, "reply")
+      ?? "";
+  }
+
+  // Providers without JSON-mode support occasionally return useful plain prose.
+  // Keep it when it is clearly not a serialized object; never show raw malformed
+  // JSON to the learner.
+  if (!speech) {
+    const plain = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+    const looksSerialized = /^[{[]/.test(plain)
+      || /"(?:speech|board_ops|boardOps|evidence_refs|evidenceRefs)"\s*:/.test(plain);
+    if (plain && !looksSerialized) speech = plain;
+  }
+
+  const boardOps: BoardOp[] = [];
+  const rawOps = root?.board_ops ?? root?.boardOps ?? root?.operations;
+  if (Array.isArray(rawOps)) {
+    for (const entry of rawOps.slice(0, maxBoardOps)) {
+      const entryRecord = recordOrNull(entry);
+      let candidate: unknown = entry;
+      // Also accept the conventional tool-call shape `{name, args}` but still
+      // run the reconstructed operation through strict validation.
+      if (entryRecord && typeof entryRecord.name === "string" && recordOrNull(entryRecord.args)) {
+        candidate = { ...(entryRecord.args as Record<string, unknown>), op: entryRecord.name };
+      }
+      const errors: string[] = [];
+      const operation = validateBoardOp(candidate, `board_ops[${boardOps.length}]`, errors);
+      if (operation && errors.length === 0) boardOps.push(operation);
+    }
+  }
+
+  const evidenceRefs: string[] = [];
+  const rawEvidence = root?.evidence_refs ?? root?.evidenceRefs;
+  if (Array.isArray(rawEvidence)) {
+    for (const ref of rawEvidence) {
+      if (typeof ref === "string" && allowedEvidence.has(ref) && !evidenceRefs.includes(ref)) {
+        evidenceRefs.push(ref);
+      }
+    }
+  }
+
+  let requestedLevel: number | undefined;
+  const rawLevel = root?.requested_level ?? root?.requestedLevel;
+  const numericLevel = typeof rawLevel === "string" ? Number(rawLevel) : rawLevel;
+  if (typeof numericLevel === "number" && Number.isInteger(numericLevel) && numericLevel >= 0 && numericLevel <= MAX_HINT_LEVEL) {
+    requestedLevel = numericLevel;
+  }
+
+  // Keep only a diagnosis that independently satisfies the complete diagnosis
+  // shape. Optional malformed metadata must not discard an otherwise useful turn.
+  let diagnosis: TutorDiagnosis | undefined;
+  if (root?.diagnosis !== undefined) {
+    const checked = validateTutorPayload({
+      speech: speech || "Recovered tutor response",
+      board_ops: [],
+      evidence_refs: [],
+      diagnosis: root.diagnosis,
+    }, new Set());
+    if (checked.ok) diagnosis = checked.value.diagnosis;
+  }
+
+  // Bound recovered prose so a malformed provider response cannot flood the UI
+  // or persisted session transcript. Sanitize before the final emptiness check
+  // so a control-character-only response still gets a useful continuation.
+  speech = speech.replace(/\u0000/g, "").trim().slice(0, 8000);
+  if (!speech) {
+    speech = boardOps.length > 0
+      ? "I've made the safe parts of that update on the board."
+      : learnerMessage.trim()
+        ? "Let's continue with that question. Please resend it in one short sentence so I can answer it cleanly."
+        : "What would you like to work through next?";
+  }
+
+  return { speech, boardOps, diagnosis, evidenceRefs, requestedLevel };
+}
+
 /* ─────────────────────────────────────────────────────────────
    SESSION PERSISTENCE
    ───────────────────────────────────────────────────────────── */
@@ -792,7 +958,13 @@ export function buildTutorUserPrompt(params: {
 
   parts.push(`LEARNER MESSAGE:\n"""\n${params.learnerMessage}${params.attachmentsNote}\n"""`);
 
-  parts.push(`GLOBAL BEHAVIOR: If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question.`);
+  parts.push(
+    `GLOBAL BEHAVIOR: If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
+    `Always include speech, board_ops, and evidence_refs. Use an empty array when there are no board operations. ` +
+    (params.cards.length === 0
+      ? `No evidence handles were supplied, so evidence_refs MUST be exactly [].`
+      : `Every evidence_refs entry MUST be one of: ${params.cards.map((card) => card.handle).join(", ")}.`)
+  );
 
   parts.push(
     `Return JSON only, in this exact shape:\n` +
@@ -921,9 +1093,11 @@ export interface TutorTurnRequest {
 }
 
 /**
- * One tutor turn. Throws `AgentRuntimeError` when the tutor role is unbound or
- * the model cannot produce valid output — the caller surfaces that to the
- * learner rather than substituting a canned reply.
+ * One tutor turn. Endpoint, authentication, cancellation, and transport errors
+ * still propagate to the caller. Schema-invalid model output is repaired when
+ * possible and otherwise deterministically reduced to safe speech plus the
+ * independently valid board operations, so formatting failures do not become
+ * learner-facing runtime errors.
  */
 export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCallResult<TutorTurn>> {
   await ensureChalkboardSession({
@@ -988,8 +1162,25 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     promptVersion: TUTOR_PROMPT_VERSION,
     schemaVersion: TUTOR_SCHEMA_VERSION,
     temperature: 0.4,
+    // Many OpenAI-compatible endpoints otherwise default to only 1K output
+    // tokens, which can truncate a valid complex visualization mid-JSON.
+    maxTokens: 4096,
     signal: req.signal,
     validate: (payload) => validateTutorPayload(payload, allowedEvidence),
+    recover: ({ payload, raw }) => {
+      try {
+        return recoverTutorPayload(payload, raw, allowedEvidence, req.learnerMessage);
+      } catch {
+        // This path is intentionally independent of model output. Even an
+        // unexpectedly pathological payload must not leak a schema-version
+        // runtime error into the learner's conversation.
+        return {
+          speech: "Let's continue with that question. Please resend it in one short sentence so I can answer it cleanly.",
+          boardOps: [],
+          evidenceRefs: [],
+        };
+      }
+    },
   });
 
   await appendSessionMessage({

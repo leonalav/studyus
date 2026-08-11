@@ -45,6 +45,14 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(prompt).toMatch(/confirm what you drew instead of asking a question/i);
   });
 
+  it("requires all structural fields and constrains evidence handles", () => {
+    expect(prompt).toMatch(/Always include speech, board_ops, and evidence_refs/);
+    expect(prompt).toMatch(/Every evidence_refs entry MUST be one of: E1/);
+
+    const noEvidencePrompt = buildTutorUserPrompt({ ...baseParams, cards: [] });
+    expect(noEvidencePrompt).toMatch(/evidence_refs MUST be exactly \[\]/);
+  });
+
   it("states the intent discriminant is `type`, not `kind`", () => {
     expect(prompt).toMatch(/discriminated union on "type"/);
     // The stale wording must be gone.

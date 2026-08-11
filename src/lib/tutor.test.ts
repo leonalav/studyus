@@ -3,6 +3,7 @@ import { getDb } from "../db/database";
 import { simpleHash } from "./curriculum";
 import {
   validateTutorPayload,
+  recoverTutorPayload,
   buildTutorEvidenceCards,
   ensureChalkboardSession,
   setSessionHintLevel,
@@ -143,6 +144,65 @@ describe("Tutor turn schema validation", () => {
       expect(res.value.diagnosis?.hintDependence).toBe("high");
       expect(res.value.diagnosis?.misconceptions).toHaveLength(1);
     }
+  });
+});
+
+describe("Tutor turn deterministic recovery", () => {
+  it("preserves speech and only independently valid operations and evidence", () => {
+    const recovered = recoverTutorPayload({
+      speech: "Let's compare the two forces on the board.",
+      board_ops: [
+        { op: "write_text", text: "Weight points downward." },
+        { op: "explode_board", text: "unsafe" },
+        { op: "visualize", intent: { type: "chart", chartType: "bar", series: "not-an-array" } },
+      ],
+      evidence_refs: ["E1", "invented", "E1"],
+      diagnosis: { hint_dependence: "sometimes" },
+      requested_level: 99,
+    }, "", EVIDENCE);
+
+    expect(recovered.speech).toContain("compare the two forces");
+    expect(recovered.boardOps).toEqual([{ op: "write_text", text: "Weight points downward." }]);
+    expect(recovered.evidenceRefs).toEqual(["E1"]);
+    expect(recovered.diagnosis).toBeUndefined();
+    expect(recovered.requestedLevel).toBeUndefined();
+  });
+
+  it("accepts common camelCase and tool-call wrappers but still validates them", () => {
+    const recovered = recoverTutorPayload({
+      speech: "I added the key relationship.",
+      boardOps: [
+        { name: "write_latex", args: { tex: "F = ma" } },
+        { name: "unknown_tool", args: { text: "not rendered" } },
+      ],
+      evidenceRefs: ["E2"],
+      requestedLevel: "2",
+    }, "", EVIDENCE);
+
+    expect(recovered.boardOps).toEqual([{ op: "write_latex", tex: "F = ma", caption: undefined }]);
+    expect(recovered.evidenceRefs).toEqual(["E2"]);
+    expect(recovered.requestedLevel).toBe(2);
+  });
+
+  it("extracts completed speech from JSON truncated during a later board operation", () => {
+    const raw = `{"speech":"Keep the explanation, even if the diagram was truncated.","board_ops":[{"op":"visualize","intent":{"type":"geometry","objects":[`;
+    const recovered = recoverTutorPayload(undefined, raw, new Set(), "Draw the diagram");
+
+    expect(recovered.speech).toBe("Keep the explanation, even if the diagram was truncated.");
+    expect(recovered.boardOps).toEqual([]);
+    expect(recovered.evidenceRefs).toEqual([]);
+  });
+
+  it("uses plain provider prose and never returns the technical schema error", () => {
+    const recovered = recoverTutorPayload(undefined, "Start by isolating x on the left-hand side.", new Set(), "Help me solve this");
+    expect(recovered.speech).toBe("Start by isolating x on the left-hand side.");
+    expect(recovered.speech).not.toMatch(/tutor_turn_v2|after 3 attempts|schema/i);
+  });
+
+  it("returns a learner-safe continuation even when no prose can be extracted", () => {
+    const recovered = recoverTutorPayload(undefined, "{\"board_ops\":[", new Set(), "Help with vectors");
+    expect(recovered.speech).toContain("Please resend");
+    expect(recovered.speech).not.toMatch(/tutor_turn_v2|after 3 attempts|schema/i);
   });
 });
 

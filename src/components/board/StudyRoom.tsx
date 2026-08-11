@@ -265,12 +265,24 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         setAgentStatus("idle");
       } catch (e: any) {
         setAgentStatus("error");
-        const message = e?.message ?? "Tutor unavailable";
-        notify(`Tutor: ${message}`);
-        setMessages((m) => [
-          ...m,
-          { id: ++msgId.current, role: "system", text: `tutor error: ${message}` },
-        ]);
+        if (e?.failureClass === "schema_invalid") {
+          // askTutorTurn has its own deterministic schema recovery. Keep this
+          // UI boundary as defense in depth so a future schema change can never
+          // leak an internal version/attempt error into the learner's chat.
+          const retryMessage = "Let's try that once more—please resend the request in one short sentence, and I'll answer it cleanly.";
+          notify("Tutor is ready to retry");
+          setMessages((m) => [
+            ...m,
+            { id: ++msgId.current, role: "tutor", text: retryMessage },
+          ]);
+        } else {
+          const message = e?.message ?? "Tutor unavailable";
+          notify(`Tutor: ${message}`);
+          setMessages((m) => [
+            ...m,
+            { id: ++msgId.current, role: "system", text: `tutor error: ${message}` },
+          ]);
+        }
         setAgentStatus("idle");
       } finally {
         setTyping(false);
