@@ -4,9 +4,12 @@ import type {
   VisualizationIntent,
   GeometryIntent,
   FunctionIntent,
+  Graph3DIntent,
   EquationIntent,
   ChartIntent,
   DiagramIntent,
+  PhysicsIntent,
+  BiologyIntent,
   CircuitIntent,
   ChemistryIntent,
   GraphTheoryIntent,
@@ -29,6 +32,11 @@ const fn: FunctionIntent = {
   expressions: [{ id: "f", expression: "x^2 - 2*x + 1", label: "f(x)" }],
 };
 
+const graph3d: Graph3DIntent = {
+  type: "graph3d",
+  surfaces: [{ kind: "surface", id: "s1", z: "sin(x) * cos(y)" }],
+};
+
 const equation: EquationIntent = { type: "equation", latex: "E = mc^2" };
 
 const chart: ChartIntent = {
@@ -39,9 +47,36 @@ const chart: ChartIntent = {
 
 const diagram: DiagramIntent = { type: "diagram", variant: "orbit" };
 
-const circuit: CircuitIntent = { type: "circuit", components: [] };
+const physics: PhysicsIntent = {
+  type: "physics",
+  variant: "free_body",
+  bodies: [{ id: "box", at: [0, 0], label: "m" }],
+  vectors: [{ id: "w", from: "box", dx: 0, dy: -2, label: "mg" }],
+};
 
-const chemistry: ChemistryIntent = { type: "chemistry", molecule: "H2O" };
+const biology: BiologyIntent = {
+  type: "biology",
+  variant: "cell",
+  structures: [{ id: "n", label: "Nucleus", at: [0, 0], kind: "nucleus" }],
+};
+
+const circuit: CircuitIntent = {
+  type: "circuit",
+  nodes: [{ id: "n1", at: [0, 0] }, { id: "n2", at: [4, 0] }],
+  wires: [{ id: "w1", from: "n1", to: "n2" }],
+  components: [{ kind: "battery", id: "b1", between: ["n1", "n2"] }],
+};
+
+const chemistry: ChemistryIntent = {
+  type: "chemistry",
+  atoms: [
+    { id: "O", element: "O", at: [0, 0] },
+    { id: "H1", element: "H", at: [-1, -1] },
+    { id: "H2", element: "H", at: [1, -1] },
+  ],
+  bonds: [{ from: "O", to: "H1" }, { from: "O", to: "H2" }],
+  molecule: "H2O",
+};
 
 const graph: GraphTheoryIntent = {
   type: "graph_theory",
@@ -68,12 +103,10 @@ describe("routeVisualization — adapter selection", () => {
     expect(m.unsupported).toBeUndefined();
   });
 
-  it("declines a chart intent honestly rather than rendering placeholder art", () => {
+  it("routes chart intents to the generic chart adapter", () => {
     const m = routeVisualization(chart);
-    expect(m.adapterId).toBe(AdapterId.Unsupported);
-    expect(m.unsupported).toBe(true);
-    expect(typeof m.unsupportedReason).toBe("string");
-    expect(m.unsupportedReason).toMatch(/not available/i);
+    expect(m.adapterId).toBe(AdapterId.ChartECharts);
+    expect(m.unsupported).toBeUndefined();
   });
 
   it("declines the bare diagram type — presets are removed, never fabricated", () => {
@@ -83,12 +116,23 @@ describe("routeVisualization — adapter selection", () => {
     expect(m.unsupportedReason).toMatch(/geometry|function|equation/i);
   });
 
-  it("declines circuit, chemistry, and graph_theory honestly", () => {
-    for (const intent of [circuit, chemistry, graph] as VisualizationIntent[]) {
-      const m = routeVisualization(intent);
-      expect(m.adapterId).toBe(AdapterId.Unsupported);
-      expect(m.unsupported).toBe(true);
-    }
+  it("routes graph3d to the three.js/r3f adapter", () => {
+    const m = routeVisualization(graph3d);
+    expect(m.adapterId).toBe(AdapterId.Graph3DR3F);
+    expect(m.unsupported).toBeUndefined();
+  });
+
+  it("routes physics, biology, circuit, and chemistry to domain adapters", () => {
+    expect(routeVisualization(physics).adapterId).toBe(AdapterId.PhysicsSvg);
+    expect(routeVisualization(biology).adapterId).toBe(AdapterId.BiologySvg);
+    expect(routeVisualization(circuit).adapterId).toBe(AdapterId.PhysicsSvg);
+    expect(routeVisualization(chemistry).adapterId).toBe(AdapterId.ChemistryRDKit);
+  });
+
+  it("routes graph_theory to the network adapter", () => {
+    const m = routeVisualization(graph);
+    expect(m.adapterId).toBe(AdapterId.GraphTheoryCytoscape);
+    expect(m.unsupported).toBeUndefined();
   });
 });
 
@@ -109,5 +153,21 @@ describe("routeVisualization — malformed intents surface honestly", () => {
     const m = routeVisualization({ type: "equation", latex: "   " });
     expect(m.adapterId).toBe(AdapterId.Unsupported);
     expect(m.unsupported).toBe(true);
+  });
+
+  it("declines a 3D graph intent with zero objects", () => {
+    const m = routeVisualization({ type: "graph3d", surfaces: [] });
+    expect(m.adapterId).toBe(AdapterId.Unsupported);
+    expect(m.unsupported).toBe(true);
+  });
+
+  it("declines a chart with no series and a graph with no nodes", () => {
+    const chart = routeVisualization({ type: "chart", chartType: "bar", series: [] });
+    expect(chart.adapterId).toBe(AdapterId.Unsupported);
+    expect(chart.unsupported).toBe(true);
+
+    const graph = routeVisualization({ type: "graph_theory", nodes: [], edges: [] });
+    expect(graph.adapterId).toBe(AdapterId.Unsupported);
+    expect(graph.unsupported).toBe(true);
   });
 });
