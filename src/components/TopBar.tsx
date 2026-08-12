@@ -1,10 +1,15 @@
-import { PanelLeft, ChevronLeft, ChevronRight, Plus, Minus, Square, X } from "lucide-react";
+import type { MouseEvent as ReactMouseEvent } from "react";
+import { PanelLeft, ChevronLeft, ChevronRight, Plus, Minus, Square, X, Pin } from "lucide-react";
 import { isTauriRuntime } from "../lib/tauri";
 
 export interface Tab {
   id: string;
   title: string;
   kind: "board" | "curriculum" | "test" | "note";
+  /** Pinned tabs are kept at the start of the strip and restored on restart. */
+  pinned?: boolean;
+  /** Stable content identity used when a tab is duplicated under a new tab id. */
+  contentId?: string;
 }
 
 interface Props {
@@ -13,6 +18,7 @@ interface Props {
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
   onNewTab: () => void;
+  onTabContextMenu: (event: ReactMouseEvent, tab: Tab) => void;
   onToggleSidebar: () => void;
   onNotify: (text: string) => void;
 }
@@ -46,6 +52,7 @@ export function TopBar({
   onSelectTab,
   onCloseTab,
   onNewTab,
+  onTabContextMenu,
   onToggleSidebar,
   onNotify,
 }: Props) {
@@ -82,6 +89,7 @@ export function TopBar({
               <div
                 key={tab.id}
                 onClick={() => onSelectTab(tab.id)}
+                onContextMenu={(event) => onTabContextMenu(event, tab)}
                 /* Tabs are <div>s, which Tauri's drag script does NOT treat as
                    clickable (only A/BUTTON/INPUT/SELECT/TEXTAREA/LABEL/SUMMARY,
                    contenteditable, tabindex or an interactive role are). Without
@@ -95,11 +103,15 @@ export function TopBar({
                 }`}
                 title={tab.title}
               >
-                <span className={`h-2 w-2 shrink-0 rounded-full ${dotColor}`} />
+                {tab.pinned ? (
+                  <Pin size={11} className="shrink-0 text-accent" aria-label="Pinned tab" />
+                ) : (
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${dotColor}`} />
+                )}
                 <span className="min-w-0 flex-1 truncate text-ellipsis">
                   {tab.title}
                 </span>
-                {tabs.length > 1 && (
+                {tabs.length > 1 && !tab.pinned && (
                   <button
                     className="ml-auto grid h-4 w-4 shrink-0 place-items-center rounded text-dim opacity-0 transition-opacity group-hover:opacity-100 hover:bg-white/[0.12] hover:text-fg"
                     onClick={(e) => {

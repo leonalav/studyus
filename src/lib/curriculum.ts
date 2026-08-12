@@ -141,6 +141,54 @@ async function persistOriginalPdf(sourceId: string, file: File): Promise<void> {
   });
 }
 
+async function deletePersistedOriginalPdf(sourceId: string): Promise<void> {
+  inMemoryOriginalPdfs.delete(sourceId);
+  if (typeof indexedDB === "undefined") return;
+  await new Promise<void>((resolve) => {
+    const request = indexedDB.open(ORIGINAL_PDF_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(ORIGINAL_PDF_STORE)) db.createObjectStore(ORIGINAL_PDF_STORE);
+    };
+    request.onerror = () => resolve();
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction(ORIGINAL_PDF_STORE, "readwrite");
+      transaction.objectStore(ORIGINAL_PDF_STORE).delete(sourceId);
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onerror = () => {
+        db.close();
+        resolve();
+      };
+    };
+  });
+}
+
+/** Rename a curriculum source without changing its stable node/source identity. */
+export async function renameCurriculumSource(sourceId: string, name: string): Promise<void> {
+  const clean = name.trim().slice(0, 240);
+  if (!clean) throw new Error("Curriculum name cannot be empty");
+  const db = await getDb();
+  db.run("UPDATE curriculum_sources SET name = ? WHERE id = ?;", [clean, sourceId]);
+  saveDbSync();
+}
+
+/** Remove a curriculum and all of its node evidence from durable storage. */
+export async function deleteCurriculumSource(sourceId: string): Promise<void> {
+  const db = await getDb();
+  // Delete explicitly as well as relying on foreign-key cascades: sql.js builds
+  // can differ in their PRAGMA defaults, and no orphaned evidence should remain.
+  db.run(`DELETE FROM curriculum_assets WHERE node_id IN (SELECT id FROM curriculum_nodes WHERE source_id = ?);`, [sourceId]);
+  db.run(`DELETE FROM curriculum_chunks WHERE node_id IN (SELECT id FROM curriculum_nodes WHERE source_id = ?);`, [sourceId]);
+  db.run("DELETE FROM curriculum_nodes WHERE source_id = ?;", [sourceId]);
+  db.run("DELETE FROM curriculum_sources WHERE id = ?;", [sourceId]);
+  saveDbSync();
+  await deletePersistedOriginalPdf(sourceId);
+}
+
 /** Return the exact imported PDF bytes when they are available in this client. */
 export async function getOriginalCurriculumPdf(sourceId: string): Promise<Blob | null> {
   const cached = inMemoryOriginalPdfs.get(sourceId);

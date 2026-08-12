@@ -62,7 +62,7 @@ import {
   type TutorToolPermissions,
 } from "./preferences";
 
-export const TUTOR_PROMPT_VERSION = "tutor_v5";
+export const TUTOR_PROMPT_VERSION = "tutor_v6";
 export const TUTOR_SCHEMA_VERSION = "tutor_turn_v3";
 export const ONBOARDING_PROMPT_VERSION = "tutor_onboarding_v1";
 export const ONBOARDING_SCHEMA_VERSION = "onboarding_questions_v1";
@@ -152,6 +152,19 @@ export interface TutorEvidenceCard {
   excerpt?: string;
 }
 
+export interface TutorCurriculumScopeItem {
+  nodeId: string;
+  section: string;
+  startPage: number;
+  endPage: number;
+  evidencePages: number[];
+}
+
+export interface TutorGrounding {
+  scope: TutorCurriculumScopeItem[];
+  cards: TutorEvidenceCard[];
+}
+
 /// Cap on how much of each chunk's text is inlined into the tutor prompt, so a
 /// long section cannot blow the context budget. Chunks are still stored whole.
 const EVIDENCE_EXCERPT_CHARS = 600;
@@ -166,39 +179,79 @@ const EVIDENCE_EXCERPT_CHARS = 600;
  * Async because it reads from SQLite; callers must `await` it before assembling
  * the prompt.
  */
-export async function buildTutorEvidenceCards(boundNodes: string[]): Promise<TutorEvidenceCard[]> {
-  if (!boundNodes || boundNodes.length === 0) return [];
+export async function buildTutorGrounding(boundNodes: string[]): Promise<TutorGrounding> {
+  if (!boundNodes || boundNodes.length === 0) return { scope: [], cards: [] };
   const { nodes, chunks } = await getEvidenceForSelectedNodes(boundNodes);
-  if (chunks.length === 0) return [];
-
-  const nodeById = new Map(nodes.map((n) => [n.id, n]));
-  const sectionLabel = (nodeId: string): string => {
-    const n = nodeById.get(nodeId);
-    if (!n) return "Curriculum excerpt";
-    return n.sectionNumber ? `${n.sectionNumber} ${n.title}` : n.title;
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const boundRank = new Map(boundNodes.map((id, index) => [id, index]));
+  const rankForNode = (nodeId: string): number => {
+    let current = nodeById.get(nodeId);
+    const visited = new Set<string>();
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      const rank = boundRank.get(current.id);
+      if (rank !== undefined) return rank;
+      current = current.parentNodeId ? nodeById.get(current.parentNodeId) : undefined;
+    }
+    return boundNodes.length;
   };
+  const orderedNodes = [...nodes].sort((a, b) =>
+    rankForNode(a.id) - rankForNode(b.id) ||
+    a.startPage - b.startPage ||
+    a.depth - b.depth ||
+    a.ordinal - b.ordinal
+  );
+  const sectionLabel = (nodeId: string): string => {
+    const node = nodeById.get(nodeId);
+    if (!node) return "Curriculum excerpt";
+    const titleAlreadyNumbered = node.sectionNumber && node.title.startsWith(node.sectionNumber);
+    return node.sectionNumber && !titleAlreadyNumbered
+      ? `${node.sectionNumber} ${node.title}`
+      : node.title;
+  };
+
+  const evidencePagesByNode = new Map<string, Set<number>>();
+  for (const chunk of chunks) {
+    const pages = evidencePagesByNode.get(chunk.nodeId) ?? new Set<number>();
+    pages.add(chunk.page);
+    evidencePagesByNode.set(chunk.nodeId, pages);
+  }
+  const scope: TutorCurriculumScopeItem[] = orderedNodes.map((node) => ({
+    nodeId: node.id,
+    section: sectionLabel(node.id),
+    startPage: node.startPage,
+    endPage: node.endPage,
+    evidencePages: [...(evidencePagesByNode.get(node.id) ?? [])].sort((a, b) => a - b),
+  }));
 
   const cards: TutorEvidenceCard[] = [];
   // Respect the Tutor Studio's configured source/node priority first, then use
   // page order within each selected section. Handles therefore remain stable
   // and the user's priority setting has concrete retrieval behavior.
-  const nodeRank = new Map(boundNodes.map((id, index) => [id, index]));
   const ordered = [...chunks].sort((a, b) =>
-    (nodeRank.get(a.nodeId) ?? boundNodes.length) - (nodeRank.get(b.nodeId) ?? boundNodes.length) ||
+    rankForNode(a.nodeId) - rankForNode(b.nodeId) ||
     a.page - b.page ||
     a.chunkOrdinal - b.chunkOrdinal
   );
-  for (const ch of ordered.slice(0, 24)) {
-    const excerpt = ch.textContent.length > EVIDENCE_EXCERPT_CHARS
-      ? ch.textContent.slice(0, EVIDENCE_EXCERPT_CHARS) + "…"
-      : ch.textContent;
+  for (const chunk of ordered.slice(0, 24)) {
+    const node = nodeById.get(chunk.nodeId);
+    const excerpt = chunk.textContent.length > EVIDENCE_EXCERPT_CHARS
+      ? chunk.textContent.slice(0, EVIDENCE_EXCERPT_CHARS) + "…"
+      : chunk.textContent;
+    const range = node
+      ? node.startPage === node.endPage ? `p.${node.startPage}` : `pp.${node.startPage}–${node.endPage}`
+      : "page range unavailable";
     cards.push({
       handle: `E${cards.length + 1}`,
-      section: `${sectionLabel(ch.nodeId)} · p.${ch.page}`,
+      section: `${sectionLabel(chunk.nodeId)} · selected ${range} · evidence p.${chunk.page}`,
       excerpt,
     });
   }
-  return cards;
+  return { scope, cards };
+}
+
+export async function buildTutorEvidenceCards(boundNodes: string[]): Promise<TutorEvidenceCard[]> {
+  return (await buildTutorGrounding(boundNodes)).cards;
 }
 
 const MAX_STUDIO_KNOWLEDGE_NODES = 16;
@@ -269,9 +322,12 @@ export async function resolveTutorKnowledgeNodes(
     selected.push(...(result[0]?.values ?? []).map((row) => String(row[0])));
   }
 
+  // The section picked for this live study session has first claim on the
+  // bounded prompt budget. Durable Studio selections remain additional context;
+  // selected-only intentionally preserves the user's stricter global boundary.
   const merged = policy.accessMode === "selected-only"
     ? selected
-    : [...selected, ...sessionNodes];
+    : [...sessionNodes, ...selected];
   return [...new Set(merged)].slice(0, MAX_STUDIO_KNOWLEDGE_NODES);
 }
 
@@ -324,6 +380,30 @@ function visualizationUpdateAllowed(
     "equationRendering", "physics", "biology", "circuits", "chemistry", "graphTheory",
   ];
   return visualizationTools.every((id) => tools[id]);
+}
+
+export function isNonInstructionalTutorMessage(message: string): boolean {
+  const normalized = message
+    .toLowerCase()
+    .replace(/[.!?,;:…]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return true;
+  return [
+    /^(?:hi+|hello|hey)(?: there| tutor| studyus)?$/,
+    /^(?:good morning|good afternoon|good evening)(?: tutor| studyus)?$/,
+    /^(?:thanks|thank you|thank you so much|many thanks)$/,
+    /^(?:ok|okay|got it|understood|sounds good|alright)$/,
+    /^(?:bye|goodbye|see you|see you later)$/,
+    /^(?:how are you|how's it going|how is it going|what's up|nice to meet you)$/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+/** Hard safety net for turns where any board mutation is categorically noise. */
+export function enforceTutorBoardNecessity(turn: TutorTurn, learnerMessage: string): TutorTurn {
+  return isNonInstructionalTutorMessage(learnerMessage)
+    ? { ...turn, boardOps: [] }
+    : turn;
 }
 
 export function enforceTutorToolPolicy(
@@ -1396,6 +1476,7 @@ export function buildTutorUserPrompt(params: {
   hintLevel: number;
   awaitingFirstAttempt: boolean;
   learnerSummary: string;
+  curriculumScope?: TutorCurriculumScopeItem[];
   cards: TutorEvidenceCard[];
   history: SessionMessage[];
   board?: BoardDoc;
@@ -1421,6 +1502,32 @@ export function buildTutorUserPrompt(params: {
 
   parts.push(`LEARNER MODEL SUMMARY:\n${params.learnerSummary}`);
 
+  const curriculumScope = params.curriculumScope ?? [];
+  if (curriculumScope.length > 0) {
+    parts.push(
+      `SELECTED CURRICULUM SCOPE — this sequence and these page ranges are binding for the core lesson:\n` +
+      curriculumScope.map((item, index) => {
+        const range = item.startPage === item.endPage
+          ? `page ${item.startPage}`
+          : `pages ${item.startPage}–${item.endPage}`;
+        const evidence = item.evidencePages.length > 0
+          ? `transcribed evidence supplied from page${item.evidencePages.length === 1 ? "" : "s"} ${item.evidencePages.join(", ")}`
+          : `no extracted/transcribed page evidence is currently available`;
+        return `${index + 1}. ${item.section} — ${range}; ${evidence}`;
+      }).join("\n")
+    );
+    parts.push(
+      `CURRICULUM-LED TEACHING CONTRACT:\n` +
+      `- Treat the selected scope as the core syllabus. Stay within its sequence, terminology, notation, assumptions, methods, and level; do not silently substitute a generic lesson.\n` +
+      `- At the start of each selected section, state its learner-facing objective and identify the prerequisites supported by the evidence. Verify or remediate those prerequisites before advancing.\n` +
+      `- Progress across turns through: orientation and objectives → plain-language explanation → curriculum definitions and method → curriculum-faithful worked example → check for understanding → targeted practice → diagnosis and targeted remediation → a mastery check. Do not dump every phase into one reply; continue from the learner's current phase.\n` +
+      `- Teach definitions, procedures, examples, constraints, and common pitfalls that appear in the evidence. Cite the relevant E-handle for curriculum-grounded claims. After explanation or a worked example, ask one focused check; diagnose the response, remediate the specific gap, and give a short transfer problem.\n` +
+      `- Advance to the next selected section only after the learner meets a concrete mastery criterion: they can accurately explain the key idea or independently complete a representative check.\n` +
+      `- Keep core instruction inside the selected range and order. If outside knowledge would genuinely help, label it explicitly as OPTIONAL ENRICHMENT, keep it brief, and never let it displace or contradict the curriculum.\n` +
+      `- If evidence is partial or absent, say exactly what is unavailable. Do not pretend missing pages or facts were present; limit claims to the supplied metadata/evidence.`
+    );
+  }
+
   if (params.cards.length > 0) {
     parts.push(
       `CURRICULUM SECTIONS AVAILABLE — cite these by handle in evidence_refs:\n` +
@@ -1428,6 +1535,8 @@ export function buildTutorUserPrompt(params: {
           .map((c) => `- [${c.handle}] ${c.section}${c.excerpt ? `\n    ${c.excerpt.replace(/\n/g, "\n    ")}` : ""}`)
           .join("\n")
     );
+  } else if (curriculumScope.length > 0) {
+    parts.push("CURRICULUM EVIDENCE: the selected sections are bound by the scope above, but no extracted excerpt cards are currently available. Do not claim to have read their missing page content.");
   } else {
     parts.push("CURRICULUM: no curriculum sections are bound to this session.");
   }
@@ -1451,9 +1560,10 @@ export function buildTutorUserPrompt(params: {
   parts.push(`LEARNER MESSAGE:\n"""\n${params.learnerMessage}${params.attachmentsNote}\n"""`);
 
   parts.push(
-    `GLOBAL BEHAVIOR: If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
+    `GLOBAL BEHAVIOR: First decide whether changing the board is pedagogically necessary for this exact turn. Greetings, thanks, acknowledgements, social chat, navigation questions, and answers that are already clear in short speech MUST return board_ops exactly [] — do not create an equation, graph, diagram, chart, text block, callout, or thread merely because a chalkboard is available. ` +
+    `Use a board operation only when the learner explicitly requests a board rendering/edit or when a specific visual/formal representation materially improves understanding and cannot be conveyed as clearly in the spoken response alone. If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
     `For every substantive explanation, layer simple plain-language intuition first, then precise terminology, assumptions, rigorous reasoning, and meaningful equations or worked steps; define jargon and connect formal details back to the intuitive idea. ` +
-    `Treat the chalkboard as a visual teaching surface, not a text transcript: a substantive lesson should not be text-only when relevant tools are available. Deliberately compose and vary a meaningful mix of equations, function graphs, data charts, and domain-faithful diagrams or scientific figures across the lesson. Use only visuals that clarify the subject—never decorative, irrelevant, or semantically misleading figures—and obey the enabled tool permissions. ` +
+    `When a board representation is necessary, choose the smallest relevant set of equations, function graphs, data charts, or domain-faithful diagrams/scientific figures. Never add decorative, redundant, irrelevant, or semantically misleading visuals, and obey the enabled tool permissions. ` +
     `Always include speech, board_ops, and evidence_refs. Use an empty array when there are no board operations. ` +
     (params.cards.length === 0
       ? `No evidence handles were supplied, so evidence_refs MUST be exactly [].`
@@ -1703,7 +1813,8 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   const knowledgeNodes = await resolveTutorKnowledgeNodes(req.boundNodes ?? [], studio);
   // Curriculum sequencing and source grounding are independent: disabling the
   // pedagogical phase sequence must not silently disable selected-source use.
-  const cards = await buildTutorEvidenceCards(knowledgeNodes);
+  const grounding = await buildTutorGrounding(knowledgeNodes);
+  const { cards, scope: curriculumScope } = grounding;
   const allowedEvidence = new Set(cards.map((card) => card.handle));
   const endpoint = req.endpoint ?? (await resolveRoleEndpoint("tutor"));
   // Endpoint bindings may define a provider ceiling, while Tutor Studio defines
@@ -1754,6 +1865,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     hintLevel,
     awaitingFirstAttempt,
     learnerSummary,
+    curriculumScope,
     cards,
     history,
     board: req.board,
@@ -1791,7 +1903,10 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   });
   const result: StructuredCallResult<TutorTurn> = {
     ...rawResult,
-    value: enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
+    value: enforceTutorBoardNecessity(
+      enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
+      req.learnerMessage
+    ),
   };
 
   await appendSessionMessage({
@@ -1910,15 +2025,21 @@ export async function generateOnboardingQuestions(req: {
   signal?: AbortSignal;
   endpoint?: ResolvedRoleEndpoint;
 }): Promise<GeneratedOnboarding> {
-  const cards = await buildTutorEvidenceCards(req.boundNodes ?? []);
+  const { cards, scope } = await buildTutorGrounding(req.boundNodes ?? []);
   const endpoint = req.endpoint ?? (await resolveRoleEndpoint("tutor"));
 
-  const evidenceBlock = cards.length
-    ? `\n\nCurriculum evidence for this concept (use it to make the questions specific — refer to the actual sub-topics, methods and pitfalls it contains):\n` +
+  const scopeBlock = scope.length > 0
+    ? `\n\nSelected curriculum sequence and exact page ranges:\n` + scope.map((item, index) => {
+      const range = item.startPage === item.endPage ? `page ${item.startPage}` : `pages ${item.startPage}–${item.endPage}`;
+      return `${index + 1}. ${item.section} — ${range}`;
+    }).join("\n")
+    : "";
+  const evidenceBlock = scopeBlock + (cards.length
+    ? `\n\nTranscribed curriculum evidence for this concept (use it to make the questions specific — refer to the actual sub-topics, methods and pitfalls it contains):\n` +
       cards
         .map((c) => `[${c.handle}] ${c.section}\n${c.excerpt ?? ""}`)
         .join("\n\n")
-    : `\n\nNo transcribed curriculum evidence is available for this concept yet — write questions from the concept name alone and do not invent specific section contents.`;
+    : `\n\nNo transcribed curriculum evidence is available for this concept yet — use only the concept and page-range metadata and do not invent specific section contents.`);
 
   const system =
     `You are the Socratic tutor's intake interviewer. Before a study session begins you write a short set of onboarding questions ` +

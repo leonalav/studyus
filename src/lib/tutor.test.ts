@@ -5,6 +5,7 @@ import {
   validateTutorPayload,
   recoverTutorPayload,
   buildTutorEvidenceCards,
+  buildTutorGrounding,
   ensureChalkboardSession,
   appendSessionMessage,
   getSessionMessages,
@@ -17,6 +18,8 @@ import {
   MAX_BOARD_OPS_PER_TURN,
   MAX_THREAD_INITIAL_BLOCKS,
   enforceTutorToolPolicy,
+  enforceTutorBoardNecessity,
+  isNonInstructionalTutorMessage,
   resolveTutorKnowledgeNodes,
   getTutorSessionLearnerSummary,
   rememberTutorDiagnosis,
@@ -309,6 +312,47 @@ describe("Tutor turn deterministic recovery", () => {
 });
 
 describe("Tutor Studio runtime policy", () => {
+  it("deterministically suppresses board operations for purely social messages", () => {
+    const noncompliantTurn: TutorTurn = {
+      speech: "Hello! How can I help?",
+      evidenceRefs: [],
+      boardOps: [
+        { op: "write_title", text: "Welcome" },
+        { op: "visualize", intent: { type: "diagram", variant: "flow" } },
+      ],
+    };
+
+    for (const message of [
+      "Hello.",
+      "Hey tutor!",
+      "Good morning",
+      "Thank you so much!",
+      "Got it.",
+      "Goodbye",
+      "How are you?",
+    ]) {
+      expect(isNonInstructionalTutorMessage(message)).toBe(true);
+      expect(enforceTutorBoardNecessity(noncompliantTurn, message).boardOps).toEqual([]);
+    }
+  });
+
+  it("does not suppress explicit drawing requests or instructional turns", () => {
+    const turn: TutorTurn = {
+      speech: "Here is the requested diagram.",
+      evidenceRefs: [],
+      boardOps: [{ op: "visualize", intent: { type: "diagram", variant: "flow" } }],
+    };
+
+    for (const message of [
+      "Hello, please draw a circle.",
+      "Thanks—now graph y = x squared.",
+      "Explain the chain rule",
+    ]) {
+      expect(isNonInstructionalTutorMessage(message)).toBe(false);
+      expect(enforceTutorBoardNecessity(turn, message).boardOps).toEqual(turn.boardOps);
+    }
+  });
+
   it("deterministically filters disabled writing, thread, and semantic visualization tools", () => {
     const turn: TutorTurn = {
       speech: "I will only apply permitted operations.",
@@ -637,20 +681,52 @@ describe("Tutor evidence cards", () => {
       `INSERT OR REPLACE INTO curriculum_chunks (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind)
        VALUES
         ('tutor-ev-chunk-1', ?, 5, 1, ?, ?, 'prose'),
-        ('tutor-ev-chunk-2', ?, 7, 1, ?, ?, 'prose');`,
+        ('tutor-ev-chunk-2', ?, 10, 1, ?, ?, 'prose');`,
       [NODE_ID, texts[0], simpleHash(texts[0]), NODE_ID_2, texts[1], simpleHash(texts[1])]
     );
 
     const cards = await buildTutorEvidenceCards([NODE_ID, NODE_ID_2]);
     expect(cards).toHaveLength(2);
     expect(cards.map((c) => c.handle)).toEqual(["E1", "E2"]);
-    // Page 5 chunk (node 2.1) sorts before page 7 (node 2.2).
+    // The selected curriculum sequence is retained across the two page ranges.
     expect(cards[0].section).toContain("2.1");
     expect(cards[0].section).toContain("Derivatives");
     expect(cards[1].section).toContain("2.2");
     expect(cards[1].section).toContain("Limits");
     expect(cards[0].excerpt).toContain("f'(x)=2x");
     expect(cards[1].excerpt).toContain("Limits describe");
+
+    const grounding = await buildTutorGrounding([NODE_ID, NODE_ID_2]);
+    expect(grounding.scope).toEqual([
+      {
+        nodeId: NODE_ID,
+        section: "2.1 Derivatives",
+        startPage: 5,
+        endPage: 9,
+        evidencePages: [5],
+      },
+      {
+        nodeId: NODE_ID_2,
+        section: "2.2 Limits",
+        startPage: 10,
+        endPage: 14,
+        evidencePages: [10],
+      },
+    ]);
+    expect(grounding.cards[0].section).toBe("2.1 Derivatives · selected pp.5–9 · evidence p.5");
+    expect(grounding.cards[1].section).toBe("2.2 Limits · selected pp.10–14 · evidence p.10");
+  });
+
+  it("retains exact page scope even when the selected section has no extracted chunks", async () => {
+    const grounding = await buildTutorGrounding([NODE_ID]);
+    expect(grounding.cards).toEqual([]);
+    expect(grounding.scope).toEqual([{
+      nodeId: NODE_ID,
+      section: "2.1 Derivatives",
+      startPage: 5,
+      endPage: 9,
+      evidencePages: [],
+    }]);
   });
 });
 

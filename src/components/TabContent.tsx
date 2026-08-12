@@ -13,6 +13,7 @@ import {
 import { useCurricula } from "../state/curriculumStore";
 import { PastNoteTab } from "./PastNoteTab";
 import { TestParams } from "./testTabIds";
+import type { CurriculumStudySelection } from "../types/curriculumStudy";
 
 export type { TestParams } from "./testTabIds";
 
@@ -22,7 +23,7 @@ interface Props {
   onStartTest: (params: TestParams) => void;
   onTestGenerated: () => void;
   onExitTest: () => void;
-  onSelectSectionForStudy?: (sectionTitle: string) => void;
+  onSelectSectionForStudy?: (selection: CurriculumStudySelection) => void;
   onReopenSession?: (sessionId: string) => void;
   activeTest: TestParams | null;
   /** Bumped after a test is generated so Available tests re-fetches. */
@@ -51,7 +52,7 @@ export function TabContent({
   }
 
   if (tab.kind === "note") {
-    const sessionId = tab.id.replace(/^note-/, "");
+    const sessionId = (tab.contentId ?? tab.id).replace(/^note-/, "");
     return (
       <PastNoteTab
         sessionId={sessionId}
@@ -62,11 +63,12 @@ export function TabContent({
   }
 
   if (tab.kind === "test") {
-    if (tab.id === "test-take") return <TestCenter onNotify={onNotify} onGenerated={onTestGenerated} />;
-    if (tab.id === "test-bank") return <QuestionBank onNotify={onNotify} />;
-    if (tab.id === "test-available")
+    const contentId = tab.contentId ?? tab.id;
+    if (contentId === "test-take") return <TestCenter onNotify={onNotify} onGenerated={onTestGenerated} />;
+    if (contentId === "test-bank") return <QuestionBank onNotify={onNotify} />;
+    if (contentId === "test-available")
       return <AvailableTests onNotify={onNotify} onStart={onStartTest} refreshKey={availableTestsRefreshKey} />;
-    if (tab.id.startsWith("test-run-") && activeTest) {
+    if (contentId.startsWith("test-run-") && activeTest) {
       return (
         <TestRunner
           attemptId={activeTest.attemptId}
@@ -92,9 +94,9 @@ function CurriculumTab({
 }: {
   tab: Tab;
   onNotify: (t: string) => void;
-  onSelectSection?: (sectionTitle: string) => void;
+  onSelectSection?: (selection: CurriculumStudySelection) => void;
 }) {
-  const sourceId = tab.id.replace(/^cur-/, "");
+  const sourceId = (tab.contentId ?? tab.id).replace(/^cur-/, "");
   const { curricula } = useCurricula();
   const source = curricula.find((item) => item.id === sourceId);
   const [nodes, setNodes] = useState<CurriculumNodeRecord[]>(source?.nodes ?? []);
@@ -113,9 +115,12 @@ function CurriculumTab({
     };
   }, [onNotify, sourceId]);
 
-  const handlePickSection = (sectionTitle: string) => {
-    onNotify(`Selected concept: "${sectionTitle}". Redirecting to Tutor…`);
-    onSelectSection?.(sectionTitle);
+  const handlePickSection = (node: CurriculumNodeRecord | null) => {
+    const label = node
+      ? [node.sectionNumber, node.title].filter(Boolean).join(" ")
+      : source?.name.replace(/\.pdf$/i, "") ?? tab.title;
+    onNotify(`Selected concept: "${label}". Redirecting to Tutor…`);
+    onSelectSection?.({ sourceId, nodeId: node?.id ?? null, label });
   };
 
   const handleDownload = async () => {
@@ -155,7 +160,7 @@ function CurriculumTab({
         <div className="mt-6 flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => handlePickSection(tab.title)}
+            onClick={() => handlePickSection(null)}
             className="inline-flex h-9 items-center gap-2 rounded-md bg-accent px-3.5 text-[12px] font-semibold text-white transition-colors hover:bg-accent-deep"
           >
             Study with Studyus
@@ -208,7 +213,7 @@ function CurriculumSection({
 }: {
   node: CurriculumNodeRecord;
   index: number;
-  onPick: (title: string) => void;
+  onPick: (node: CurriculumNodeRecord) => void;
 }) {
   const descendants = countDescendants(node);
   const sectionIndex = majorSectionLabel(node, index);
@@ -218,7 +223,7 @@ function CurriculumSection({
     <div className={index > 0 ? "border-t border-edge" : ""}>
       <button
         type="button"
-        onClick={() => onPick(node.title)}
+        onClick={() => onPick(node)}
         className="group flex w-full items-center gap-4 bg-white/[0.018] px-4 py-4 text-left transition-colors hover:bg-white/[0.05] sm:px-5"
       >
         <span className="w-8 shrink-0 font-mono text-[15px] font-medium tracking-[-0.02em] text-[#e1c35b]">
@@ -247,7 +252,7 @@ function CurriculumRows({
 }: {
   nodes: CurriculumNodeRecord[];
   depth: number;
-  onPick: (title: string) => void;
+  onPick: (node: CurriculumNodeRecord) => void;
 }) {
   return (
     <>
@@ -258,7 +263,7 @@ function CurriculumRows({
           <div key={node.id}>
             <button
               type="button"
-              onClick={() => onPick(node.title)}
+              onClick={() => onPick(node)}
               className="group flex w-full items-start gap-3 border-b border-edge-soft px-4 py-2.5 text-left transition-colors last:border-b-0 hover:bg-white/[0.035] sm:px-5"
               style={{ paddingLeft: 52 + depth * 20 }}
             >

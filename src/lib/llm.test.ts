@@ -62,11 +62,13 @@ describe("Three-Role LLM Engine & Security", () => {
     expect(bindings.every((b) => b.modelId === "llama-3-70b")).toBe(true);
   });
 
-  it("pins layered explanations and meaningful visual board composition in the base tutor rules", () => {
+  it("pins layered explanations and pedagogical-necessity gating in the base tutor rules", () => {
     expect(TUTOR_AGENT_PROMPT_V1).toMatch(/simple plain-language intuition/i);
     expect(TUTOR_AGENT_PROMPT_V1).toMatch(/precise terminology, assumptions, rigorous reasoning/i);
-    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/equations, function graphs, data charts, and domain-faithful diagrams/i);
-    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/never add decorative, irrelevant, or semantically misleading figures/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/Use the board only when it is pedagogically necessary/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/greetings, thanks, acknowledgements, social chat, navigation questions/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/smallest relevant representation only when the answer is yes/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/Never add decorative, redundant, irrelevant, or semantically misleading content/i);
     expect(TUTOR_AGENT_PROMPT_V1).toMatch(/respect disabled tool permissions/i);
   });
 

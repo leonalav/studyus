@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   deleteStudySession,
+  getStudySession,
   listStudySessions,
+  pastePastNoteClipboard,
+  readPastNoteClipboard,
+  renameStudySession,
   saveStudySession,
   subscribeToStudySessions,
+  writePastNoteClipboard,
   type StoredStudySession,
 } from "./studySessionStore";
 
@@ -45,6 +50,37 @@ describe("study session subscriptions", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("renames and copies the complete saved-note snapshot", () => {
+    const detailed = {
+      ...session,
+      boards: [{ id: "board-1", title: "Orbits", subtitle: "", domain: "physics" as const, blocks: [] }],
+      activeId: "board-1",
+      messages: [{ id: 1, role: "tutor" as const, text: "Keep this transcript." }],
+    };
+    saveStudySession(detailed);
+
+    expect(renameStudySession(session.id, "  Circular motion  ")?.title).toBe("Circular motion");
+    expect(writePastNoteClipboard(session.id, "copy")?.session.boards).toEqual(detailed.boards);
+    const pasted = pastePastNoteClipboard();
+
+    expect(pasted?.id).not.toBe(session.id);
+    expect(pasted?.title).toBe("Circular motion copy");
+    expect(pasted?.boards).toEqual(detailed.boards);
+    expect(pasted?.messages).toEqual(detailed.messages);
+    expect(getStudySession(session.id)?.title).toBe("Circular motion");
+    expect(listStudySessions()).toHaveLength(2);
+  });
+
+  it("cuts by moving an existing snapshot on paste and clears the clipboard", () => {
+    saveStudySession(session);
+    expect(writePastNoteClipboard(session.id, "cut")?.mode).toBe("cut");
+    const pasted = pastePastNoteClipboard();
+
+    expect(pasted?.id).toBe(session.id);
+    expect(listStudySessions()).toHaveLength(1);
+    expect(readPastNoteClipboard()).toBeNull();
   });
 
   it("broadcasts same-window saves and deletes to every session list", () => {

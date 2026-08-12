@@ -19,7 +19,14 @@ const baseParams = {
   hintLevel: 0,
   awaitingFirstAttempt: false,
   learnerSummary: "",
-  cards: [{ handle: "E1", section: "§1.2" }],
+  curriculumScope: [{
+    nodeId: "section-1.2",
+    section: "1.2 Circle geometry",
+    startPage: 12,
+    endPage: 18,
+    evidencePages: [12, 14, 18],
+  }],
+  cards: [{ handle: "E1", section: "1.2 Circle geometry · selected pp.12–18 · evidence p.12" }],
   history: [],
   learnerMessage: "draw a circle with center O and two points A and B",
   attachmentsNote: "",
@@ -59,6 +66,8 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
 
     const noEvidencePrompt = buildTutorUserPrompt({ ...baseParams, cards: [] });
     expect(noEvidencePrompt).toMatch(/evidence_refs MUST be exactly \[\]/);
+    expect(noEvidencePrompt).toMatch(/selected sections are bound by the scope above, but no extracted excerpt cards/i);
+    expect(noEvidencePrompt).not.toMatch(/no curriculum sections are bound/i);
   });
 
   it("states the intent discriminant is `type`, not `kind`", () => {
@@ -95,11 +104,30 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(prompt).toMatch(/connect formal details back to the intuitive idea/i);
   });
 
-  it("requires substantive lessons to use relevant multimodal board tools", () => {
-    expect(prompt).toMatch(/substantive lesson should not be text-only/i);
-    expect(prompt).toMatch(/equations, function graphs, data charts, and domain-faithful diagrams/i);
-    expect(prompt).toMatch(/never decorative, irrelevant, or semantically misleading figures/i);
+  it("uses board tools only after a pedagogical-necessity decision", () => {
+    expect(prompt).toMatch(/First decide whether changing the board is pedagogically necessary for this exact turn/i);
+    expect(prompt).toMatch(/greetings, thanks, acknowledgements, social chat, navigation questions/i);
+    expect(prompt).toMatch(/MUST return board_ops exactly \[\]/i);
+    expect(prompt).toMatch(/equations, function graphs, data charts, or domain-faithful diagrams\/scientific figures/i);
+    expect(prompt).toMatch(/never add decorative, redundant, irrelevant, or semantically misleading visuals/i);
     expect(prompt).toMatch(/obey the enabled tool permissions/i);
+  });
+
+  it("carries the ordered curriculum scope, exact pages, and evidence coverage", () => {
+    expect(prompt).toMatch(/SELECTED CURRICULUM SCOPE — this sequence and these page ranges are binding/i);
+    expect(prompt).toContain("1. 1.2 Circle geometry — pages 12–18; transcribed evidence supplied from pages 12, 14, 18");
+    expect(prompt).toContain("selected pp.12–18 · evidence p.12");
+    expect(prompt).toMatch(/Treat the selected scope as the core syllabus/i);
+  });
+
+  it("requires concrete curriculum-led teaching and honest handling of missing evidence", () => {
+    expect(prompt).toMatch(/state its learner-facing objective/i);
+    expect(prompt).toMatch(/prerequisites/i);
+    expect(prompt).toMatch(/worked example/i);
+    expect(prompt).toMatch(/targeted remediation/i);
+    expect(prompt).toMatch(/mastery criterion/i);
+    expect(prompt).toMatch(/Do not pretend missing pages or facts were present/i);
+    expect(prompt).toMatch(/OPTIONAL ENRICHMENT/i);
   });
 
   it("enumerates the 8 geometry object kinds so the LLM names real ones", () => {

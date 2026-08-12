@@ -25,6 +25,7 @@ import { generateOnboardingQuestions, transcribeNode } from "../api";
 import { countBoundAgents } from "../lib/agentRuntime";
 import { SUBJECT_LIST, type SubjectKey } from "../data/curriculum";
 import { useCurricula, type StoredCurriculum } from "../state/curriculumStore";
+import type { CurriculumStudySelection } from "../types/curriculumStudy";
 
 interface Msg {
   id: number;
@@ -55,8 +56,8 @@ interface Props {
   notify: (text: string) => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   onPrepare: (prompt: string, boundNodes?: string[], onboarding?: OnboardingAnswers) => void;
-  selectedSection?: string | null;
-  onSelectedSectionChange?: (section: string | null) => void;
+  selectedSection?: CurriculumStudySelection | null;
+  onSelectedSectionChange?: (selection: CurriculumStudySelection | null) => void;
 }
 
 const DEPTHS: { id: Depth; label: string; desc: string }[] = [
@@ -118,6 +119,18 @@ export function SessionCard({
   // Input is locked while the tutor drafts questions, while the preparation
   // pass runs, and whenever the tutor is typing — no second submit can slip in.
   const busy = typing || onboardingStage === "generating" || onboardingStage === "preparing";
+
+  // A concept picked from the Curriculum tab carries stable source/node ids.
+  // Hydrate the same picker state used by an in-card selection so onboarding,
+  // transcription, and every Tutor turn receive the real selected subsection.
+  useEffect(() => {
+    if (!selectedSection) return;
+    const document = curricula.find((item) => item.id === selectedSection.sourceId);
+    if (!document) return;
+    setCtxSubject(document.subject === "unsorted" ? null : document.subject);
+    setCtxDoc(document.id);
+    setCtxSubsection(selectedSection.nodeId);
+  }, [curricula, selectedSection]);
 
   // reset on subject change
   useEffect(() => {
@@ -240,7 +253,7 @@ export function SessionCard({
       curricula,
       ctxDoc,
       ctxSubsection,
-      selectedSection?.trim() || prompt
+      selectedSection?.label.trim() || prompt
     );
     const agentCount = await safeAgentCount();
 
@@ -391,8 +404,8 @@ export function SessionCard({
           }}
           subsection={ctxSubsection}
           setSubsection={setCtxSubsection}
-          externalLabel={selectedSection}
-          onLabelChange={onSelectedSectionChange}
+          externalSelection={selectedSection}
+          onSelectionChange={onSelectedSectionChange}
           notify={notify}
         />
         <span className="ml-auto flex items-center gap-1.5 font-mono text-[11px] text-dim">
@@ -772,8 +785,8 @@ function ContextPicker({
   setDoc,
   subsection,
   setSubsection,
-  externalLabel,
-  onLabelChange,
+  externalSelection,
+  onSelectionChange,
   notify,
 }: {
   subject: SubjectKey | null;
@@ -782,8 +795,8 @@ function ContextPicker({
   setDoc: (d: string | null) => void;
   subsection: string | null;
   setSubsection: (s: string | null) => void;
-  externalLabel?: string | null;
-  onLabelChange?: (label: string | null) => void;
+  externalSelection?: CurriculumStudySelection | null;
+  onSelectionChange?: (selection: CurriculumStudySelection | null) => void;
   notify: (t: string) => void;
 }) {
   const { curricula } = useCurricula();
@@ -819,7 +832,7 @@ function ContextPicker({
   // "Add context" once a concept is picked from the PDF's bookmarks.
   const label = selectedNode
     ? [selectedNode.sectionNumber, selectedNode.title].filter(Boolean).join(" ")
-    : docName ?? meta?.label ?? externalLabel ?? "Add context";
+    : docName ?? meta?.label ?? externalSelection?.label ?? "Add context";
 
   return (
     <div className="relative" ref={wrapRef}>
@@ -828,7 +841,7 @@ function ContextPicker({
         className="flex max-w-[280px] items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[15px] transition-colors hover:bg-white/[0.06]"
       >
         {meta && <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: meta.accent }} />}
-        <span className={`truncate ${meta || externalLabel ? "text-fg" : "text-mut"}`}>{label}</span>
+        <span className={`truncate ${meta || externalSelection ? "text-fg" : "text-mut"}`}>{label}</span>
         <ChevronDown size={13} className={`shrink-0 text-dim transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
@@ -846,7 +859,7 @@ function ContextPicker({
                     onClick={() => {
                       setSubject(s.id);
                       setDoc(null);
-                      onLabelChange?.(null);
+                      onSelectionChange?.(null);
                       setStep("docs");
                     }}
                     className="flex w-full items-center gap-2.5 rounded px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07]"
@@ -865,7 +878,7 @@ function ContextPicker({
                   onClick={() => {
                     setSubject(null);
                     setDoc(null);
-                    onLabelChange?.(null);
+                    onSelectionChange?.(null);
                     setStep("subject");
                   }}
                   className="font-mono text-[10px] uppercase tracking-wider text-dim transition-colors hover:text-fg"
@@ -893,7 +906,7 @@ function ContextPicker({
                       // and that choice becomes this picker's title.
                       setDoc(d.id);
                       setSubsection(null);
-                      onLabelChange?.(null);
+                      onSelectionChange?.(null);
                       setExpanded(new Set(d.nodes.slice(0, 1).map((n) => n.id)));
                       setStep("concepts");
                     }}
@@ -914,7 +927,7 @@ function ContextPicker({
                   onClick={() => {
                     setDoc(null);
                     setSubsection(null);
-                    onLabelChange?.(null);
+                    onSelectionChange?.(null);
                     setOpen(false);
                     notify("Studying without a curriculum");
                   }}
@@ -968,7 +981,7 @@ function ContextPicker({
                         .filter(Boolean)
                         .join(" ");
                       setSubsection(picked.id);
-                      onLabelChange?.(pickedLabel);
+                      onSelectionChange?.({ sourceId: doc!, nodeId: picked.id, label: pickedLabel });
                       setOpen(false);
                       notify(`Studying ${pickedLabel}`);
                     }}
@@ -1078,7 +1091,7 @@ function resolveConcept(
 ): string {
   if (subsectionId) {
     const doc = curricula.find((c) => c.id === docId);
-    const node = doc?.nodes.find((n) => n.id === subsectionId);
+    const node = doc ? findNodeDeep(doc.nodes, subsectionId) : null;
     if (node) return [node.sectionNumber, node.title].filter(Boolean).join(" ") || node.title;
   }
   if (docId) {

@@ -726,16 +726,21 @@ export function ChatDock({
               Chat
             </button>
           )}
-          <input
+          <textarea
             value={val}
+            rows={1}
+            aria-label="AI Response message"
             onChange={(e) => setVal(e.target.value)}
             onMouseDown={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
-              if (e.key === "Enter") send();
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
             }}
             disabled={rewinding}
             placeholder={rewinding ? "Returning conversation…" : busy ? "Studyus is responding…" : "Ask anything about the board…"}
-            className="min-w-0 flex-1 cursor-text bg-transparent text-[11px] text-white outline-none placeholder:text-white/35 disabled:cursor-wait disabled:opacity-60"
+            className="max-h-12 min-w-0 flex-1 resize-none cursor-text bg-transparent text-[11px] leading-[18px] text-white outline-none placeholder:text-white/35 disabled:cursor-wait disabled:opacity-60"
           />
           <button
             onClick={send}
@@ -873,13 +878,20 @@ export function ChatDock({
         <div className="border-t border-white/[0.08]">
           {multimodalRow}
           <div className="flex items-center gap-2 px-2.5 pb-2">
-            <input
+            <textarea
               value={val}
+              rows={1}
+              aria-label="AI Response message"
               onChange={(e) => setVal(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && send()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
               disabled={rewinding}
               placeholder={rewinding ? "Returning conversation…" : "what if I want to…"}
-              className="min-w-0 flex-1 rounded bg-black/15 px-2 py-1.5 text-[10px] text-white outline-none placeholder:text-white/30 disabled:cursor-wait disabled:opacity-60"
+              className="max-h-24 min-w-0 flex-1 resize-y rounded bg-black/15 px-2 py-1.5 text-[10px] leading-relaxed text-white outline-none placeholder:text-white/30 disabled:cursor-wait disabled:opacity-60"
             />
             <button
               onClick={send}
