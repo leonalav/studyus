@@ -111,7 +111,7 @@ describe("persisted Studyus preferences", () => {
       tutor: {
         memory: { minimumEvidence: 3, retentionDays: 90 },
         tools: { geometry: false, diagrams: false, madeUpTool: true },
-        privacy: { allowCurriculumInPrompts: false, allowImageDataInPrompts: false },
+        privacy: { allowCurriculumInPrompts: false, allowImageDataInPrompts: false, allowFileDataInPrompts: false },
         advanced: { temperature: 999, maxResponseTokens: 12, requestTimeoutSeconds: 500 },
         versions: Array.from({ length: MAX_TUTOR_VERSIONS + 2 }, (_, index) => ({
           id: `v${index}`,
@@ -128,6 +128,8 @@ describe("persisted Studyus preferences", () => {
     expect(parsed.tools).not.toHaveProperty("madeUpTool");
     expect(parsed.privacy.allowCurriculumInPrompts).toBe(false);
     expect(parsed.privacy.allowImageDataInPrompts).toBe(false);
+    expect(parsed.privacy.allowFileDataInPrompts).toBe(false);
+    expect(parsed.tools.fileProcessing).toBe(true);
     expect(parsed.versions).toHaveLength(MAX_TUTOR_VERSIONS);
     expect(parsed.advanced).toMatchObject({
       temperature: 100,
@@ -161,13 +163,15 @@ describe("persisted Studyus preferences", () => {
   it("keeps one active endpoint and never stores unknown endpoint fields", () => {
     const parsed = sanitizePreferences({
       modelEndpoints: [
-        { id: "a", label: "A", provider: "openai", baseUrl: "https://a.test/v1", model: "a", keyMasked: "••••1234", active: true, apiKey: "secret" },
-        { id: "b", label: "B", provider: "custom", baseUrl: "https://b.test/v1", model: "b", keyMasked: "not set", active: true },
+        { id: "a", label: "A", provider: "openai", baseUrl: "https://a.test/v1", model: "gpt-4o", keyMasked: "••••1234", active: true, apiKey: "secret" },
+        { id: "b", label: "B", provider: "custom", baseUrl: "https://b.test/v1", model: "b", keyMasked: "not set", active: true, vision: false },
       ],
     });
 
     expect(parsed.modelEndpoints.filter((endpoint) => endpoint.active)).toHaveLength(1);
     expect(parsed.modelEndpoints[0]).not.toHaveProperty("apiKey");
+    expect(parsed.modelEndpoints[0].vision).toBe(true);
+    expect(parsed.modelEndpoints[1].vision).toBe(false);
   });
 
   it("builds a concrete tutor-agent reminder from the active saved style", () => {

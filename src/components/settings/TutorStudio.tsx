@@ -104,6 +104,7 @@ const TOOL_META: Record<TutorToolId, { label: string; description: string; group
   chemistry: { label: "Chemistry structures", description: "Atoms, bonds, molecules and reaction schemes", group: "Science" },
   graphTheory: { label: "Graph networks", description: "Styled node-edge networks and graph-theory layouts", group: "Visualizations" },
   imageAnalysis: { label: "Image analysis", description: "Send attached images only when the bound model advertises vision", group: "Sources" },
+  fileProcessing: { label: "Text and Markdown files", description: "Read bounded .txt and .md attachments as untrusted reference content", group: "Sources" },
 };
 
 function flattenCurriculumNodes(
@@ -534,6 +535,7 @@ function PrivacyPanel({ tutor, updateTutor }: PanelProps) {
     <SwitchRow label="Learner model in prompts" hint="Allow saved misconceptions and weak areas as revisable context" checked={value.allowLearnerModelInPrompts} onChange={(allowLearnerModelInPrompts) => patch({ allowLearnerModelInPrompts })} />
     <SwitchRow label="Curriculum text in prompts" hint="Required for grounded imported-source answers" checked={value.allowCurriculumInPrompts} onChange={(allowCurriculumInPrompts) => patch({ allowCurriculumInPrompts })} />
     <SwitchRow label="Image data in prompts" hint="Also requires Image analysis permission and a vision model" checked={value.allowImageDataInPrompts} onChange={(allowImageDataInPrompts) => patch({ allowImageDataInPrompts })} />
+    <SwitchRow label="Text file data in prompts" hint="Also requires Text and Markdown files permission" checked={value.allowFileDataInPrompts} onChange={(allowFileDataInPrompts) => patch({ allowFileDataInPrompts })} />
     <SwitchRow label="Share profile name" hint="Off by default; subject and level remain part of Tutor identity" checked={value.includeProfileIdentity} onChange={(includeProfileIdentity) => patch({ includeProfileIdentity })} />
   </>;
 }

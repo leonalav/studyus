@@ -22,9 +22,11 @@ import {
   asFiniteNumber,
   asNonEmptyString,
   asRecord,
+  buildAgentInputContent,
   callStructuredAgent,
   invalid,
   resolveRoleEndpoint,
+  type AgentInputAttachment,
   type ValidationResult,
 } from "./agentRuntime";
 import { TEST_GENERATION_AGENT_PROMPT_V1 } from "./llm";
@@ -166,6 +168,8 @@ export interface GenerationRequest {
   rigor: RigorLevel;
   nodeIds: string[];
   sourceName?: string;
+  /** Optional transient learner references. Raw payloads are never persisted. */
+  attachments?: AgentInputAttachment[];
   signal?: AbortSignal;
   /** Optional progress callback driving a dedicated progress bar in the Take a
    *  test menu. Each stage of real generation reports a 0–100 estimate and a
@@ -933,7 +937,11 @@ export async function generateAssessment(req: GenerationRequest): Promise<Genera
       role: "generation",
       endpoint,
       system: `${TEST_GENERATION_AGENT_PROMPT_V1}\n\n${ASSESSMENT_VISUALIZATION_AUTHORING_GUIDE}`,
-      user: buildGenerationUserPrompt(normalized, batchCards, batch),
+      user: buildAgentInputContent(
+        buildGenerationUserPrompt(normalized, batchCards, batch),
+        normalized.attachments,
+        endpoint
+      ),
       promptVersion: GENERATION_PROMPT_VERSION,
       schemaVersion: GENERATION_SCHEMA_VERSION,
       temperature: profile.temperature,

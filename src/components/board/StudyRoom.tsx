@@ -2,7 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chalkboard, THEMES, FONTS, type BoardTheme, type BoardView, type Stroke } from "./Chalkboard";
 import { getVisualizationPrewarmTargets, prewarmVisualizationAdapters } from "./VisualizationSurface";
 import { BoardToolbar, type PanelId, type PenTool } from "./BoardToolbar";
-import { ThreadsPanel, SettingsPanel, ChatDock, type AgentActivity, type ChatMsg } from "./BoardPanels";
+import {
+  ThreadsPanel,
+  SettingsPanel,
+  ChatDock,
+  type AgentActivity,
+  type ChatAttachment,
+  type ChatMsg,
+} from "./BoardPanels";
 import { buildSubBoard, boardToMarkdown, DOMAIN_META, type BoardDoc } from "../../data/boards";
 import { validateVisualizationIntent } from "../../lib/visualization/validate";
 import type { VisualizationIntent, VisualizationState } from "../../lib/visualization/types";
@@ -59,7 +66,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
 
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
-  const [attachments, setAttachments] = useState<{ name: string; kind: "file" | "image" | "audio" | "code"; url?: string }[]>([]);
+  // Attachment payloads live only for the current turn. Saved sessions retain
+  // chat/board metadata, never raw learner file contents or image data URLs.
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [agentStatus, setAgentStatus] = useState<"idle" | "thinking" | "writing" | "error">("idle");
   const [agentActivity, setAgentActivity] = useState<AgentActivity | null>(null);
   const [threadLog, setThreadLog] = useState<SessionThreadLog[]>([]);
@@ -175,7 +184,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     boundNodes: resolvedBoundNodes,
     boards,
     activeId,
-    messages,
+    messages: messages.map(({ imageData: _imageData, ...message }) => message),
     viewMap,
     strokeMap,
     appearance: {
@@ -359,6 +368,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
       const activityTurn = ++activityTurnRef.current;
       const targetBoardId = board.id;
       setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
+      // Consume the transient payload once. The request below retains this
+      // callback's immutable attachment snapshot while React clears the UI.
+      setAttachments([]);
       setAgentStatus("thinking");
       setAgentActivity({
         kind: "planning",
@@ -387,7 +399,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           attachments: attachments.map((a) => ({
             name: a.name,
             kind: a.kind,
+            mimeType: a.mimeType,
             dataUrl: a.kind === "image" ? a.url : undefined,
+            textContent: a.kind === "file" ? a.textContent : undefined,
           })),
           signal: controller.signal,
         });
@@ -650,14 +664,14 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           agentStatus={agentStatus}
           activity={agentActivity}
           attachments={attachments}
-          onAddAttachment={(kind, name, url) => {
+          onAddAttachment={(kind, name, url, mimeType, textContent) => {
             const placeholder = name || {
-              file: `file-${Date.now()}.pdf`,
+              file: `file-${Date.now()}.txt`,
               image: `image-${Date.now()}.png`,
               audio: `voice-${Date.now()}.m4a`,
-              code: `snippet-${Date.now()}.py`,
+              code: `snippet-${Date.now()}.txt`,
             }[kind];
-            setAttachments((list) => [...list, { name: placeholder, kind, url }]);
+            setAttachments((list) => [...list, { name: placeholder, kind, url, mimeType, textContent }]);
             notify(`${kind} attached`);
           }}
           onClearAttachments={() => setAttachments([])}

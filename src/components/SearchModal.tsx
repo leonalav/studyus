@@ -10,7 +10,7 @@ import {
   Plus,
   CornerDownLeft,
   Palette,
-  Bot,
+  LockKeyhole,
   Bell,
   Cpu,
 } from "lucide-react";
@@ -93,7 +93,7 @@ export function SearchModal({ open, onClose, onPick }: Props) {
       } else if (e.key === "Enter") {
         e.preventDefault();
         const item = flat[cursor];
-        if (item) {
+        if (item && !(item.type === "setting" && item.settingId === "tutor")) {
           onPick(item);
           onClose();
         }
@@ -166,11 +166,12 @@ export function SearchModal({ open, onClose, onPick }: Props) {
                 running += 1;
                 const idx = running;
                 const selected = idx === cursor;
+                const locked = item.type === "setting" && item.settingId === "tutor";
                 const ResultIcon = item.type === "setting"
                   ? ({
                       about: UserRound,
                       appearance: Palette,
-                      tutor: Bot,
+                      tutor: LockKeyhole,
                       notifications: Bell,
                       models: Cpu,
                     } as const)[item.settingId as "about" | "appearance" | "tutor" | "notifications" | "models"] ?? FileText
@@ -180,12 +181,16 @@ export function SearchModal({ open, onClose, onPick }: Props) {
                     key={item.id}
                     data-idx={idx}
                     onMouseEnter={() => setCursor(idx)}
+                    aria-disabled={locked}
                     onClick={() => {
+                      if (locked) return;
                       onPick(item);
                       onClose();
                     }}
                     className={`flex w-full items-center gap-2.5 px-4 py-[7px] text-left transition-colors ${
-                      selected ? "bg-white/[0.07]" : "hover:bg-white/[0.04]"
+                      locked
+                        ? "cursor-not-allowed opacity-45"
+                        : selected ? "bg-white/[0.07]" : "hover:bg-white/[0.04]"
                     }`}
                   >
                     <span className="grid h-[18px] w-[18px] shrink-0 place-items-center rounded-[3px]" style={{ background: `${item.accent}1f`, color: item.accent }}>
@@ -195,7 +200,9 @@ export function SearchModal({ open, onClose, onPick }: Props) {
                     {item.path && (
                       <span className="truncate text-[12.5px] text-dim">— {item.path}</span>
                     )}
-                    {selected && <CornerDownLeft size={12} className="ml-auto shrink-0 text-dim" />}
+                    {locked ? (
+                      <span className="ml-auto shrink-0 font-mono text-[9px] text-dim">COMING SOON</span>
+                    ) : selected && <CornerDownLeft size={12} className="ml-auto shrink-0 text-dim" />}
                   </button>
                 );
               })}

@@ -23,9 +23,11 @@ import {
   asFiniteNumber,
   asNonEmptyString,
   asRecord,
+  buildAgentInputContent,
   callStructuredAgent,
   invalid,
   resolveRoleEndpoint,
+  type AgentInputAttachment,
   type ResolvedRoleEndpoint,
   type ValidationResult,
 } from "./agentRuntime";
@@ -71,6 +73,8 @@ export interface RubricEvaluationRequest {
   figure?: VisualizationIntent;
   evidence?: { source: string; excerpt: string }[];
   learningObjective?: string;
+  /** Optional transient learner references. Raw payloads are never persisted. */
+  attachments?: AgentInputAttachment[];
   signal?: AbortSignal;
   endpoint?: ResolvedRoleEndpoint;
 }
@@ -312,7 +316,7 @@ export async function evaluateRubricResponse(req: RubricEvaluationRequest): Prom
     role: "evaluator",
     endpoint,
     system: buildEvaluatorSystemPrompt(),
-    user: buildEvaluatorUserPrompt(req),
+    user: buildAgentInputContent(buildEvaluatorUserPrompt(req), req.attachments, endpoint),
     promptVersion: EVALUATOR_PROMPT_VERSION,
     schemaVersion: EVALUATOR_SCHEMA_VERSION,
     temperature: 0,

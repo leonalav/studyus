@@ -1,11 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Download,
-  Layers3,
   LockKeyhole,
-  MessageSquareText,
   RotateCcw,
-  Sparkles,
 } from "lucide-react";
 import { boardToMarkdown, DOMAIN_META, type BoardDoc } from "../data/boards";
 import {
@@ -130,17 +127,9 @@ export function PastNoteTab({ sessionId, onNotify, onReopen }: Props) {
 
       <section aria-labelledby="snapshot-heading">
         <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <div className="flex items-center gap-2">
-              <Layers3 size={14} className="text-accent" />
-              <h2 id="snapshot-heading" className="font-mono text-[10px] uppercase tracking-[0.17em] text-dim">
-                Chalkboard snapshot
-              </h2>
-            </div>
-            <p className="mt-1.5 text-[12px] text-mut">
-              Read-only · exact saved viewport at {timeLabel}
-            </p>
-          </div>
+          <h2 id="snapshot-heading" className="font-mono text-[10px] uppercase tracking-[0.17em] text-dim">
+            Saved at {timeLabel}
+          </h2>
           {session.boards.length > 1 && (
             <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-md border border-edge-soft bg-panel p-1">
               {session.boards.map((item, index) => (
@@ -176,12 +165,9 @@ export function PastNoteTab({ sessionId, onNotify, onReopen }: Props) {
       <section className="mt-12" aria-labelledby="chat-heading">
         <div className="mb-4 flex items-end justify-between border-b border-edge-soft pb-3">
           <div>
-            <div className="flex items-center gap-2">
-              <MessageSquareText size={14} className="text-[#7dd3fc]" />
-              <h2 id="chat-heading" className="font-mono text-[10px] uppercase tracking-[0.17em] text-dim">
-                Session chat
-              </h2>
-            </div>
+            <h2 id="chat-heading" className="font-mono text-[10px] uppercase tracking-[0.17em] text-dim">
+              Session chat
+            </h2>
             <p className="mt-1.5 text-[12px] text-mut">The complete conversation, in its original order.</p>
           </div>
           <span className="font-mono text-[9.5px] uppercase tracking-wider text-dim">
@@ -242,19 +228,6 @@ function BoardSnapshot({
 
   return (
     <div className="overflow-hidden rounded-xl border border-white/10 bg-black shadow-[0_22px_60px_rgba(0,0,0,0.28)]">
-      <div className="flex h-8 items-center justify-between border-b border-white/[0.07] bg-[#17181a] px-3">
-        <div className="flex items-center gap-1.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-[#ff5f56]/80" />
-          <span className="h-1.5 w-1.5 rounded-full bg-[#ffbd2e]/80" />
-          <span className="h-1.5 w-1.5 rounded-full bg-[#28c840]/80" />
-        </div>
-        <span className="max-w-[60%] truncate font-mono text-[9px] uppercase tracking-[0.14em] text-white/35">
-          {board.title} · saved frame
-        </span>
-        <span className="font-mono text-[9px] text-white/25">
-          {Math.round(view.s * 100)}%
-        </span>
-      </div>
       <div
         ref={frameRef}
         className="relative w-full overflow-hidden bg-black"
@@ -307,7 +280,6 @@ function TranscriptMessage({ message }: { message: ChatMsg }) {
     <article className={`flex ${tutor ? "justify-start" : "justify-end"}`}>
       <div className={`w-full max-w-[760px] ${tutor ? "pr-8 sm:pr-16" : "pl-8 sm:pl-16"}`}>
         <div className={`mb-1.5 flex items-center gap-1.5 text-[9px] uppercase tracking-[0.14em] text-dim ${tutor ? "" : "justify-end"}`}>
-          {tutor && <Sparkles size={10} className="text-[#7dd3fc]" />}
           {tutor ? "Studyus" : "You"}
         </div>
         <div

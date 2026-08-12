@@ -294,9 +294,10 @@ export async function bindModelRole(
 ): Promise<void> {
   const db = await getDb();
 
-  if (config.apiKey) {
-    storeCredentialLocally(`role_${role}`, config.apiKey);
-  }
+  // A role credential mirrors its current endpoint. Clearing here is as
+  // important as replacing: otherwise switching to a keyless/local endpoint
+  // would silently keep sending the previous provider's secret.
+  storeCredentialLocally(`role_${role}`, config.apiKey || "");
 
   const capsJson = JSON.stringify(capabilities);
   const overridesJson = JSON.stringify(config.overrides || {});

@@ -448,6 +448,14 @@ function GenerativeTutorText({ text, animate }: { text: string; animate: boolean
   );
 }
 
+export interface ChatAttachment {
+  name: string;
+  kind: "file" | "image" | "audio" | "code";
+  url?: string;
+  mimeType?: string;
+  textContent?: string;
+}
+
 export function ChatDock({
   messages,
   onSend,
@@ -469,8 +477,14 @@ export function ChatDock({
   setCollapsed: (b: boolean) => void;
   onClose: () => void;
   typing: boolean;
-  attachments: { name: string; kind: "file" | "image" | "audio" | "code"; url?: string }[];
-  onAddAttachment: (kind: "file" | "image" | "audio" | "code", name?: string, url?: string) => void;
+  attachments: ChatAttachment[];
+  onAddAttachment: (
+    kind: ChatAttachment["kind"],
+    name?: string,
+    url?: string,
+    mimeType?: string,
+    textContent?: string
+  ) => void;
   onClearAttachments: () => void;
   onRemoveAttachment: (index: number) => void;
   onSpeakLast: () => void;
@@ -502,10 +516,7 @@ export function ChatDock({
     }
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  const readImageAttachment = (file: File) => {
     // The Tutor transport accepts data URLs up to 8M characters. Reject before
     // FileReader allocates a larger base64 copy in the webview.
     if (!file.type.startsWith("image/")) {
@@ -520,18 +531,55 @@ export function ChatDock({
     const reader = new FileReader();
     reader.onload = (evt) => {
       const url = evt.target?.result;
-      if (typeof url === "string" && url.startsWith("data:image/")) onAddAttachment("image", file.name, url);
-      else setAttachmentError("That image could not be read.");
+      if (typeof url === "string" && url.startsWith("data:image/")) {
+        onAddAttachment("image", file.name, url, file.type);
+      } else setAttachmentError("That image could not be read.");
     };
     reader.onerror = () => setAttachmentError("That image could not be read.");
     reader.readAsDataURL(file);
   };
 
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (file) readImageAttachment(file);
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      onAddAttachment("file", file.name);
+    e.target.value = "";
+    if (!file) return;
+
+    const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] ?? "";
+    if (file.type.startsWith("image/")) {
+      readImageAttachment(file);
+      return;
     }
+    if (extension !== ".txt" && extension !== ".md") {
+      setAttachmentError("Only .txt, .md, and image files are supported.");
+      return;
+    }
+    if (file.size > 120_000) {
+      setAttachmentError("Text files must be 120 KB or smaller.");
+      return;
+    }
+
+    setAttachmentError("");
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result;
+      if (typeof text === "string") {
+        onAddAttachment(
+          "file",
+          file.name,
+          undefined,
+          extension === ".md" ? "text/markdown" : "text/plain",
+          text
+        );
+      } else setAttachmentError("That text file could not be read.");
+    };
+    reader.onerror = () => setAttachmentError("That text file could not be read.");
+    reader.readAsText(file);
   };
 
   const startDrag = (e: React.MouseEvent) => {
@@ -612,6 +660,7 @@ export function ChatDock({
       <input
         ref={fileInputRef}
         type="file"
+        accept=".txt,.md,image/*"
         hidden
         onChange={handleFileUpload}
       />

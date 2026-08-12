@@ -6,6 +6,7 @@ import {
   ChevronRight,
   ChevronUp,
   CornerDownLeft,
+  LockKeyhole,
   MonitorSmartphone,
   Moon,
   Plus,
@@ -14,7 +15,6 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { TutorStudio } from "./settings/TutorStudio";
 import {
   DEFAULT_PREFERENCES,
   PREFERENCES_CHANGED_EVENT,
@@ -37,12 +37,12 @@ interface Props {
 
 export type Section = "root" | "about" | "appearance" | "tutor" | "notifications" | "models";
 
-const SECTIONS: { id: Exclude<Section, "root">; label: string; desc: string }[] = [
+const SECTIONS: { id: Exclude<Section, "root">; label: string; desc: string; disabled?: boolean }[] = [
   { id: "about", label: "About me", desc: "Profile, usage, plans and account" },
   { id: "appearance", label: "Appearance", desc: "Theme, font, layout and accessibility" },
-  { id: "tutor", label: "Tutor Studio", desc: "Identity, teaching policy, knowledge, memory and tools" },
   { id: "notifications", label: "Notifications", desc: "Study reminders, results and summaries" },
   { id: "models", label: "Model configuration", desc: "Your model endpoints and agent bindings" },
+  { id: "tutor", label: "Tutor Studio", desc: "...in a newer update", disabled: true },
 ];
 
 export function getSettingsSections(): { id: string; label: string; desc: string }[] {
@@ -88,7 +88,7 @@ export function SettingsModal({ open, onClose, onNotify, initialSection = "root"
 
   useEffect(() => {
     if (!open) return;
-    setSection(initialSection);
+    setSection(initialSection === "tutor" ? "root" : initialSection);
     setQuery("");
     setCursor(0);
     window.setTimeout(() => inputRef.current?.focus(), 30);
@@ -130,8 +130,10 @@ export function SettingsModal({ open, onClose, onNotify, initialSection = "root"
         const selected = results[cursor];
         if (selected) {
           event.preventDefault();
-          setSection(selected.id);
-          setQuery("");
+          if (!selected.disabled) {
+            setSection(selected.id);
+            setQuery("");
+          }
         }
       }
     };
@@ -217,19 +219,30 @@ export function SettingsModal({ open, onClose, onNotify, initialSection = "root"
                     aria-selected={selected}
                     data-settings-index={index}
                     onMouseEnter={() => setCursor(index)}
+                    disabled={item.disabled}
+                    aria-disabled={item.disabled}
                     onClick={() => {
+                      if (item.disabled) return;
                       setSection(item.id);
                       setQuery("");
                     }}
                     className={`flex w-full items-center gap-3 rounded-md px-2 py-2 text-left transition-colors ${
-                      selected ? "bg-white/[0.06]" : "hover:bg-white/[0.06]"
+                      item.disabled
+                        ? "cursor-not-allowed text-white/30"
+                        : selected ? "bg-white/[0.06]" : "hover:bg-white/[0.06]"
                     }`}
                   >
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[13px] text-fg">{item.label}</span>
-                      <span className="block truncate text-[11.5px] text-dim">{item.desc}</span>
+                      <span className={`block truncate text-[13px] ${item.disabled ? "text-white/35" : "text-fg"}`}>{item.label}</span>
+                      <span className={`block truncate ${item.disabled ? "text-[10px] text-white/25" : "text-[11.5px] text-dim"}`}>{item.desc}</span>
                     </span>
-                    <ChevronRight size={13} className={selected ? "text-mut" : "text-dim"} />
+                    {item.disabled ? (
+                      <span className="flex shrink-0 items-center gap-1.5 font-mono text-[9px] tracking-wide text-white/30">
+                        <LockKeyhole size={11} /> COMING SOON
+                      </span>
+                    ) : (
+                      <ChevronRight size={13} className={selected ? "text-mut" : "text-dim"} />
+                    )}
                   </button>
                 );
               })}
@@ -247,9 +260,6 @@ export function SettingsModal({ open, onClose, onNotify, initialSection = "root"
               value={preferences.appearance}
               onChange={(appearance) => updatePreferences((current) => ({ ...current, appearance }))}
             />
-          )}
-          {section === "tutor" && (
-            <TutorStudio preferences={preferences} updatePreferences={updatePreferences} onNotify={onNotify} />
           )}
           {section === "notifications" && (
             <Notifications preferences={preferences} updatePreferences={updatePreferences} onNotify={onNotify} />
@@ -668,7 +678,32 @@ const EMPTY_ENDPOINT: SavedModelEndpoint = {
   model: "",
   keyMasked: "",
   active: false,
+  vision: false,
 };
+
+const MODEL_ROLES = [
+  ["tutor", "Assign as Tutor"],
+  ["generation", "Assign as test generation agent"],
+  ["evaluator", "Assign as test evaluation agent"],
+] as const;
+
+type ModelRole = (typeof MODEL_ROLES)[number][0];
+type RoleAssignments = Record<ModelRole, string | null>;
+
+const EMPTY_ASSIGNMENTS: RoleAssignments = {
+  tutor: null,
+  generation: null,
+  evaluator: null,
+};
+
+function sameEndpoint(
+  endpoint: SavedModelEndpoint,
+  binding: { provider: string; baseUrl: string; modelId: string }
+): boolean {
+  return endpoint.provider === binding.provider
+    && endpoint.baseUrl.replace(/\/+$/, "") === binding.baseUrl.replace(/\/+$/, "")
+    && endpoint.model === binding.modelId;
+}
 
 function Models({ preferences, updatePreferences, onNotify }: {
   preferences: StudyusPreferences;
@@ -676,17 +711,70 @@ function Models({ preferences, updatePreferences, onNotify }: {
   onNotify: (text: string) => void;
 }) {
   const endpoints = preferences.modelEndpoints;
+  const appEndpoints = endpoints.filter((endpoint) => endpoint.provider === "studyus");
+  const customEndpoints = endpoints.filter((endpoint) => endpoint.provider !== "studyus");
+  const [category, setCategory] = useState<"app" | "custom">(
+    appEndpoints.length > 0 ? "app" : "custom"
+  );
   const [showAdd, setShowAdd] = useState(false);
   const [draft, setDraft] = useState<SavedModelEndpoint>(EMPTY_ENDPOINT);
   const [testingId, setTestingId] = useState<string | null>(null);
-  const [boundRoles, setBoundRoles] = useState({ tutor: false, generation: false, evaluator: false });
+  const [assignments, setAssignments] = useState<RoleAssignments>(EMPTY_ASSIGNMENTS);
+  const [credentialId, setCredentialId] = useState<string | null>(null);
+  const [credentialDraft, setCredentialDraft] = useState("");
 
-  const refreshRoles = useCallback(() => {
-    void import("../lib/agentRuntime").then(({ getBoundRoles }) => getBoundRoles().then(setBoundRoles)).catch(() => undefined);
+  const setEndpoints = useCallback((modelEndpoints: SavedModelEndpoint[]) => {
+    updatePreferences((current) => ({ ...current, modelEndpoints }));
+  }, [updatePreferences]);
+
+  const endpointConfig = useCallback(async (endpoint: SavedModelEndpoint) => {
+    const { getCredentialLocally } = await import("../lib/llm");
+    return {
+      provider: endpoint.provider,
+      baseUrl: endpoint.baseUrl,
+      modelId: endpoint.model,
+      apiKey: getCredentialLocally(`endpoint_${endpoint.id}`) || undefined,
+    };
   }, []);
-  useEffect(refreshRoles, [refreshRoles]);
 
-  const setEndpoints = (modelEndpoints: SavedModelEndpoint[]) => updatePreferences((current) => ({ ...current, modelEndpoints }));
+  const refreshBindings = useCallback(async () => {
+    const { bindModelRole, defaultCapabilities, getModelBindings } = await import("../lib/llm");
+    const roles = MODEL_ROLES.map(([role]) => role);
+    let records = await getModelBindings();
+
+    // Keep the invariant as soon as at least one usable model exists. A sole
+    // model necessarily owns all roles; with several, valid independent picks
+    // are preserved and only missing/stale roles are repaired.
+    if (endpoints.length > 0) {
+      const fallback = endpoints.find((endpoint) => endpoint.active) ?? endpoints[0];
+      for (const role of roles) {
+        const record = records.find((candidate) => candidate.role === role);
+        const validEndpoint = record && endpoints.find((endpoint) => sameEndpoint(endpoint, record));
+        const target = endpoints.length === 1 ? endpoints[0] : validEndpoint ?? fallback;
+        // Re-applying a valid assignment also synchronizes its endpoint
+        // credential and latest persisted capability flags into the role.
+        const config = await endpointConfig(target);
+        await bindModelRole(role, config, {
+          ...defaultCapabilities(),
+          vision: target.vision,
+        });
+      }
+      records = await getModelBindings();
+    }
+
+    const next: RoleAssignments = { ...EMPTY_ASSIGNMENTS };
+    for (const [role] of MODEL_ROLES) {
+      const record = records.find((candidate) => candidate.role === role);
+      next[role] = record
+        ? endpoints.find((endpoint) => sameEndpoint(endpoint, record))?.id ?? null
+        : null;
+    }
+    setAssignments(next);
+  }, [endpointConfig, endpoints]);
+
+  useEffect(() => {
+    void refreshBindings().catch(() => undefined);
+  }, [refreshBindings]);
 
   const commitEndpoint = async () => {
     const label = draft.label.trim();
@@ -698,8 +786,8 @@ function Models({ preferences, updatePreferences, onNotify }: {
     const id = `ep-${Date.now()}`;
     const key = draft.keyMasked.trim();
     const { storeCredentialLocally } = await import("../lib/llm");
-    if (key) storeCredentialLocally(`endpoint_${id}`, key);
-    setEndpoints([...endpoints.map((endpoint) => ({ ...endpoint, active: endpoints.length === 0 ? false : endpoint.active })), {
+    storeCredentialLocally(`endpoint_${id}`, key);
+    const nextEndpoint: SavedModelEndpoint = {
       ...draft,
       id,
       label,
@@ -707,34 +795,75 @@ function Models({ preferences, updatePreferences, onNotify }: {
       model,
       keyMasked: key ? `••••${key.slice(-4)}` : "not set",
       active: endpoints.length === 0,
-    }]);
+    };
+    setEndpoints([
+      ...endpoints.map((endpoint) => ({ ...endpoint, active: endpoints.length === 0 ? false : endpoint.active })),
+      nextEndpoint,
+    ]);
     setDraft(EMPTY_ENDPOINT);
     setShowAdd(false);
+    setCategory("custom");
     onNotify(`Saved endpoint “${label}”`);
   };
 
-  const activateEndpoint = (id: string) => setEndpoints(endpoints.map((endpoint) => ({ ...endpoint, active: endpoint.id === id })));
+  const activateEndpoint = (id: string) => {
+    setEndpoints(endpoints.map((endpoint) => ({ ...endpoint, active: endpoint.id === id })));
+  };
 
   const removeEndpoint = async (endpoint: SavedModelEndpoint) => {
-    if (!window.confirm(`Remove “${endpoint.label}” from saved endpoints? Existing agent-role bindings remain until you replace them.`)) return;
+    if (endpoints.length === 1) {
+      onNotify("Add another model before removing the only assigned model");
+      return;
+    }
+    if (!window.confirm(`Remove “${endpoint.label}” from saved endpoints? Its assigned roles will move to another model.`)) return;
     const { storeCredentialLocally } = await import("../lib/llm");
     storeCredentialLocally(`endpoint_${endpoint.id}`, "");
     const remaining = endpoints.filter((candidate) => candidate.id !== endpoint.id);
-    if (remaining.length > 0 && !remaining.some((candidate) => candidate.active)) remaining[0] = { ...remaining[0], active: true };
+    if (!remaining.some((candidate) => candidate.active)) remaining[0] = { ...remaining[0], active: true };
     setEndpoints(remaining);
-    onNotify("Saved endpoint removed; role bindings were left intact");
+    onNotify("Saved endpoint removed; assignments were preserved");
+  };
+
+  const assignRole = async (role: ModelRole, endpoint: SavedModelEndpoint) => {
+    if (assignments[role] === endpoint.id) {
+      onNotify("Each role must always have one assigned model");
+      return;
+    }
+    const { bindModelRole, defaultCapabilities } = await import("../lib/llm");
+    try {
+      await bindModelRole(role, await endpointConfig(endpoint), {
+        ...defaultCapabilities(),
+        vision: endpoint.vision,
+      });
+      await refreshBindings();
+      onNotify(`${endpoint.label} assigned`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not save model assignment");
+    }
+  };
+
+  const updateVision = async (endpoint: SavedModelEndpoint, vision: boolean) => {
+    const updated = { ...endpoint, vision };
+    setEndpoints(endpoints.map((candidate) => candidate.id === endpoint.id ? updated : candidate));
+    const { bindModelRole, defaultCapabilities } = await import("../lib/llm");
+    for (const [role] of MODEL_ROLES) {
+      if (assignments[role] === endpoint.id) {
+        await bindModelRole(role, await endpointConfig(updated), {
+          ...defaultCapabilities(),
+          vision,
+        });
+      }
+    }
   };
 
   const testEndpoint = async (endpoint: SavedModelEndpoint) => {
     setTestingId(endpoint.id);
     try {
-      const { getCredentialLocally, testModelEndpoint } = await import("../lib/llm");
-      const result = await testModelEndpoint({
-        provider: endpoint.provider,
-        baseUrl: endpoint.baseUrl,
-        modelId: endpoint.model,
-        apiKey: getCredentialLocally(`endpoint_${endpoint.id}`) || undefined,
-      });
+      const { testModelEndpoint } = await import("../lib/llm");
+      const result = await testModelEndpoint(await endpointConfig(endpoint));
+      if (result.reachable && result.modelAvailable && result.capabilities.vision !== endpoint.vision) {
+        await updateVision(endpoint, result.capabilities.vision);
+      }
       onNotify(result.reachable && result.modelAvailable
         ? `${endpoint.model} is reachable and returned a compatible response`
         : result.error || "The endpoint did not return a compatible response");
@@ -743,73 +872,129 @@ function Models({ preferences, updatePreferences, onNotify }: {
     }
   };
 
-  const bindAll = async () => {
-    const endpoint = endpoints.find((candidate) => candidate.active) ?? endpoints[0];
-    if (!endpoint) return onNotify("Add an endpoint first");
-    const { bindAllModelRoles, getCredentialLocally } = await import("../lib/llm");
-    try {
-      await bindAllModelRoles({
-        provider: endpoint.provider,
-        baseUrl: endpoint.baseUrl,
-        modelId: endpoint.model,
-        apiKey: getCredentialLocally(`endpoint_${endpoint.id}`) || undefined,
-      });
-      refreshRoles();
-      onNotify(`Bound ${endpoint.label} to all three agent roles`);
-    } catch (error) {
-      onNotify(error instanceof Error ? error.message : "Could not save model bindings");
+  const saveCredential = async (endpoint: SavedModelEndpoint) => {
+    const { storeCredentialLocally } = await import("../lib/llm");
+    const value = credentialDraft.trim();
+    storeCredentialLocally(`endpoint_${endpoint.id}`, value);
+    setEndpoints(endpoints.map((candidate) => candidate.id === endpoint.id
+      ? { ...candidate, keyMasked: value ? `••••${value.slice(-4)}` : "not set" }
+      : candidate));
+    // Re-bind every role owned by this endpoint so stale role credentials are
+    // replaced or explicitly cleared immediately.
+    for (const [role] of MODEL_ROLES) {
+      if (assignments[role] === endpoint.id) {
+        const { bindModelRole, defaultCapabilities } = await import("../lib/llm");
+        await bindModelRole(role, {
+          provider: endpoint.provider,
+          baseUrl: endpoint.baseUrl,
+          modelId: endpoint.model,
+          apiKey: value || undefined,
+        }, { ...defaultCapabilities(), vision: endpoint.vision });
+      }
     }
+    setCredentialId(null);
+    setCredentialDraft("");
+    onNotify(value ? "API key replaced" : "API key cleared");
   };
+
+  const visibleEndpoints = category === "app" ? appEndpoints : customEndpoints;
 
   return (
     <div>
-      <GroupLabel>Three Assignable Agent Roles</GroupLabel>
-      <div className="mb-3 space-y-2 rounded-md border border-white/8 bg-white/[0.03] p-3">
-        {([
-          ["tutor", "Role 1: Socratic Tutor Agent", "Chalkboard explanations, diagrams, progressive hints"],
-          ["generation", "Role 2: Test Generation Agent", "Creates grounded assessment items & rubrics"],
-          ["evaluator", "Role 3: Test Evaluator Agent", "Analytic rubric grading & explanation gate evaluation"],
-        ] as const).map(([role, label, desc]) => (
-          <div key={role} className="flex items-center justify-between border-b border-white/6 pb-2 last:border-0 last:pb-0">
-            <div><div className="text-[12px] font-medium text-fg">{label}</div><div className="text-[10.5px] text-dim">{desc}</div></div>
-            <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] ${boundRoles[role] ? "bg-accent/15 text-accent" : "bg-white/8 text-dim"}`}>{boundRoles[role] ? "Bound" : "Unbound"}</span>
-          </div>
-        ))}
-        <button onClick={() => { void bindAll(); }} className="mt-2 w-full rounded border border-accent/40 bg-accent/20 py-1.5 text-[11.5px] font-medium text-accent transition-colors hover:bg-accent/30">Single action: Assign active model to all 3 roles</button>
+      <GroupLabel>Models</GroupLabel>
+      <div className="mb-3 grid grid-cols-2 rounded-md bg-black/25 p-0.5" aria-label="Model categories">
+        <button
+          onClick={() => setCategory("app")}
+          className={`rounded px-2 py-1.5 text-[11.5px] transition-colors ${category === "app" ? "bg-white/[0.14] text-fg" : "text-dim hover:text-mut"}`}
+        >
+          Studyus models · {appEndpoints.length}
+        </button>
+        <button
+          onClick={() => setCategory("custom")}
+          className={`rounded px-2 py-1.5 text-[11.5px] transition-colors ${category === "custom" ? "bg-white/[0.14] text-fg" : "text-dim hover:text-mut"}`}
+        >
+          Custom endpoints · {customEndpoints.length}
+        </button>
       </div>
 
-      <GroupLabel>Saved endpoints</GroupLabel>
-      <div className="mb-2 space-y-1.5">
-        {endpoints.length === 0 && <div className="rounded-md border border-dashed border-white/10 p-4 text-center text-[11.5px] text-dim">No endpoint metadata is saved on this device.</div>}
-        {endpoints.map((endpoint) => (
-          <div key={endpoint.id} className={`flex items-center gap-2 rounded-md border p-2.5 transition-colors ${endpoint.active ? "border-accent/60 bg-accent/[0.05]" : "border-white/8 bg-white/[0.03]"}`}>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5"><span className="truncate text-[12.5px] font-medium text-fg">{endpoint.label}</span>{endpoint.active && <span className="rounded-full bg-accent/20 px-1.5 py-[1px] text-[9.5px] font-medium text-accent">Active</span>}</div>
-              <div className="truncate font-mono text-[10.5px] text-dim">{endpoint.model} · {endpoint.baseUrl} · key: {endpoint.keyMasked}</div>
+      {category === "app" && appEndpoints.length === 0 && (
+        <div className="mb-3 rounded-md border border-dashed border-white/10 p-4 text-center text-[11.5px] text-dim">
+          No app-provided model is bundled in this installation.
+        </div>
+      )}
+
+      <div className="mb-2 space-y-2">
+        {category === "custom" && customEndpoints.length === 0 && (
+          <div className="rounded-md border border-dashed border-white/10 p-4 text-center text-[11.5px] text-dim">
+            No custom endpoint is saved on this device.
+          </div>
+        )}
+        {visibleEndpoints.map((endpoint) => (
+          <div key={endpoint.id} className={`rounded-md border p-2.5 transition-colors ${endpoint.active ? "border-accent/50 bg-accent/[0.05]" : "border-white/8 bg-white/[0.03]"}`}>
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate text-[12.5px] font-medium text-fg">{endpoint.label}</span>
+                  {endpoint.active && <span className="rounded-full bg-accent/20 px-1.5 py-[1px] text-[9.5px] font-medium text-accent">Active</span>}
+                  {endpoint.vision && <span className="rounded-full bg-[#7dd3fc]/15 px-1.5 py-[1px] text-[9.5px] text-[#7dd3fc]">Vision</span>}
+                </div>
+                <div className="truncate font-mono text-[10.5px] text-dim">{endpoint.model} · {endpoint.baseUrl} · key: {endpoint.keyMasked}</div>
+              </div>
+              <button disabled={testingId === endpoint.id} onClick={() => { void testEndpoint(endpoint); }} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut hover:bg-white/[0.12] hover:text-fg disabled:opacity-50">{testingId === endpoint.id ? "Testing…" : "Test"}</button>
+              {!endpoint.active && <button onClick={() => activateEndpoint(endpoint.id)} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut hover:bg-white/[0.12] hover:text-fg">Use</button>}
+              {endpoint.provider !== "studyus" && <button onClick={() => { void removeEndpoint(endpoint); }} title="Remove saved endpoint" className="grid h-6 w-6 shrink-0 place-items-center rounded text-dim hover:bg-white/[0.07] hover:text-[#ff8b80]"><Trash2 size={12} /></button>}
             </div>
-            <button disabled={testingId === endpoint.id} onClick={() => { void testEndpoint(endpoint); }} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut transition-colors hover:bg-white/[0.12] hover:text-fg disabled:opacity-50">{testingId === endpoint.id ? "Testing…" : "Test"}</button>
-            {!endpoint.active && <button onClick={() => activateEndpoint(endpoint.id)} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut transition-colors hover:bg-white/[0.12] hover:text-fg">Use</button>}
-            <button onClick={() => { void removeEndpoint(endpoint); }} title="Remove saved endpoint" className="grid h-6 w-6 shrink-0 place-items-center rounded text-dim transition-colors hover:bg-white/[0.07] hover:text-[#ff8b80]"><Trash2 size={12} /></button>
+
+            <div className="mt-2 grid gap-1 border-t border-white/6 pt-2 sm:grid-cols-2">
+              {MODEL_ROLES.map(([role, label]) => (
+                <label key={role} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-[10.5px] text-mut hover:bg-white/[0.04] hover:text-fg">
+                  <input
+                    type="checkbox"
+                    checked={assignments[role] === endpoint.id}
+                    onChange={() => { void assignRole(role, endpoint); }}
+                    className="h-3.5 w-3.5 accent-[var(--accent)]"
+                  />
+                  {label}
+                </label>
+              ))}
+              <label className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-[10.5px] text-mut hover:bg-white/[0.04] hover:text-fg">
+                <input type="checkbox" checked={endpoint.vision} onChange={(event) => { void updateVision(endpoint, event.target.checked); }} className="h-3.5 w-3.5 accent-[var(--accent)]" />
+                Supports Vision input
+              </label>
+            </div>
+
+            {endpoint.provider !== "studyus" && (
+              credentialId === endpoint.id ? (
+                <div className="mt-2 flex gap-1.5 border-t border-white/6 pt-2">
+                  <input type="password" autoFocus value={credentialDraft} onChange={(event) => setCredentialDraft(event.target.value)} placeholder="New API key (blank clears it)" className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[11px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+                  <button onClick={() => { void saveCredential(endpoint); }} className="rounded-md bg-accent px-2.5 py-1 text-[10.5px] font-medium text-white">Save</button>
+                  <button onClick={() => { setCredentialId(null); setCredentialDraft(""); }} className="rounded-md px-2 py-1 text-[10.5px] text-dim hover:text-fg">Cancel</button>
+                </div>
+              ) : (
+                <button onClick={() => { setCredentialId(endpoint.id); setCredentialDraft(""); }} className="mt-2 text-[10.5px] text-dim hover:text-fg">Replace or clear API key</button>
+              )
+            )}
           </div>
         ))}
       </div>
 
-      {!showAdd ? (
+      {category === "custom" && (!showAdd ? (
         <button onClick={() => setShowAdd(true)} className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-white/12 py-2 text-[12px] text-mut transition-colors hover:border-white/20 hover:text-fg"><Plus size={12} />Add OpenAI-compatible endpoint</button>
       ) : (
         <div className="mb-2 space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-3">
-          <div className="mb-1 flex items-center justify-between"><span className="text-[11.5px] font-medium text-fg">New endpoint</span><button onClick={() => setShowAdd(false)} className="grid h-5 w-5 place-items-center rounded text-dim hover:bg-white/[0.07] hover:text-fg"><X size={11} /></button></div>
+          <div className="mb-1 flex items-center justify-between"><span className="text-[11.5px] font-medium text-fg">New custom endpoint</span><button onClick={() => setShowAdd(false)} className="grid h-5 w-5 place-items-center rounded text-dim hover:bg-white/[0.07] hover:text-fg"><X size={11} /></button></div>
           <input value={draft.label} onChange={(event) => setDraft((current) => ({ ...current, label: event.target.value }))} placeholder="Label (e.g. My local Llama)" className="w-full rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[12px] text-fg outline-none placeholder:text-[#6e6e6c]" />
           <div className="flex gap-2">
             <select value={draft.provider} onChange={(event) => setDraft((current) => ({ ...current, provider: event.target.value as SavedModelEndpoint["provider"] }))} className="w-[110px] rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[12px] text-fg outline-none"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="custom">Custom</option></select>
             <input value={draft.baseUrl} onChange={(event) => setDraft((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="Base URL" className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[11.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
           </div>
           <input value={draft.model} onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))} placeholder="Model identifier" className="w-full rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[11.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
-          <input type="password" value={draft.keyMasked} onChange={(event) => setDraft((current) => ({ ...current, keyMasked: event.target.value }))} placeholder="API key" className="w-full rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[11.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+          <input type="password" value={draft.keyMasked} onChange={(event) => setDraft((current) => ({ ...current, keyMasked: event.target.value }))} placeholder="API key (optional for a local endpoint)" className="w-full rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[11.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+          <label className="flex items-center gap-2 text-[11px] text-mut"><input type="checkbox" checked={draft.vision} onChange={(event) => setDraft((current) => ({ ...current, vision: event.target.checked }))} className="h-3.5 w-3.5 accent-[var(--accent)]" />This model supports Vision image input</label>
           <div className="flex items-center justify-end gap-2"><button onClick={() => setShowAdd(false)} className="rounded-md px-2.5 py-1 text-[11.5px] text-mut hover:text-fg">Cancel</button><button onClick={() => { void commitEndpoint(); }} className="rounded-md bg-accent px-3 py-1 text-[11.5px] font-medium text-white transition-colors hover:bg-accent-deep">Save endpoint</button></div>
         </div>
-      )}
-      <p className="px-1 text-[10.5px] leading-relaxed text-dim">Endpoint metadata and obfuscated key labels persist in preferences. API key values use the existing local credential store and are never included in search or usage displays.</p>
+      ))}
+      <p className="px-1 text-[10.5px] leading-relaxed text-dim">Model registrations and role assignments persist on this device. API key values remain in the local credential store and are not included in searchable settings metadata.</p>
     </div>
   );
 }

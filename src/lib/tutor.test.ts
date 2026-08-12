@@ -20,6 +20,7 @@ import {
   clearTutorSessionLearnerMemory,
   forgetTutorSessionLearnerObservation,
   runTutorMathToolCommand,
+  selectTutorFileContentParts,
   selectTutorImageContentParts,
   testTutorStudioPrompt,
   askTutorTurn,
@@ -379,18 +380,18 @@ describe("Tutor Studio runtime policy", () => {
       capabilities: { ...defaultCapabilities(), vision: true },
     };
     const attachments = [
-      { name: "one.png", kind: "image", dataUrl: "data:image/png;base64,one" },
+      { name: "one.png", kind: "image", dataUrl: "data:image/png;base64,b25l" },
       { name: "notes.txt", kind: "file", dataUrl: "data:text/plain;base64,bm90ZXM=" },
       { name: "bad.png", kind: "image", dataUrl: "https://example.com/bad.png" },
-      { name: "two.jpg", kind: "image", dataUrl: "data:image/jpeg;base64,two" },
-      { name: "three.webp", kind: "image", dataUrl: "data:image/webp;base64,three" },
-      { name: "four.gif", kind: "image", dataUrl: "data:image/gif;base64,four" },
+      { name: "two.jpg", kind: "image", dataUrl: "data:image/jpeg;base64,dHdv" },
+      { name: "three.webp", kind: "image", dataUrl: "data:image/webp;base64,dGhyZWU=" },
+      { name: "four.gif", kind: "image", dataUrl: "data:image/gif;base64,Zm91cg==" },
     ];
 
     expect(selectTutorImageContentParts(attachments, DEFAULT_TUTOR.tools, true, endpoint)).toEqual([
-      { type: "image_url", image_url: { url: "data:image/png;base64,one", detail: "auto" } },
-      { type: "image_url", image_url: { url: "data:image/jpeg;base64,two", detail: "auto" } },
-      { type: "image_url", image_url: { url: "data:image/webp;base64,three", detail: "auto" } },
+      { type: "image_url", image_url: { url: "data:image/png;base64,b25l", detail: "auto" } },
+      { type: "image_url", image_url: { url: "data:image/jpeg;base64,dHdv", detail: "auto" } },
+      { type: "image_url", image_url: { url: "data:image/webp;base64,dGhyZWU=", detail: "auto" } },
     ]);
     expect(selectTutorImageContentParts(
       attachments,
@@ -405,6 +406,24 @@ describe("Tutor Studio runtime policy", () => {
       true,
       { ...endpoint, capabilities: { ...endpoint.capabilities, vision: false } }
     )).toEqual([]);
+  });
+
+  it("processes only bounded txt and Markdown attachments behind tool and privacy gates", () => {
+    const attachments = [
+      { name: "notes.txt", kind: "file", mimeType: "text/plain", textContent: "Velocity is displacement per unit time." },
+      { name: "proof.md", kind: "file", mimeType: "text/markdown", textContent: "# Proof outline" },
+      { name: "data.csv", kind: "file", mimeType: "text/csv", textContent: "x,y" },
+    ];
+    const parts = selectTutorFileContentParts(attachments, DEFAULT_TUTOR.tools, true);
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toMatchObject({ type: "text", text: expect.stringContaining("Velocity is displacement") });
+    expect(parts[1]).toMatchObject({ type: "text", text: expect.stringContaining("# Proof outline") });
+    expect(selectTutorFileContentParts(
+      attachments,
+      { ...DEFAULT_TUTOR.tools, fileProcessing: false },
+      true
+    )).toEqual([]);
+    expect(selectTutorFileContentParts(attachments, DEFAULT_TUTOR.tools, false)).toEqual([]);
   });
 
   it("keeps Tutor Studio model testing isolated from sessions, learner memory, and diagnostics", async () => {

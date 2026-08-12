@@ -31,6 +31,23 @@ describe("Three-Role LLM Engine & Security", () => {
     expect(settingsStr).not.toContain("sk-secret-12345");
   });
 
+  it("replaces and clears stale role credentials when an assignment changes", async () => {
+    await bindModelRole("tutor", {
+      provider: "openai",
+      baseUrl: "https://api.example/v1",
+      modelId: "private-model",
+      apiKey: "sk-old-provider",
+    });
+    expect(getCredentialLocally("role_tutor")).toBe("sk-old-provider");
+
+    await bindModelRole("tutor", {
+      provider: "custom",
+      baseUrl: "http://localhost:11434/v1",
+      modelId: "local-model",
+    });
+    expect(getCredentialLocally("role_tutor")).toBe("");
+  });
+
   it("supports binding one model to all three roles in a single action", async () => {
     await bindAllModelRoles({
       provider: "custom",

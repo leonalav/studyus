@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  buildAgentInputContent,
   callStructuredAgent,
   chatCompletion,
   extractJsonPayload,
@@ -26,6 +27,84 @@ function completionResponse(content: unknown): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("agent file and vision input", () => {
+  it("inlines text files as untrusted reference content for every endpoint", () => {
+    const content = buildAgentInputContent("Review this.", [{
+      name: "notes.md",
+      kind: "file",
+      mimeType: "text/markdown",
+      textContent: "# Newton's laws",
+    }], ENDPOINT);
+
+    expect(content).toEqual([
+      { type: "text", text: "Review this." },
+      expect.objectContaining({ type: "text", text: expect.stringContaining("# Newton's laws") }),
+    ]);
+  });
+
+  it("rejects unsupported text extensions and malformed image data URLs", () => {
+    expect(buildAgentInputContent("Review.", [
+      { name: "records.csv", kind: "file", textContent: "a,b" },
+    ], ENDPOINT)).toBe("Review.");
+    expect(buildAgentInputContent("Inspect.", [
+      { name: "fake.png", kind: "image", dataUrl: "data:image/png;base64,not valid!" },
+    ], { capabilities: { ...ENDPOINT.capabilities, vision: true } })).toBe("Inspect.");
+  });
+
+  it("sends valid image data only when the assigned endpoint has vision enabled", () => {
+    const attachment = { name: "figure.avif", kind: "image" as const, dataUrl: "data:image/avif;base64,AAAA" };
+    expect(buildAgentInputContent("Inspect this.", [attachment], ENDPOINT)).toBe("Inspect this.");
+    expect(buildAgentInputContent("Inspect this.", [attachment], {
+      capabilities: { ...ENDPOINT.capabilities, vision: true },
+    })).toEqual([
+      { type: "text", text: "Inspect this." },
+      { type: "image_url", image_url: { url: attachment.dataUrl, detail: "auto" } },
+    ]);
+  });
+
+  it("keeps mixed attachment parts in the browser endpoint request body", async () => {
+    const content = buildAgentInputContent("Use these.", [
+      { name: "facts.txt", kind: "file", textContent: "A bounded reference." },
+      { name: "plot.png", kind: "image", dataUrl: "data:image/png;base64,AAAA" },
+    ], { capabilities: { ...ENDPOINT.capabilities, vision: true } });
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => completionResponse("ok"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await chatCompletion({
+      endpoint: { ...ENDPOINT, capabilities: { ...ENDPOINT.capabilities, vision: true } },
+      messages: [{ role: "user", content }],
+      jsonMode: false,
+      temperature: 0,
+      timeoutMs: 1_000,
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.messages[0].content).toEqual(content);
+  });
+
+  it("keeps mixed attachment parts in the native endpoint request body", async () => {
+    const content = buildAgentInputContent("Use this.", [
+      { name: "facts.md", kind: "file", textContent: "# Reference" },
+    ], ENDPOINT);
+    const invoke = vi.fn(async (_cmd: string, _args?: Record<string, unknown>) => ({
+      status: 200,
+      body: await completionResponse("ok").text(),
+    }));
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+
+    await chatCompletion({
+      endpoint: ENDPOINT,
+      messages: [{ role: "user", content }],
+      jsonMode: false,
+      temperature: 0,
+      timeoutMs: 1_000,
+    });
+
+    const args = invoke.mock.calls[0][1] as { bodyJson: string };
+    expect(JSON.parse(args.bodyJson).messages[0].content).toEqual(content);
+  });
 });
 
 describe("agent request cancellation", () => {

@@ -349,7 +349,8 @@ export default function App() {
             // A settings pick opens the Settings modal landed on that section,
             // never a note tab. Validate against the known section ids before
             // handing it to the modal.
-            const known = ["about", "appearance", "tutor", "notifications", "models"];
+            const known = ["about", "appearance", "notifications", "models"];
+            if (item.settingId === "tutor") notify("Tutor Studio is coming soon in a newer update");
             setSettingsSection(
               known.includes(item.settingId)
                 ? (item.settingId as typeof settingsSection)

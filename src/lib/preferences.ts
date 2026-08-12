@@ -64,6 +64,7 @@ export const TUTOR_TOOL_IDS = [
   "chemistry",
   "graphTheory",
   "imageAnalysis",
+  "fileProcessing",
 ] as const;
 export type TutorToolId = typeof TUTOR_TOOL_IDS[number];
 export type TutorToolPermissions = Record<TutorToolId, boolean>;
@@ -178,6 +179,7 @@ export interface TutorPrivacyPolicy {
   allowLearnerModelInPrompts: boolean;
   allowCurriculumInPrompts: boolean;
   allowImageDataInPrompts: boolean;
+  allowFileDataInPrompts: boolean;
   includeProfileIdentity: boolean;
 }
 
@@ -236,11 +238,13 @@ export interface ProfilePreferences {
 export interface SavedModelEndpoint {
   id: string;
   label: string;
-  provider: "openai" | "anthropic" | "custom";
+  provider: "openai" | "anthropic" | "custom" | "studyus";
   baseUrl: string;
   model: string;
   keyMasked: string;
   active: boolean;
+  /** Explicit endpoint capability. It is verified by the endpoint test when enabled. */
+  vision: boolean;
 }
 
 export interface StudyusPreferences {
@@ -351,6 +355,7 @@ export const DEFAULT_TUTOR: TutorPreferences = {
     allowLearnerModelInPrompts: true,
     allowCurriculumInPrompts: true,
     allowImageDataInPrompts: true,
+    allowFileDataInPrompts: true,
     includeProfileIdentity: false,
   },
   advanced: {
@@ -448,11 +453,12 @@ function sanitizeEndpoint(value: unknown): SavedModelEndpoint | null {
   return {
     id,
     label,
-    provider: enumValue(endpoint.provider, ["openai", "anthropic", "custom"], "custom"),
+    provider: enumValue(endpoint.provider, ["openai", "anthropic", "custom", "studyus"], "custom"),
     baseUrl,
     model,
     keyMasked: textValue(endpoint.keyMasked, "not set", 80),
     active: booleanValue(endpoint.active, false),
+    vision: booleanValue(endpoint.vision, /vision|gpt-4o|gpt-4\.1|claude-3|claude-4|gemini/i.test(model)),
   };
 }
 
@@ -632,6 +638,7 @@ function sanitizeTutor(value: unknown): TutorPreferences {
       allowLearnerModelInPrompts: booleanValue(privacy.allowLearnerModelInPrompts, DEFAULT_TUTOR.privacy.allowLearnerModelInPrompts),
       allowCurriculumInPrompts: booleanValue(privacy.allowCurriculumInPrompts, DEFAULT_TUTOR.privacy.allowCurriculumInPrompts),
       allowImageDataInPrompts: booleanValue(privacy.allowImageDataInPrompts, DEFAULT_TUTOR.privacy.allowImageDataInPrompts),
+      allowFileDataInPrompts: booleanValue(privacy.allowFileDataInPrompts, DEFAULT_TUTOR.privacy.allowFileDataInPrompts),
       includeProfileIdentity: booleanValue(privacy.includeProfileIdentity, DEFAULT_TUTOR.privacy.includeProfileIdentity),
     },
     advanced: {
