@@ -479,6 +479,7 @@ export function ChatDock({
 }) {
   const [val, setVal] = useState("");
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [attachmentError, setAttachmentError] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   // Messages present when the dock mounts are restored history. Only tutor
   // messages arriving afterwards receive the live generative-text treatment.
@@ -503,14 +504,27 @@ export function ChatDock({
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (evt) => {
-        const url = evt.target?.result as string;
-        onAddAttachment("image", file.name, url);
-      };
-      reader.readAsDataURL(file);
+    e.target.value = "";
+    if (!file) return;
+    // The Tutor transport accepts data URLs up to 8M characters. Reject before
+    // FileReader allocates a larger base64 copy in the webview.
+    if (!file.type.startsWith("image/")) {
+      setAttachmentError("Choose an image file.");
+      return;
     }
+    if (file.size > 5_000_000) {
+      setAttachmentError("Images must be 5 MB or smaller.");
+      return;
+    }
+    setAttachmentError("");
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const url = evt.target?.result;
+      if (typeof url === "string" && url.startsWith("data:image/")) onAddAttachment("image", file.name, url);
+      else setAttachmentError("That image could not be read.");
+    };
+    reader.onerror = () => setAttachmentError("That image could not be read.");
+    reader.readAsDataURL(file);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -566,8 +580,9 @@ export function ChatDock({
 
   const attachmentsBar = (
     <div className="flex items-center gap-1.5 overflow-x-auto border-b border-white/[0.08] px-2.5 py-1.5">
+      {attachmentError && <span className="shrink-0 font-mono text-[9.5px] text-red-300" role="alert">{attachmentError}</span>}
       {attachments.length === 0 ? (
-        <span className="font-mono text-[9.5px] text-white/30">No attachments · click File, Image, or Voice below</span>
+        !attachmentError && <span className="font-mono text-[9.5px] text-white/30">No attachments · click File, Image, or Voice below</span>
       ) : (
         <>
           {attachments.map((a, i) => (

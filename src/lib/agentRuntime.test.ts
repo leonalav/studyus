@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   callStructuredAgent,
+  chatCompletion,
   extractJsonPayload,
   invalid,
   type ResolvedRoleEndpoint,
@@ -25,6 +26,75 @@ function completionResponse(content: unknown): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("agent request cancellation", () => {
+  function hangingFetch(_url: string | URL | Request, init?: RequestInit): Promise<Response> {
+    return new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      const abort = () => reject(new DOMException("Aborted", "AbortError"));
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+
+  it("turns the configured deadline into a timeout error", async () => {
+    vi.stubGlobal("fetch", vi.fn(hangingFetch));
+
+    await expect(chatCompletion({
+      endpoint: ENDPOINT,
+      messages: [{ role: "user", content: "Wait forever." }],
+      jsonMode: false,
+      temperature: 0,
+      timeoutMs: 5,
+    })).rejects.toMatchObject({ failureClass: "timeout" });
+  });
+
+  it("preserves caller cancellation as an aborted error rather than a timeout", async () => {
+    vi.stubGlobal("fetch", vi.fn(hangingFetch));
+    const controller = new AbortController();
+    const request = chatCompletion({
+      endpoint: ENDPOINT,
+      messages: [{ role: "user", content: "Cancel me." }],
+      jsonMode: false,
+      temperature: 0,
+      timeoutMs: 1_000,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(request).rejects.toMatchObject({ failureClass: "aborted" });
+  });
+
+  it("deadline-races a native Tauri request that cannot consume AbortSignal", async () => {
+    const invoke = vi.fn(() => new Promise<never>(() => undefined));
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+
+    await expect(chatCompletion({
+      endpoint: ENDPOINT,
+      messages: [{ role: "user", content: "Native timeout." }],
+      jsonMode: false,
+      temperature: 0,
+      timeoutMs: 5,
+    })).rejects.toMatchObject({ failureClass: "timeout" });
+    expect(invoke).toHaveBeenCalledWith("chat_completion", expect.any(Object));
+  });
+
+  it("caller-cancels a native Tauri request without waiting for invoke", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke: vi.fn(() => new Promise<never>(() => undefined)) });
+    const controller = new AbortController();
+    const request = chatCompletion({
+      endpoint: ENDPOINT,
+      messages: [{ role: "user", content: "Cancel native." }],
+      jsonMode: false,
+      temperature: 0,
+      timeoutMs: 1_000,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(request).rejects.toMatchObject({ failureClass: "aborted" });
+  });
 });
 
 describe("structured agent runtime recovery", () => {

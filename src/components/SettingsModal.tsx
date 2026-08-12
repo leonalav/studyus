@@ -10,11 +10,11 @@ import {
   Moon,
   Plus,
   Settings,
-  Star,
   Sun,
   Trash2,
   X,
 } from "lucide-react";
+import { TutorStudio } from "./settings/TutorStudio";
 import {
   DEFAULT_PREFERENCES,
   PREFERENCES_CHANGED_EVENT,
@@ -27,8 +27,6 @@ import {
   type SavedModelEndpoint,
   type StudyusPreferences,
   type SummaryCadence,
-  type TutorDifficulty,
-  type TutorStylePreference,
 } from "../lib/preferences";
 interface Props {
   open: boolean;
@@ -42,7 +40,7 @@ export type Section = "root" | "about" | "appearance" | "tutor" | "notifications
 const SECTIONS: { id: Exclude<Section, "root">; label: string; desc: string }[] = [
   { id: "about", label: "About me", desc: "Profile, usage, plans and account" },
   { id: "appearance", label: "Appearance", desc: "Theme, font, layout and accessibility" },
-  { id: "tutor", label: "AI Tutor & Study", desc: "Behavior, personality, sessions and reminders" },
+  { id: "tutor", label: "Tutor Studio", desc: "Identity, teaching policy, knowledge, memory and tools" },
   { id: "notifications", label: "Notifications", desc: "Study reminders, results and summaries" },
   { id: "models", label: "Model configuration", desc: "Your model endpoints and agent bindings" },
 ];
@@ -251,7 +249,7 @@ export function SettingsModal({ open, onClose, onNotify, initialSection = "root"
             />
           )}
           {section === "tutor" && (
-            <TutorAndStudy preferences={preferences} updatePreferences={updatePreferences} onNotify={onNotify} />
+            <TutorStudio preferences={preferences} updatePreferences={updatePreferences} onNotify={onNotify} />
           )}
           {section === "notifications" && (
             <Notifications preferences={preferences} updatePreferences={updatePreferences} onNotify={onNotify} />
@@ -560,117 +558,7 @@ function Appearance({ value, onChange }: { value: AppearancePreferences; onChang
   );
 }
 
-/* ── AI Tutor & Study ─────────────────────────────────────── */
-
-function TutorAndStudy({ preferences, updatePreferences, onNotify }: {
-  preferences: StudyusPreferences;
-  updatePreferences: (updater: (current: StudyusPreferences) => StudyusPreferences) => void;
-  onNotify: (text: string) => void;
-}) {
-  const tutor = preferences.tutor;
-  const [customName, setCustomName] = useState("");
-  const activeStyle = tutor.styles.find((style) => style.id === tutor.activeStyleId) ?? tutor.styles[0];
-
-  const updateTutor = (patch: Partial<typeof tutor>) => updatePreferences((current) => ({
-    ...current,
-    tutor: { ...current.tutor, ...patch },
-  }));
-  const updateStyle = (patch: Partial<TutorStylePreference>) => updateTutor({
-    styles: tutor.styles.map((style) => style.id === activeStyle.id ? { ...style, ...patch } : style),
-  });
-
-  const saveStyle = () => {
-    const name = customName.trim();
-    if (!name) return onNotify("Give the style a name first");
-    const id = `custom-${Date.now()}`;
-    updateTutor({ styles: [...tutor.styles, { ...activeStyle, id, name, built: false }], activeStyleId: id });
-    setCustomName("");
-    onNotify(`Saved tutor style “${name}”`);
-  };
-
-  const deleteStyle = (id: string) => {
-    const styles = tutor.styles.filter((style) => style.id !== id);
-    updateTutor({ styles, activeStyleId: tutor.activeStyleId === id ? (styles[0]?.id ?? "witty") : tutor.activeStyleId });
-    onNotify("Tutor style deleted");
-  };
-
-  return (
-    <div>
-      <GroupLabel>Talking style</GroupLabel>
-      <div className="mb-3 grid grid-cols-3 gap-1.5">
-        {tutor.styles.map((style) => (
-          <div key={style.id} className="relative">
-            <button
-              onClick={() => updateTutor({ activeStyleId: style.id })}
-              className={`w-full rounded-md border p-2 text-left transition-colors ${tutor.activeStyleId === style.id ? "border-accent bg-accent/[0.08]" : "border-white/8 bg-white/[0.03] hover:bg-white/[0.06]"}`}
-            >
-              <div className="mb-0.5 flex items-center gap-1">{style.built && <Star size={9} className="text-dim" />}<span className="truncate text-[12px] font-medium text-fg">{style.name}</span></div>
-              <div className="truncate text-[10.5px] text-dim">{style.tone} · {style.approach}</div>
-            </button>
-            {!style.built && (
-              <button onClick={() => deleteStyle(style.id)} title="Delete style" className="absolute right-1 top-1 grid h-4 w-4 place-items-center rounded text-dim opacity-0 transition-opacity hover:bg-white/[0.1] hover:text-fg group-hover:opacity-100" style={{ opacity: 1 }}><X size={10} /></button>
-            )}
-          </div>
-        ))}
-      </div>
-
-      <GroupLabel>Customize “{activeStyle.name}”</GroupLabel>
-      <Row label="Tone">
-        <select value={activeStyle.tone} onChange={(event) => updateStyle({ tone: event.target.value })} className="w-[180px] rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[12.5px] text-fg outline-none">
-          {["Playful", "Formal", "Encouraging", "Direct", "Narrative", "Neutral"].map((tone) => <option key={tone}>{tone}</option>)}
-        </select>
-      </Row>
-      <Row label="Problem approach">
-        <select value={activeStyle.approach} onChange={(event) => updateStyle({ approach: event.target.value })} className="w-[180px] rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[12.5px] text-fg outline-none">
-          {["Analogy-first", "First principles", "Socratic", "Question-led", "Result-first", "Worked example", "History & context"].map((approach) => <option key={approach}>{approach}</option>)}
-        </select>
-      </Row>
-      {([
-        ["verbosity", "Verbosity", "Short answers ← → full explanations"],
-        ["patience", "Patience", "Straight to it ← → walks with you"],
-        ["challenge", "Challenge level", "Gentle ← → keeps pushing"],
-        ["humor", "Humor", "Deadpan ← → playful"],
-      ] as const).map(([key, label, hint]) => (
-        <div key={key} className="rounded-md px-1 py-2">
-          <div className="mb-1 flex items-baseline justify-between"><span className="text-[12.5px] text-fg">{label}</span><span className="font-mono text-[11px] text-dim">{activeStyle[key]}</span></div>
-          <Slider value={activeStyle[key]} onChange={(value) => updateStyle({ [key]: value })} />
-          <div className="mt-0.5 text-[10.5px] text-dim">{hint}</div>
-        </div>
-      ))}
-
-      <GroupLabel>Preview</GroupLabel>
-      <div className="mb-3 rounded-md border border-white/8 bg-white/[0.03] p-3">
-        <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-dim">AI Response</div>
-        <p className="text-[12.5px] italic leading-relaxed text-fg/85">“{activeStyle.preview}”</p>
-      </div>
-      <div className="mb-3 flex items-center gap-2 rounded-md border border-white/8 bg-white/[0.03] p-2">
-        <input value={customName} onChange={(event) => setCustomName(event.target.value)} placeholder="Save current settings as…" className="min-w-0 flex-1 bg-transparent px-1 text-[12.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
-        <button onClick={saveStyle} className="flex items-center gap-1 rounded bg-accent px-2.5 py-1 text-[11.5px] font-medium text-white transition-colors hover:bg-accent-deep"><Plus size={11} />Save style</button>
-      </div>
-
-      <GroupLabel>Session pacing</GroupLabel>
-      <Row label={`Session length · ${tutor.sessionLength} min`}>
-        <div className="w-[180px]"><Slider value={tutor.sessionLength} onChange={(sessionLength) => updateTutor({ sessionLength })} min={10} max={90} /></div>
-      </Row>
-      <Row label={`Break every · ${tutor.breakEvery} min`}>
-        <div className="w-[180px]"><Slider value={tutor.breakEvery} onChange={(breakEvery) => updateTutor({ breakEvery })} min={10} max={60} /></div>
-      </Row>
-      <Row label="Difficulty" hint="How hard the practice problems get">
-        <Segment<TutorDifficulty>
-          value={tutor.difficulty}
-          onChange={(difficulty) => updateTutor({ difficulty })}
-          options={[{ id: "easier", label: "Easier" }, { id: "adaptive", label: "Adaptive" }, { id: "harder", label: "Harder" }]}
-        />
-      </Row>
-      <Row label="Voice replies" hint="Read tutor answers aloud">
-        <Toggle label="Voice replies" on={tutor.voiceReplies} onChange={(voiceReplies) => updateTutor({ voiceReplies })} />
-      </Row>
-      <Row label="Auto-notes" hint="Collect key points on every session">
-        <Toggle label="Auto-notes" on={tutor.autoNotes} onChange={(autoNotes) => updateTutor({ autoNotes })} />
-      </Row>
-    </div>
-  );
-}
+/* ── Tutor Studio is implemented in settings/TutorStudio.tsx. ── */
 
 /* ── Notifications ────────────────────────────────────────── */
 

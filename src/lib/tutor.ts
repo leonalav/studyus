@@ -32,20 +32,32 @@ import {
   asNonEmptyString,
   asRecord,
   callStructuredAgent,
+  chatCompletion,
   invalid,
   resolveRoleEndpoint,
+  type ContentPart,
   type ResolvedRoleEndpoint,
   type StructuredCallResult,
   type ValidationResult,
 } from "./agentRuntime";
 import { TUTOR_AGENT_PROMPT_V1 } from "./llm";
-import { getActiveTutorContextLearnerSummary } from "./learnerModel";
+import {
+  getActiveTutorContextLearnerSummary,
+  pruneLearnerModelEntries,
+  recordLearnerModelEntry,
+} from "./learnerModel";
 import { getEvidenceForSelectedNodes } from "./curriculum";
 import { buildOnboardingReminder, type OnboardingAnswers, type OnboardingQuestion } from "../data/tutor";
 import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
+import type { MathNode, FunctionNode, OperatorNode, SymbolNode } from "mathjs";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
-import { buildTutorPreferenceReminder } from "./preferences";
+import {
+  buildTutorPreferenceReminder,
+  loadPreferences,
+  type TutorPreferences,
+  type TutorToolPermissions,
+} from "./preferences";
 
 export const TUTOR_PROMPT_VERSION = "tutor_v4";
 export const TUTOR_SCHEMA_VERSION = "tutor_turn_v3";
@@ -164,10 +176,16 @@ export async function buildTutorEvidenceCards(boundNodes: string[]): Promise<Tut
   };
 
   const cards: TutorEvidenceCard[] = [];
-  // Stable ordering: by chunk page then ordinal, so handle numbering is
-  // deterministic across turns for the same bound nodes.
-  const ordered = [...chunks].sort((a, b) => a.page - b.page || a.chunkOrdinal - b.chunkOrdinal);
-  for (const ch of ordered) {
+  // Respect the Tutor Studio's configured source/node priority first, then use
+  // page order within each selected section. Handles therefore remain stable
+  // and the user's priority setting has concrete retrieval behavior.
+  const nodeRank = new Map(boundNodes.map((id, index) => [id, index]));
+  const ordered = [...chunks].sort((a, b) =>
+    (nodeRank.get(a.nodeId) ?? boundNodes.length) - (nodeRank.get(b.nodeId) ?? boundNodes.length) ||
+    a.page - b.page ||
+    a.chunkOrdinal - b.chunkOrdinal
+  );
+  for (const ch of ordered.slice(0, 24)) {
     const excerpt = ch.textContent.length > EVIDENCE_EXCERPT_CHARS
       ? ch.textContent.slice(0, EVIDENCE_EXCERPT_CHARS) + "…"
       : ch.textContent;
@@ -178,6 +196,321 @@ export async function buildTutorEvidenceCards(boundNodes: string[]): Promise<Tut
     });
   }
   return cards;
+}
+
+const MAX_STUDIO_KNOWLEDGE_NODES = 16;
+
+/** Resolve the user's durable source selection into the evidence nodes used by a turn. */
+export async function resolveTutorKnowledgeNodes(
+  sessionNodes: string[],
+  preferences: TutorPreferences
+): Promise<string[]> {
+  if (!preferences.privacy.allowCurriculumInPrompts ||
+      !preferences.tools.knowledgeSearch ||
+      !preferences.tools.pdfKnowledge) return [];
+
+  const policy = preferences.knowledge;
+  if (policy.accessMode === "session") return [...new Set(sessionNodes)].slice(0, MAX_STUDIO_KNOWLEDGE_NODES);
+
+  const db = await getDb();
+  const selected: string[] = [];
+  const selectedSources = new Set(policy.selectedSourceIds.slice(0, 50));
+  const sourceOrder = [
+    ...policy.sourcePriority.filter((sourceId) => selectedSources.has(sourceId)),
+    ...policy.selectedSourceIds.filter((sourceId) => !policy.sourcePriority.includes(sourceId)),
+  ].slice(0, 50);
+  const explicitBySource = new Map<string, string[]>();
+  const requestedNodeIds = policy.selectedNodeIds.slice(0, 200);
+  if (requestedNodeIds.length) {
+    const placeholders = requestedNodeIds.map(() => "?").join(",");
+    const result = db.exec(`
+      SELECT id, source_id FROM curriculum_nodes
+      WHERE id IN (${placeholders})
+      ORDER BY depth, ordinal, start_page
+      LIMIT 200;
+    `, requestedNodeIds);
+    for (const row of result[0]?.values ?? []) {
+      const sourceId = String(row[1]);
+      if (!sourceOrder.includes(sourceId)) continue;
+      const ids = explicitBySource.get(sourceId) ?? [];
+      ids.push(String(row[0]));
+      explicitBySource.set(sourceId, ids);
+    }
+  }
+
+  for (const sourceId of sourceOrder) {
+    if (selected.length >= MAX_STUDIO_KNOWLEDGE_NODES) break;
+    const explicit = explicitBySource.get(sourceId) ?? [];
+    if (explicit.length) {
+      selected.push(...explicit);
+      continue;
+    }
+    // Selecting individual sections narrows that source. With no granular
+    // selection for this source, use a bounded shallow source overview.
+    const result = db.exec(`
+      SELECT id FROM curriculum_nodes
+      WHERE source_id = ? AND depth <= 1
+      ORDER BY depth, ordinal, start_page
+      LIMIT ?;
+    `, [sourceId, MAX_STUDIO_KNOWLEDGE_NODES - selected.length]);
+    selected.push(...(result[0]?.values ?? []).map((row) => String(row[0])));
+  }
+
+  if (policy.accessMode === "all") {
+    const result = db.exec(`
+      SELECT id FROM curriculum_nodes
+      WHERE depth <= 1
+      ORDER BY source_id, depth, ordinal, start_page
+      LIMIT ?;
+    `, [MAX_STUDIO_KNOWLEDGE_NODES]);
+    selected.push(...(result[0]?.values ?? []).map((row) => String(row[0])));
+  }
+
+  const merged = policy.accessMode === "selected-only"
+    ? selected
+    : [...selected, ...sessionNodes];
+  return [...new Set(merged)].slice(0, MAX_STUDIO_KNOWLEDGE_NODES);
+}
+
+function visualizationTool(intent: VisualizationIntent): keyof TutorToolPermissions {
+  switch (intent.type) {
+    case "geometry": return "geometry";
+    case "function": return "functionGraphing";
+    case "graph3d": return "graphing3d";
+    case "chart": return "dataVisualization";
+    case "equation": return "equationRendering";
+    case "physics": return "physics";
+    case "biology": return "biology";
+    case "circuit": return "circuits";
+    case "chemistry": return "chemistry";
+    case "graph_theory": return "graphTheory";
+    case "diagram": return "diagrams";
+  }
+}
+
+function blockAllowedByTools(block: BoardBlockSpec, tools: TutorToolPermissions): boolean {
+  return block.kind === "visualization"
+    ? tools[visualizationTool(block.intent)]
+    : tools.boardWriting;
+}
+
+/**
+ * Defense-in-depth permission boundary. Prompt policy guides the model, while
+ * this deterministic filter guarantees disabled Chalkboard tools cannot reach
+ * StudyRoom even when a model ignores the instruction.
+ */
+function visualizationUpdateAllowed(
+  op: Extract<BoardOp, { op: "update_visualization" }>,
+  tools: TutorToolPermissions,
+  board?: BoardDoc
+): boolean {
+  if (!tools.boardEditing) return false;
+  if (op.intent) return tools[visualizationTool(op.intent)];
+
+  const target = op.targetAnchor
+    ? board?.blocks.find((block) => block.id === op.targetAnchor)
+    : typeof op.targetIndex === "number"
+      ? board?.blocks[op.targetIndex]
+      : undefined;
+  if (target?.kind === "visualization") return tools[visualizationTool(target.intent)];
+
+  // A state-only update with an unresolved target cannot be assigned to a
+  // semantic toolset. Fail closed whenever any visualization permission is off.
+  const visualizationTools: Array<keyof TutorToolPermissions> = [
+    "geometry", "diagrams", "functionGraphing", "graphing3d", "dataVisualization",
+    "equationRendering", "physics", "biology", "circuits", "chemistry", "graphTheory",
+  ];
+  return visualizationTools.every((id) => tools[id]);
+}
+
+export function enforceTutorToolPolicy(
+  turn: TutorTurn,
+  tools: TutorToolPermissions,
+  board?: BoardDoc
+): TutorTurn {
+  const boardOps = turn.boardOps.flatMap<BoardOp>((op) => {
+    switch (op.op) {
+      case "write_title":
+      case "write_text":
+      case "write_bullets":
+      case "write_latex":
+      case "write_callout":
+        return tools.boardWriting ? [op] : [];
+      case "visualize":
+        return tools[visualizationTool(op.intent)] ? [op] : [];
+      case "replace_block":
+      case "insert_after":
+        return tools.boardEditing && blockAllowedByTools(op.block, tools) ? [op] : [];
+      case "delete_block":
+      case "revise_text":
+        return tools.boardEditing ? [op] : [];
+      case "update_visualization":
+        return visualizationUpdateAllowed(op, tools, board) ? [op] : [];
+      case "spawn_thread": {
+        if (!tools.threads) return [];
+        const initialBlocks = op.initialBlocks.filter((block) => blockAllowedByTools(block, tools));
+        return [{ ...op, initialBlocks }];
+      }
+    }
+  });
+  return { ...turn, boardOps };
+}
+
+const SAFE_MATH_FUNCTIONS = new Set([
+  "abs", "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh",
+  "cbrt", "ceil", "cos", "cosh", "exp", "floor", "gcd", "hypot", "lcm",
+  "log", "log10", "log2", "max", "min", "mod", "nthRoot", "round",
+  "sign", "sin", "sinh", "sqrt", "tan", "tanh",
+]);
+const SAFE_CALCULATOR_SYMBOLS = new Set(["e", "E", "i", "Infinity", "NaN", "phi", "pi", "tau"]);
+const SAFE_MATH_OPERATORS = new Set(["+", "-", "*", "/", "^", "%", "mod"]);
+
+function parseBoundedMathExpression(
+  math: typeof import("mathjs"),
+  expression: string,
+  allowVariables: boolean
+): MathNode {
+  const bounded = expression.trim();
+  if (!bounded || bounded.length > 300) throw new Error("expression must contain 1–300 characters");
+  const root = math.parse(bounded);
+  let nodes = 0;
+  root.traverse((node) => {
+    nodes += 1;
+    if (nodes > 80) throw new Error("expression is too complex");
+    if (!["ConstantNode", "OperatorNode", "ParenthesisNode", "SymbolNode", "FunctionNode"].includes(node.type)) {
+      throw new Error(`${node.type} is not allowed`);
+    }
+    if (node.type === "OperatorNode" && !SAFE_MATH_OPERATORS.has((node as OperatorNode).op)) {
+      throw new Error(`operator ${(node as OperatorNode).op} is not allowed`);
+    }
+    if (node.type === "FunctionNode") {
+      const fn = (node as FunctionNode).fn as SymbolNode;
+      if (fn.type !== "SymbolNode" || !SAFE_MATH_FUNCTIONS.has(fn.name)) {
+        throw new Error("only bounded scalar math functions are allowed");
+      }
+    }
+    if (node.type === "SymbolNode") {
+      const name = (node as SymbolNode).name;
+      if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) throw new Error("invalid symbol");
+      if (!allowVariables && !SAFE_CALCULATOR_SYMBOLS.has(name) && !SAFE_MATH_FUNCTIONS.has(name)) {
+        throw new Error(`unknown calculator symbol ${name}`);
+      }
+    }
+  });
+  return root;
+}
+
+export async function runTutorMathToolCommand(message: string, tools: TutorToolPermissions): Promise<string> {
+  const trimmed = message.trim();
+  try {
+    const math = await import("mathjs");
+    if (tools.calculator && trimmed.toLowerCase().startsWith("/calculate ")) {
+      const expression = trimmed.slice(11).trim();
+      const parsed = parseBoundedMathExpression(math, expression, false);
+      return `DETERMINISTIC CALCULATOR RESULT for ${JSON.stringify(expression)}: ${String(parsed.evaluate())}`;
+    }
+    if (tools.symbolicAlgebra && trimmed.toLowerCase().startsWith("/simplify ")) {
+      const expression = trimmed.slice(10).trim();
+      parseBoundedMathExpression(math, expression, true);
+      return `DETERMINISTIC SYMBOLIC RESULT for ${JSON.stringify(expression)}: ${math.simplify(expression).toString()}`;
+    }
+    if (tools.symbolicAlgebra && trimmed.toLowerCase().startsWith("/differentiate ")) {
+      const request = trimmed.slice(15).trim();
+      if (request.length > 350) throw new Error("request is too long");
+      const match = request.match(/^(.*?)\s+(?:with respect to|wrt)\s+([A-Za-z][A-Za-z0-9_]*)$/i);
+      if (!match) return "Use /differentiate <expression> wrt <variable> to invoke the deterministic symbolic tool.";
+      parseBoundedMathExpression(math, match[1], true);
+      return `DETERMINISTIC SYMBOLIC DERIVATIVE: ${math.derivative(match[1], match[2]).toString()}`;
+    }
+  } catch (error) {
+    if (/^\/(?:calculate|simplify|differentiate)\b/i.test(trimmed)) {
+      return `DETERMINISTIC MATH TOOL ERROR: ${error instanceof Error ? error.message : "invalid expression"}. Do not invent a tool result.`;
+    }
+  }
+  return "";
+}
+
+type SessionMemoryCandidate = {
+  kind: "misconception" | "criterion_deficit" | "calibration";
+  statement: string;
+  count: number;
+  persisted: boolean;
+};
+const MAX_TUTOR_MEMORY_SESSIONS = 100;
+const MAX_TUTOR_MEMORY_ENTRIES_PER_SESSION = 100;
+const tutorSessionMemory = new Map<string, Map<string, SessionMemoryCandidate>>();
+
+export function getTutorSessionLearnerSummary(sessionId: string): string {
+  const entries = [...(tutorSessionMemory.get(sessionId)?.values() ?? [])]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 20);
+  if (!entries.length) return "Session memory: no observations recorded yet.";
+  return "SESSION-ONLY LEARNER OBSERVATIONS (revisable):\n" +
+    entries.map((entry) => `- [${entry.kind}] ${entry.statement.slice(0, 500)} (${entry.count} observation${entry.count === 1 ? "" : "s"})`).join("\n");
+}
+
+/** Keep learner-visible deletion controls consistent with session-local prompt memory. */
+export function forgetTutorSessionLearnerObservation(statement: string): void {
+  const normalized = statement.trim().toLowerCase();
+  if (!normalized) return;
+  for (const entries of tutorSessionMemory.values()) {
+    for (const [key, entry] of entries) {
+      if (entry.statement.trim().toLowerCase() === normalized) entries.delete(key);
+    }
+  }
+}
+
+export function clearTutorSessionLearnerMemory(): void {
+  tutorSessionMemory.clear();
+}
+
+export async function rememberTutorDiagnosis(
+  sessionId: string,
+  diagnosis: TutorDiagnosis | undefined,
+  preferences: TutorPreferences,
+  evidenceRefs: string[]
+): Promise<void> {
+  if (!diagnosis || preferences.memory.mode === "off" || !preferences.memory.learnFromSessions) return;
+  let map = tutorSessionMemory.get(sessionId);
+  if (!map) {
+    if (tutorSessionMemory.size >= MAX_TUTOR_MEMORY_SESSIONS) {
+      const oldestSessionId = tutorSessionMemory.keys().next().value as string | undefined;
+      if (oldestSessionId) tutorSessionMemory.delete(oldestSessionId);
+    }
+    map = new Map();
+    tutorSessionMemory.set(sessionId, map);
+  }
+  const candidates: Array<Omit<SessionMemoryCandidate, "count" | "persisted">> = [];
+  if (preferences.memory.rememberMisconceptions) {
+    candidates.push(...diagnosis.misconceptions.map((statement) => ({ kind: "misconception" as const, statement })));
+  }
+  if (preferences.memory.rememberWeakAreas) {
+    candidates.push(...diagnosis.weakCriteria.map((statement) => ({ kind: "criterion_deficit" as const, statement })));
+  }
+  if (preferences.memory.rememberCalibration && diagnosis.calibration !== "accurate") {
+    candidates.push({ kind: "calibration", statement: `Learner calibration was ${diagnosis.calibration}.` });
+  }
+
+  for (const candidate of candidates) {
+    const statement = candidate.statement.trim().slice(0, 1000);
+    if (!statement) continue;
+    const key = `${candidate.kind}:${statement.toLowerCase()}`;
+    const existing = map.get(key);
+    if (!existing && map.size >= MAX_TUTOR_MEMORY_ENTRIES_PER_SESSION) continue;
+    const current = existing ?? { ...candidate, statement, count: 0, persisted: false };
+    current.count += 1;
+    map.set(key, current);
+    if (preferences.memory.mode === "persistent" &&
+        current.count >= preferences.memory.minimumEvidence &&
+        !current.persisted) {
+      await recordLearnerModelEntry({
+        entryKind: current.kind,
+        statement: current.statement,
+        evidenceRefs: evidenceRefs.length ? evidenceRefs : [`session:${sessionId}`],
+      });
+      current.persisted = true;
+    }
+  }
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -1205,9 +1538,37 @@ export interface TutorTurnRequest {
    *  pace, and remarks. Omitted for restored sessions (already ran). */
   onboarding?: OnboardingAnswers;
   learnerMessage: string;
-  attachments?: { name: string; kind: string }[];
+  attachments?: { name: string; kind: string; dataUrl?: string }[];
   signal?: AbortSignal;
   endpoint?: ResolvedRoleEndpoint;
+}
+
+/**
+ * Select the transient image content that may cross the model boundary. This
+ * helper is deliberately deterministic and shared with tests: image tool
+ * permission, explicit privacy consent, and the endpoint's advertised vision
+ * capability must all agree. Data is bounded per turn and never persisted.
+ */
+export function selectTutorImageContentParts(
+  attachments: TutorTurnRequest["attachments"],
+  tools: TutorToolPermissions,
+  allowImageDataInPrompts: boolean,
+  endpoint: ResolvedRoleEndpoint
+): ContentPart[] {
+  if (!tools.imageAnalysis || !allowImageDataInPrompts || !endpoint.capabilities.vision) return [];
+
+  return (attachments ?? [])
+    .filter((attachment) =>
+      attachment.kind === "image" &&
+      typeof attachment.dataUrl === "string" &&
+      attachment.dataUrl.startsWith("data:image/") &&
+      attachment.dataUrl.length <= 8_000_000
+    )
+    .slice(0, 3)
+    .map((attachment): ContentPart => ({
+      type: "image_url",
+      image_url: { url: attachment.dataUrl!, detail: "auto" },
+    }));
 }
 
 /**
@@ -1226,74 +1587,112 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     assistancePolicy: req.assistancePolicy,
   });
 
-  // The learner's message is a fact worth persisting before any model work, so
-  // history stays durable even if the call fails.
+  const allPreferences = loadPreferences();
+  const studio = allPreferences.tutor;
+
+  // Persist metadata only. Image data URLs can be large and remain transient;
+  // the privacy permission below controls whether they enter the model request.
   await appendSessionMessage({
     sessionId: req.sessionId,
     role: "user",
     content: req.learnerMessage,
-    attachmentsJson: req.attachments?.length ? JSON.stringify(req.attachments) : null,
+    attachmentsJson: req.attachments?.length
+      ? JSON.stringify(req.attachments.map(({ name, kind }) => ({ name, kind })))
+      : null,
   });
 
-  const [history, learnerSummary, hintLevel] = await Promise.all([
+  if (studio.memory.mode === "persistent" && studio.memory.retentionDays > 0) {
+    await pruneLearnerModelEntries(studio.memory.retentionDays);
+  }
+  const learnerContextAllowed =
+    studio.memory.mode !== "off" &&
+    studio.memory.includeInPrompt &&
+    studio.privacy.allowLearnerModelInPrompts;
+  const persistentSummaryAllowed = learnerContextAllowed && studio.memory.mode === "persistent";
+  const [loadedHistory, persistentSummary, hintLevel] = await Promise.all([
     getSessionMessages(req.sessionId, 12),
-    getActiveTutorContextLearnerSummary(),
+    persistentSummaryAllowed
+      ? getActiveTutorContextLearnerSummary()
+      : Promise.resolve(""),
     getSessionHintLevel(req.sessionId),
   ]);
+  const history = studio.sessions.continuity === "fresh-each-time"
+    ? loadedHistory.slice(-1)
+    : loadedHistory;
+  const learnerSummary = !learnerContextAllowed
+    ? "Learner memory is disabled or withheld by Tutor Studio privacy policy."
+    : [persistentSummary, getTutorSessionLearnerSummary(req.sessionId)].filter(Boolean).join("\n\n");
 
-  // The message just persisted is the only learner message when the session is
-  // fresh — that is the "independent attempt" the prompt's rule 2 requires.
-  const awaitingFirstAttempt = history.filter((m) => m.role === "user").length <= 1;
-
-  const cards = await buildTutorEvidenceCards(req.boundNodes ?? []);
-  const allowedEvidence = new Set(cards.map((c) => c.handle));
-
+  const awaitingFirstAttempt = loadedHistory.filter((m) => m.role === "user").length <= 1;
+  const knowledgeNodes = await resolveTutorKnowledgeNodes(req.boundNodes ?? [], studio);
+  // Curriculum sequencing and source grounding are independent: disabling the
+  // pedagogical phase sequence must not silently disable selected-source use.
+  const cards = await buildTutorEvidenceCards(knowledgeNodes);
+  const allowedEvidence = new Set(cards.map((card) => card.handle));
   const endpoint = req.endpoint ?? (await resolveRoleEndpoint("tutor"));
+  // Endpoint bindings may define a provider ceiling, while Tutor Studio defines
+  // the learner-owned response ceiling. Enforce the stricter of the two.
+  const boundedEndpoint = {
+    ...endpoint,
+    maxTokens: Math.min(endpoint.maxTokens ?? studio.advanced.maxResponseTokens, studio.advanced.maxResponseTokens),
+  };
+  const mathToolContext = await runTutorMathToolCommand(req.learnerMessage, studio.tools);
 
-  // Thread the learner's onboarding answers (mastery, weakest part, chosen
-  // tutor @, pace, remarks) into every turn as a consistent system reminder
-  // appended to the base Socratic prompt — the agent tutors to these across the
-  // whole session rather than forgetting them after the opener.
   const systemPrompt = [
     TUTOR_AGENT_PROMPT_V1,
     req.onboarding ? buildOnboardingReminder(req.onboarding) : "",
-    buildTutorPreferenceReminder(),
+    buildTutorPreferenceReminder(studio),
+    studio.privacy.includeProfileIdentity
+      ? `The learner has chosen to share this profile name: ${allPreferences.profile.fullName}.`
+      : "Do not infer or expose profile identity; it is withheld by privacy policy.",
   ].filter(Boolean).join("\n\n");
 
-  const result = await callStructuredAgent({
+  const suppliedImageCount = req.attachments?.filter((attachment) => attachment.kind === "image").length ?? 0;
+  const imageParts = selectTutorImageContentParts(
+    req.attachments,
+    studio.tools,
+    studio.privacy.allowImageDataInPrompts,
+    endpoint
+  );
+  const capabilityNote = suppliedImageCount > 0 && imageParts.length === 0
+    ? "\n\nRUNTIME CAPABILITY: Image data was withheld because it was invalid or too large, image analysis is disabled, privacy-blocked, or the bound Tutor model does not advertise vision. Do not claim to have seen it."
+    : "";
+  const attachmentNote = req.attachments?.length
+    ? `\n\nAttached: ${req.attachments.map((attachment) => attachment.name).join(", ")}`
+    : "";
+  const baseUserPrompt = buildTutorUserPrompt({
+    domain: req.domain,
+    sessionTitle: req.sessionTitle,
+    assistancePolicy: req.assistancePolicy ?? "progressive_hints",
+    hintLevel,
+    awaitingFirstAttempt,
+    learnerSummary,
+    cards,
+    history,
+    board: req.board,
+    learnerMessage: req.learnerMessage,
+    attachmentsNote: `${attachmentNote}${capabilityNote}${mathToolContext ? `\n\n${mathToolContext}` : ""}`,
+  });
+  const userContent: string | ContentPart[] = imageParts.length > 0
+    ? [{ type: "text", text: baseUserPrompt }, ...imageParts]
+    : baseUserPrompt;
+
+  const rawResult = await callStructuredAgent({
     role: "tutor",
-    endpoint,
+    endpoint: boundedEndpoint,
     system: systemPrompt,
-    user: buildTutorUserPrompt({
-      domain: req.domain,
-      sessionTitle: req.sessionTitle,
-      assistancePolicy: req.assistancePolicy ?? "progressive_hints",
-      hintLevel,
-      awaitingFirstAttempt,
-      learnerSummary,
-      cards,
-      history,
-      board: req.board,
-      learnerMessage: req.learnerMessage,
-      attachmentsNote: req.attachments?.length
-        ? `\n\nAttached: ${req.attachments.map((a) => a.name).join(", ")}`
-        : "",
-    }),
+    user: userContent,
     promptVersion: TUTOR_PROMPT_VERSION,
     schemaVersion: TUTOR_SCHEMA_VERSION,
-    temperature: 0.4,
-    // Many OpenAI-compatible endpoints otherwise default to only 1K output
-    // tokens, which can truncate a valid complex visualization mid-JSON.
-    maxTokens: 4096,
+    temperature: studio.advanced.temperature / 100,
+    maxTokens: studio.advanced.maxResponseTokens,
+    timeoutMs: studio.advanced.requestTimeoutSeconds * 1000,
     signal: req.signal,
     validate: (payload) => validateTutorPayload(payload, allowedEvidence),
     recover: ({ payload, raw }) => {
       try {
         return recoverTutorPayload(payload, raw, allowedEvidence, req.learnerMessage);
       } catch {
-        // This path is intentionally independent of model output. Even an
-        // unexpectedly pathological payload must not leak a schema-version
-        // runtime error into the learner's conversation.
         return {
           speech: "Let's continue with that question. Please resend it in one short sentence so I can answer it cleanly.",
           boardOps: [],
@@ -1302,6 +1701,10 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
       }
     },
   });
+  const result: StructuredCallResult<TutorTurn> = {
+    ...rawResult,
+    value: enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
+  };
 
   await appendSessionMessage({
     sessionId: req.sessionId,
@@ -1311,12 +1714,48 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     promptVersion: TUTOR_PROMPT_VERSION,
     tokensUsed: result.usage?.total ?? null,
   });
+  await rememberTutorDiagnosis(req.sessionId, result.value.diagnosis, studio, result.value.evidenceRefs);
 
   if (typeof result.value.requestedLevel === "number" && result.value.requestedLevel !== hintLevel) {
     await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
   }
 
   return result;
+}
+
+/**
+ * Tutor Studio playground. It invokes the bound Tutor model with the compiled
+ * definition, but deliberately does not create a study session, touch learner
+ * memory, or apply board operations.
+ */
+export async function testTutorStudioPrompt(
+  learnerPrompt: string,
+  preferences: TutorPreferences = loadPreferences().tutor,
+  signal?: AbortSignal
+): Promise<string> {
+  const prompt = learnerPrompt.trim();
+  if (!prompt) throw new Error("Enter a learner prompt to test.");
+  const endpoint = await resolveRoleEndpoint("tutor");
+  const response = await chatCompletion({
+    endpoint,
+    messages: [
+      {
+        role: "system",
+        content: [
+          "You are running inside Tutor Studio's isolated policy playground.",
+          buildTutorPreferenceReminder(preferences),
+          "Respond to the sample learner in 2–5 sentences. Do not claim to have used board, memory, curriculum, image, or web tools; this isolated preview applies no operations.",
+        ].join("\n\n"),
+      },
+      { role: "user", content: prompt.slice(0, 4000) },
+    ],
+    jsonMode: false,
+    temperature: preferences.advanced.temperature / 100,
+    maxTokens: Math.min(1200, preferences.advanced.maxResponseTokens),
+    timeoutMs: preferences.advanced.requestTimeoutSeconds * 1000,
+    signal,
+  });
+  return response.content.trim();
 }
 
 /* ─────────────────────────────────────────────────────────────

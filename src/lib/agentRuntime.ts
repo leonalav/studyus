@@ -268,31 +268,49 @@ export async function chatCompletion({
     return { status: res.status, text };
   };
 
+  const interruptionError = () => timedOut
+    ? new AgentRuntimeError(
+        `${ROLE_LABEL[endpoint.role]} agent timed out after ${Math.round(timeoutMs / 1000)}s.`,
+        "timeout"
+      )
+    : new AgentRuntimeError("Request cancelled.", "aborted");
+
   // Native transport — the webview cannot reach model endpoints (CORS), so in
   // the desktop build we forward the assembled body to the Rust command, which
   // posts with `reqwest` (no same-origin enforcement) and hands back the raw
-  // HTTP status + body. API key leaves the page only over this one IPC call.
-  const postNative = async (withJsonMode: boolean): Promise<RawResponse> => {
-    const out = await nativeChatCompletion(
+  // HTTP status + body. Tauri invoke does not accept AbortSignal, so explicitly
+  // race it against our deadline/caller cancellation and consume a late native
+  // settlement rather than allowing an ignored transport to hold up the agent.
+  const postNative = (withJsonMode: boolean): Promise<RawResponse> => new Promise((resolve, reject) => {
+    if (controller.signal.aborted) {
+      reject(interruptionError());
+      return;
+    }
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      controller.signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(interruptionError()));
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+    void nativeChatCompletion(
       url,
       endpoint.apiKey || "",
       JSON.stringify(body(withJsonMode))
+    ).then(
+      (out) => finish(() => resolve({ status: out.status, text: out.body })),
+      (error) => finish(() => reject(error))
     );
-    return { status: out.status, text: out.body };
-  };
+  });
 
   const post = async (withJsonMode: boolean): Promise<RawResponse> => {
     try {
       return isTauriRuntime() ? await postNative(withJsonMode) : await postBrowser(withJsonMode);
     } catch (err: any) {
-      if (err?.name === "AbortError") {
-        throw timedOut
-          ? new AgentRuntimeError(
-              `${ROLE_LABEL[endpoint.role]} agent timed out after ${Math.round(timeoutMs / 1000)}s.`,
-              "timeout"
-            )
-          : new AgentRuntimeError("Request cancelled.", "aborted");
-      }
+      if (err instanceof AgentRuntimeError) throw err;
+      if (err?.name === "AbortError") throw interruptionError();
       throw new AgentRuntimeError(
         `Could not reach ${url}. ` +
           (isTauriRuntime()
@@ -506,7 +524,7 @@ export async function callStructuredAgent<T>({
 }: {
   role: AgentRole;
   system: string;
-  user: string;
+  user: string | ContentPart[];
   promptVersion: string;
   schemaVersion: string;
   validate: (payload: unknown) => ValidationResult<T>;

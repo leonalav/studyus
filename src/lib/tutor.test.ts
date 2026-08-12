@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 import { getDb } from "../db/database";
 import { simpleHash } from "./curriculum";
 import {
@@ -13,10 +13,28 @@ import {
   MAX_HINT_LEVEL,
   MAX_BOARD_OPS_PER_TURN,
   MAX_THREAD_INITIAL_BLOCKS,
+  enforceTutorToolPolicy,
+  resolveTutorKnowledgeNodes,
+  getTutorSessionLearnerSummary,
+  rememberTutorDiagnosis,
+  clearTutorSessionLearnerMemory,
+  forgetTutorSessionLearnerObservation,
+  runTutorMathToolCommand,
+  selectTutorImageContentParts,
+  testTutorStudioPrompt,
+  askTutorTurn,
   type BoardOp,
+  type TutorTurn,
 } from "./tutor";
+import { DEFAULT_TUTOR } from "./preferences";
+import { bindModelRole, defaultCapabilities } from "./llm";
+import type { VisualizationIntent } from "./visualization/types";
 
 const EVIDENCE = new Set(["E1", "E2", "E3"]);
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function validTurn(overrides: Record<string, unknown> = {}) {
   return {
@@ -283,6 +301,274 @@ describe("Tutor turn deterministic recovery", () => {
     const recovered = recoverTutorPayload(undefined, "{\"board_ops\":[", new Set(), "Help with vectors");
     expect(recovered.speech).toContain("Please resend");
     expect(recovered.speech).not.toMatch(/tutor_turn_v2|after 3 attempts|schema/i);
+  });
+});
+
+describe("Tutor Studio runtime policy", () => {
+  it("deterministically filters disabled writing, thread, and semantic visualization tools", () => {
+    const turn: TutorTurn = {
+      speech: "I will only apply permitted operations.",
+      evidenceRefs: [],
+      boardOps: [
+        { op: "write_text", text: "blocked writing" },
+        { op: "visualize", intent: { type: "geometry", objects: [] } },
+        { op: "visualize", intent: { type: "diagram", variant: "flow" } },
+        { op: "visualize", intent: { type: "chart", chartType: "bar", series: [] } },
+        { op: "update_visualization", targetAnchor: "geometry-block", statePatch: { pointPositions: { A: [1, 2] } } },
+        { op: "spawn_thread", title: "Blocked thread", reason: "Permission is off", initialBlocks: [] },
+      ],
+    };
+    const tools = {
+      ...DEFAULT_TUTOR.tools,
+      boardWriting: false,
+      threads: false,
+      geometry: false,
+      diagrams: false,
+    };
+    const board = {
+      id: "policy-board",
+      title: "Policy",
+      subtitle: "",
+      domain: "math" as const,
+      blocks: [{ id: "geometry-block", kind: "visualization" as const, intent: { type: "geometry" as const, objects: [] } }],
+    };
+
+    const filtered = enforceTutorToolPolicy(turn, tools, board);
+    expect(filtered.boardOps).toEqual([
+      { op: "visualize", intent: { type: "chart", chartType: "bar", series: [] } },
+    ]);
+  });
+
+  it("maps every Chalkboard visualization family to its own permission", () => {
+    const mappings: Array<[keyof typeof DEFAULT_TUTOR.tools, VisualizationIntent]> = [
+      ["geometry", { type: "geometry", objects: [] }],
+      ["diagrams", { type: "diagram", variant: "flow" }],
+      ["functionGraphing", { type: "function", domainX: [-1, 1], expressions: [] }],
+      ["graphing3d", { type: "graph3d", surfaces: [] }],
+      ["dataVisualization", { type: "chart", chartType: "bar", series: [] }],
+      ["equationRendering", { type: "equation", latex: "x=1" }],
+      ["physics", { type: "physics", variant: "free_body" }],
+      ["biology", { type: "biology", variant: "cell" }],
+      ["circuits", { type: "circuit", nodes: [], wires: [], components: [] }],
+      ["chemistry", { type: "chemistry", variant: "molecule", atoms: [], bonds: [] }],
+      ["graphTheory", { type: "graph_theory", nodes: [], edges: [] }],
+    ];
+    const turn: TutorTurn = {
+      speech: "Visualizations",
+      evidenceRefs: [],
+      boardOps: mappings.map(([, intent]) => ({ op: "visualize" as const, intent })),
+    };
+
+    for (const [permission, blockedIntent] of mappings) {
+      const result = enforceTutorToolPolicy(turn, {
+        ...DEFAULT_TUTOR.tools,
+        [permission]: false,
+      });
+      expect(result.boardOps).toHaveLength(mappings.length - 1);
+      expect(result.boardOps).not.toContainEqual({ op: "visualize", intent: blockedIntent });
+    }
+  });
+
+  it("sends at most three valid images only when tool, privacy, and vision gates all permit it", () => {
+    const endpoint = {
+      role: "tutor" as const,
+      provider: "custom",
+      baseUrl: "https://model.example/v1",
+      modelId: "vision-model",
+      apiKey: "",
+      capabilities: { ...defaultCapabilities(), vision: true },
+    };
+    const attachments = [
+      { name: "one.png", kind: "image", dataUrl: "data:image/png;base64,one" },
+      { name: "notes.txt", kind: "file", dataUrl: "data:text/plain;base64,bm90ZXM=" },
+      { name: "bad.png", kind: "image", dataUrl: "https://example.com/bad.png" },
+      { name: "two.jpg", kind: "image", dataUrl: "data:image/jpeg;base64,two" },
+      { name: "three.webp", kind: "image", dataUrl: "data:image/webp;base64,three" },
+      { name: "four.gif", kind: "image", dataUrl: "data:image/gif;base64,four" },
+    ];
+
+    expect(selectTutorImageContentParts(attachments, DEFAULT_TUTOR.tools, true, endpoint)).toEqual([
+      { type: "image_url", image_url: { url: "data:image/png;base64,one", detail: "auto" } },
+      { type: "image_url", image_url: { url: "data:image/jpeg;base64,two", detail: "auto" } },
+      { type: "image_url", image_url: { url: "data:image/webp;base64,three", detail: "auto" } },
+    ]);
+    expect(selectTutorImageContentParts(
+      attachments,
+      { ...DEFAULT_TUTOR.tools, imageAnalysis: false },
+      true,
+      endpoint
+    )).toEqual([]);
+    expect(selectTutorImageContentParts(attachments, DEFAULT_TUTOR.tools, false, endpoint)).toEqual([]);
+    expect(selectTutorImageContentParts(
+      attachments,
+      DEFAULT_TUTOR.tools,
+      true,
+      { ...endpoint, capabilities: { ...endpoint.capabilities, vision: false } }
+    )).toEqual([]);
+  });
+
+  it("keeps Tutor Studio model testing isolated from sessions, learner memory, and diagnostics", async () => {
+    const db = await getDb();
+    await bindModelRole("tutor", {
+      provider: "custom",
+      baseUrl: "https://model.example/v1",
+      modelId: "studio-preview-model",
+    });
+    const rowCounts = () => ["chalkboard_sessions", "session_messages", "learner_model_entries", "agent_calls"]
+      .map((table) => Number(db.exec(`SELECT COUNT(*) FROM ${table};`)[0]?.values[0]?.[0] ?? 0));
+    const before = rowCounts();
+    let requestBody: any;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: "Try identifying the quantity that remains constant." } }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    await expect(testTutorStudioPrompt("How should I begin?", {
+      ...DEFAULT_TUTOR,
+      identity: { ...DEFAULT_TUTOR.identity, name: "Isolated Ada" },
+    })).resolves.toBe("Try identifying the quantity that remains constant.");
+    expect(requestBody.messages[0].content).toContain("Isolated Ada");
+    expect(requestBody.messages[1].content).toBe("How should I begin?");
+    expect(rowCounts()).toEqual(before);
+  });
+
+  it("enforces the Tutor Studio response ceiling over a larger endpoint limit", async () => {
+    let requestBody: any;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          speech: "Start by naming the known quantities.",
+          board_ops: [],
+          evidence_refs: [],
+        }) } }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    await askTutorTurn({
+      sessionId: "studio-response-ceiling",
+      sessionTitle: "Response ceiling",
+      domain: "math",
+      learnerMessage: "How should I begin?",
+      endpoint: {
+        role: "tutor",
+        provider: "custom",
+        baseUrl: "https://model.example/v1",
+        modelId: "ceiling-model",
+        apiKey: "",
+        maxTokens: DEFAULT_TUTOR.advanced.maxResponseTokens * 2,
+        capabilities: defaultCapabilities(),
+      },
+    });
+
+    expect(requestBody.max_tokens).toBe(DEFAULT_TUTOR.advanced.maxResponseTokens);
+  });
+
+  it("runs bounded deterministic math commands only when their permissions are enabled", async () => {
+    await expect(runTutorMathToolCommand("/calculate 2 + 3 * 4", DEFAULT_TUTOR.tools))
+      .resolves.toContain(": 14");
+    await expect(runTutorMathToolCommand("/simplify 2*x + 3*x", DEFAULT_TUTOR.tools))
+      .resolves.toContain("5 * x");
+    await expect(runTutorMathToolCommand("/calculate zeros(1000000000)", DEFAULT_TUTOR.tools))
+      .resolves.toContain("MATH TOOL ERROR");
+    await expect(runTutorMathToolCommand(
+      "/calculate 2 + 2",
+      { ...DEFAULT_TUTOR.tools, calculator: false }
+    )).resolves.toBe("");
+  });
+
+  it("resolves selected source knowledge and fails closed under privacy or tool gates", async () => {
+    const db = await getDb();
+    const sourceId = "studio-knowledge-source";
+    const nodeId = "studio-knowledge-node";
+    const siblingNodeId = "studio-knowledge-sibling";
+    db.run("DELETE FROM curriculum_nodes WHERE source_id = ?;", [sourceId]);
+    db.run("DELETE FROM curriculum_sources WHERE id = ?;", [sourceId]);
+    db.run(
+      `INSERT INTO curriculum_sources (id, name, hash, page_count, has_outline, extraction_status, created_at)
+       VALUES (?, 'Studio source', '', 2, 1, 'authored', '2026-08-12');`,
+      [sourceId]
+    );
+    db.run(
+      `INSERT INTO curriculum_nodes
+       (id, source_id, parent_node_id, ordinal, depth, title, section_number, start_page, end_page, node_kind, extraction_status, content_hash)
+       VALUES
+         (?, ?, NULL, 1, 1, 'Selected topic', '1', 1, 2, 'section', 'transcribed', ''),
+         (?, ?, NULL, 2, 1, 'Sibling topic', '2', 2, 2, 'section', 'transcribed', '');`,
+      [nodeId, sourceId, siblingNodeId, sourceId]
+    );
+
+    const selected = {
+      ...DEFAULT_TUTOR,
+      knowledge: {
+        ...DEFAULT_TUTOR.knowledge,
+        accessMode: "selected-only" as const,
+        selectedSourceIds: [sourceId],
+        sourcePriority: [sourceId],
+      },
+    };
+    expect(await resolveTutorKnowledgeNodes(["session-node"], selected)).toEqual([nodeId, siblingNodeId]);
+    expect(await resolveTutorKnowledgeNodes(
+      ["session-node"],
+      { ...selected, knowledge: { ...selected.knowledge, selectedNodeIds: [siblingNodeId] } }
+    )).toEqual([siblingNodeId]);
+    expect(await resolveTutorKnowledgeNodes(
+      ["session-node"],
+      { ...selected, knowledge: { ...selected.knowledge, selectedNodeIds: ["node-from-an-unselected-source"] } }
+    )).toEqual([nodeId, siblingNodeId]);
+    expect(await resolveTutorKnowledgeNodes(
+      ["session-node"],
+      { ...selected, privacy: { ...selected.privacy, allowCurriculumInPrompts: false } }
+    )).toEqual([]);
+    expect(await resolveTutorKnowledgeNodes(
+      ["session-node"],
+      { ...selected, tools: { ...selected.tools, pdfKnowledge: false } }
+    )).toEqual([]);
+  });
+});
+
+describe("Tutor session learner memory", () => {
+  const sessionTutor = {
+    ...DEFAULT_TUTOR,
+    memory: { ...DEFAULT_TUTOR.memory, mode: "session" as const, minimumEvidence: 1 as const },
+  };
+
+  afterEach(() => clearTutorSessionLearnerMemory());
+
+  it("bounds prompt diagnostics and learner-owned deletion clears matching session observations", async () => {
+    for (let index = 0; index < 130; index++) {
+      await rememberTutorDiagnosis("bounded-session", {
+        misconceptions: [`Misconception ${index}`],
+        weakCriteria: [],
+        hintDependence: "none",
+        calibration: "accurate",
+      }, sessionTutor, []);
+    }
+
+    const summary = getTutorSessionLearnerSummary("bounded-session");
+    expect(summary.match(/^- \[misconception\]/gm)).toHaveLength(20);
+    expect(summary).toContain("Misconception 0");
+    expect(summary).not.toContain("Misconception 100");
+
+    forgetTutorSessionLearnerObservation("Misconception 0");
+    expect(getTutorSessionLearnerSummary("bounded-session")).not.toContain("Misconception 0 (");
+    clearTutorSessionLearnerMemory();
+    expect(getTutorSessionLearnerSummary("bounded-session")).toContain("no observations");
+  });
+
+  it("evicts the oldest session when the diagnostic session cap is reached", async () => {
+    for (let index = 0; index <= 100; index++) {
+      await rememberTutorDiagnosis(`session-${index}`, {
+        misconceptions: [`Observation ${index}`],
+        weakCriteria: [],
+        hintDependence: "none",
+        calibration: "accurate",
+      }, sessionTutor, []);
+    }
+    expect(getTutorSessionLearnerSummary("session-0")).toContain("no observations");
+    expect(getTutorSessionLearnerSummary("session-100")).toContain("Observation 100");
   });
 });
 

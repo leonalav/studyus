@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_PREFERENCES,
+  MAX_TUTOR_VERSIONS,
   applyAppearancePreferences,
   buildTutorPreferenceReminder,
   sanitizePreferences,
@@ -83,7 +84,8 @@ describe("persisted Studyus preferences", () => {
     expect(parsed.notifications.events.testReady).toEqual({ enabled: false, channel: "in-app" });
     expect(parsed.notifications.events.sessionComplete).toEqual({ enabled: true, channel: "both" });
     expect(parsed.notifications.summary).toEqual({ cadence: "weekly", channel: "desktop" });
-    expect(parsed.tutor.styles).toHaveLength(DEFAULT_PREFERENCES.tutor.styles.length);
+    expect(parsed.tutor.schemaVersion).toBe(2);
+    expect(parsed.tutor.identity.name).toBe(DEFAULT_PREFERENCES.tutor.identity.name);
     expect(parsed.tutor.sessionLength).toBe(10);
     expect(parsed.tutor.breakEvery).toBe(60);
     expect(parsed.tutor.difficulty).toBe("adaptive");
@@ -102,6 +104,58 @@ describe("persisted Studyus preferences", () => {
     expect(parsed.appearance.font).toBe("inter");
     expect(parsed.notifications.events.testReady).toEqual({ enabled: true, channel: "email" });
     expect(parsed.notifications.summary).toEqual({ cadence: "daily", channel: "email" });
+  });
+
+  it("sanitizes Tutor Studio policy, numeric enums, tool gates, and runtime bounds", () => {
+    const parsed = sanitizePreferences({
+      tutor: {
+        memory: { minimumEvidence: 3, retentionDays: 90 },
+        tools: { geometry: false, diagrams: false, madeUpTool: true },
+        privacy: { allowCurriculumInPrompts: false, allowImageDataInPrompts: false },
+        advanced: { temperature: 999, maxResponseTokens: 12, requestTimeoutSeconds: 500 },
+        versions: Array.from({ length: MAX_TUTOR_VERSIONS + 2 }, (_, index) => ({
+          id: `v${index}`,
+          label: `Version ${index}`,
+          createdAt: "2026-08-12T00:00:00.000Z",
+          serializedDefinition: "{}",
+        })),
+      },
+    }).tutor;
+
+    expect(parsed.memory).toMatchObject({ minimumEvidence: 3, retentionDays: 90 });
+    expect(parsed.tools.geometry).toBe(false);
+    expect(parsed.tools.diagrams).toBe(false);
+    expect(parsed.tools).not.toHaveProperty("madeUpTool");
+    expect(parsed.privacy.allowCurriculumInPrompts).toBe(false);
+    expect(parsed.privacy.allowImageDataInPrompts).toBe(false);
+    expect(parsed.versions).toHaveLength(MAX_TUTOR_VERSIONS);
+    expect(parsed.advanced).toMatchObject({
+      temperature: 100,
+      maxResponseTokens: 512,
+      requestTimeoutSeconds: 180,
+    });
+    expect(sanitizePreferences({ tutor: { memory: { minimumEvidence: 2.6 } } }).tutor.memory.minimumEvidence)
+      .toBe(DEFAULT_PREFERENCES.tutor.memory.minimumEvidence);
+  });
+
+  it("compiles constitution, privacy-aware memory, and disabled tools into agent policy", () => {
+    const tutor = sanitizePreferences({
+      tutor: {
+        constitution: { hardRules: ["Always define notation before using it."] },
+        memory: { mode: "persistent", includeInPrompt: true },
+        privacy: { allowLearnerModelInPrompts: false },
+        tools: { geometry: false },
+        assessment: { rubricInstructions: "Award method credit when the setup is valid." },
+        advanced: { requestTimeoutSeconds: 75 },
+      },
+    }).tutor;
+    const reminder = buildTutorPreferenceReminder(tutor);
+
+    expect(reminder).toContain("Always define notation before using it.");
+    expect(reminder).toContain("learner-model context withheld");
+    expect(reminder).toContain("Disabled geometry");
+    expect(reminder).toContain("Award method credit when the setup is valid.");
+    expect(reminder).toContain("75-second request timeout");
   });
 
   it("keeps one active endpoint and never stores unknown endpoint fields", () => {
@@ -139,10 +193,10 @@ describe("persisted Studyus preferences", () => {
 
     const reminder = buildTutorPreferenceReminder(preferences);
     expect(reminder).toContain("Careful coach");
-    expect(reminder).toContain("verbosity 72");
-    expect(reminder).toContain("difficulty preference: harder");
-    expect(reminder).toContain("45 minutes");
-    expect(reminder).toContain("15 minutes");
+    expect(reminder).toContain("verbosity 72/100");
+    expect(reminder).toContain("DIFFICULTY: harder");
+    expect(reminder).toContain("target 45 minutes");
+    expect(reminder).toContain("break after about 15 minutes");
     expect(reminder).toContain("Auto-notes are enabled");
   });
 });

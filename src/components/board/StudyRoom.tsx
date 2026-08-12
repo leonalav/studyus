@@ -384,7 +384,11 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           boundNodes: resolvedBoundNodes,
           onboarding: onboarding ?? undefined,
           learnerMessage: text,
-          attachments: attachments.map((a) => ({ name: a.name, kind: a.kind })),
+          attachments: attachments.map((a) => ({
+            name: a.name,
+            kind: a.kind,
+            dataUrl: a.kind === "image" ? a.url : undefined,
+          })),
           signal: controller.signal,
         });
 
