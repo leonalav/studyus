@@ -18,6 +18,7 @@ import {
   ensureChalkboardSession,
   getSessionThreads,
   recordSessionThread,
+  replaceSessionTranscript,
   type BoardOp,
   type SessionThreadLog,
 } from "../../lib/tutor";
@@ -62,6 +63,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const [chatCollapsed, setChatCollapsed] = useState(false);
   const [messages, setMessages] = useState<ChatMsg[]>(initialSession?.messages ?? []);
   const [typing, setTyping] = useState(false);
+  const [rewinding, setRewinding] = useState(false);
   const [speechCaption, setSpeechCaption] = useState<string | null>(null);
 
   const [recording, setRecording] = useState(false);
@@ -139,6 +141,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   /* The in-flight tutor call is aborted when the room unmounts. */
   const abortRef = useRef<AbortController | null>(null);
   const activityTurnRef = useRef(0);
+  const rewindRef = useRef(false);
   useEffect(() => () => abortRef.current?.abort(), []);
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [viewMap, setViewMap] = useState<Record<string, BoardView>>(initialSession?.viewMap ?? {});
@@ -361,10 +364,52 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     [board, captureActive, logThread, notify, pushTutor]
   );
 
+  const handleRevertMessage = useCallback((messageId: number) => {
+    if (rewindRef.current) return;
+    const index = messages.findIndex((message) => message.id === messageId && message.role === "user");
+    if (index < 0) return;
+
+    // A rewind supersedes any active turn. Incrementing the turn token ensures
+    // its cancellation cannot append an error or clear newer activity state.
+    activityTurnRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setTyping(false);
+    setAgentStatus("idle");
+    setAgentActivity(null);
+    setAttachments([]);
+    speechTurnRef.current += 1;
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    setSpeechCaption(null);
+
+    const retained = messages.slice(0, index);
+    rewindRef.current = true;
+    setRewinding(true);
+    // Reflect the rewind immediately, while locking submission until the
+    // durable transcript has reached the same state.
+    setMessages(retained);
+    void replaceSessionTranscript(
+      sessionId,
+      retained.map((message) => ({
+        role: message.role === "tutor" ? "assistant" as const : message.role,
+        content: message.text,
+      }))
+    ).then(() => {
+      notify("Conversation returned to this message — edit it and submit again");
+    }).catch(() => {
+      setMessages(messages);
+      notify("The conversation could not be reverted");
+    }).finally(() => {
+      rewindRef.current = false;
+      setRewinding(false);
+    });
+  }, [messages, notify, sessionId]);
+
   /* chat replies — routed through the tutor harness, which resolves the bound
      tutor role, validates structured output, and persists both messages */
   const handleSend = useCallback(
     async (text: string, imageData?: string) => {
+      if (rewindRef.current) return;
       const activityTurn = ++activityTurnRef.current;
       const targetBoardId = board.id;
       setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
@@ -406,6 +451,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           signal: controller.signal,
         });
 
+        // The learner may have rewound while the transport was settling. Never
+        // let a superseded turn repopulate chat or continue mutating the board.
+        if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
         const turn = result.value;
         setTyping(false);
         setMessages((m) => [...m, { id: ++msgId.current, role: "tutor", text: turn.speech }]);
@@ -417,9 +465,11 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         if (turn.boardOps.length > 0) {
           setAgentStatus("writing");
           for (let index = 0; index < turn.boardOps.length; index += 1) {
+            if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
             const op = turn.boardOps[index];
             setAgentActivity(activityForBoardOp(op, index, turn.boardOps.length));
             await new Promise((resolve) => window.setTimeout(resolve, 360));
+            if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
 
             if (op.op === "spawn_thread") {
               const thread = buildAgentThread(board, op);
@@ -427,6 +477,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
                 // Record first: an agent branch is only added to the session
                 // after its durable audit row exists.
                 await logThread(thread);
+                if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
                 setBoards((current) => current.some((item) => item.id === thread.id) ? current : [...current, thread]);
                 notify(`Tutor created thread: ${thread.title}`);
               } catch {
@@ -441,6 +492,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           }
         }
 
+        if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
         setAgentStatus("idle");
         setAgentActivity({
           kind: "complete",
@@ -451,6 +503,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           if (activityTurnRef.current === activityTurn) setAgentActivity(null);
         }, 1100);
       } catch (e: any) {
+        // Reverting a user message intentionally aborts the superseded turn.
+        // Do not turn that cancellation into a visible tutor error.
+        if (controller.signal.aborted && activityTurnRef.current !== activityTurn) return;
         setAgentStatus("error");
         setAgentActivity({
           kind: "error",
@@ -480,7 +535,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           if (activityTurnRef.current === activityTurn) setAgentActivity(null);
         }, 1800);
       } finally {
-        setTyping(false);
+        if (activityTurnRef.current === activityTurn) setTyping(false);
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
@@ -657,6 +712,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         <ChatDock
           messages={messages}
           onSend={(t, img) => { void handleSend(t, img); }}
+          onRevertMessage={handleRevertMessage}
           collapsed={chatCollapsed}
           setCollapsed={setChatCollapsed}
           onClose={() => setChatOpen(false)}
@@ -678,6 +734,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           onRemoveAttachment={(index) =>
             setAttachments((list) => list.filter((_, i) => i !== index))
           }
+          rewinding={rewinding}
           onSpeakLast={() => {
             const last = [...messages].reverse().find((m) => m.role === "tutor");
             if (last) speakTutorText(last.text, true);

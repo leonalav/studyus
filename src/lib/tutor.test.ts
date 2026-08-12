@@ -6,8 +6,11 @@ import {
   recoverTutorPayload,
   buildTutorEvidenceCards,
   ensureChalkboardSession,
+  appendSessionMessage,
+  getSessionMessages,
   getSessionThreads,
   recordSessionThread,
+  replaceSessionTranscript,
   setSessionHintLevel,
   getSessionHintLevel,
   MAX_HINT_LEVEL,
@@ -674,6 +677,33 @@ describe("Tutor session thread persistence", () => {
 
     expect(created.createdBy).toBe("agent");
     expect(await getSessionThreads(SESSION_ID)).toEqual([created]);
+  });
+});
+
+describe("Tutor session transcript rewind", () => {
+  const SESSION_ID = "session-transcript-rewind-test";
+
+  beforeEach(async () => {
+    const db = await getDb();
+    db.run("DELETE FROM chalkboard_sessions WHERE id = ?;", [SESSION_ID]);
+    await ensureChalkboardSession({ id: SESSION_ID, title: "Integration", domain: "math" });
+  });
+
+  it("replaces removed turns so they cannot return as future model context", async () => {
+    await appendSessionMessage({ sessionId: SESSION_ID, role: "user", content: "Explain integration." });
+    await appendSessionMessage({ sessionId: SESSION_ID, role: "assistant", content: "Integration accumulates change." });
+    await appendSessionMessage({ sessionId: SESSION_ID, role: "user", content: "Give me an example." });
+
+    await replaceSessionTranscript(SESSION_ID, [
+      { role: "user", content: "Explain integration." },
+      { role: "assistant", content: "Integration accumulates change." },
+    ]);
+
+    const messages = await getSessionMessages(SESSION_ID);
+    expect(messages.map(({ role, content }) => ({ role, content }))).toEqual([
+      { role: "user", content: "Explain integration." },
+      { role: "assistant", content: "Integration accumulates change." },
+    ]);
   });
 });
 

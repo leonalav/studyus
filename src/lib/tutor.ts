@@ -1329,6 +1329,45 @@ export async function getSessionMessages(sessionId: string, limit = 12): Promise
   }));
 }
 
+/**
+ * Replace the durable transcript after the learner rewinds from a user turn.
+ * Keeping SQLite synchronized with the visible messages prevents removed turns
+ * from silently returning as model context on the next request.
+ */
+export async function replaceSessionTranscript(
+  sessionId: string,
+  messages: readonly { role: "user" | "assistant" | "system"; content: string }[]
+): Promise<void> {
+  const db = await getDb();
+  const now = new Date().toISOString();
+  db.run("BEGIN TRANSACTION;");
+  try {
+    db.run("DELETE FROM session_messages WHERE session_id = ?;", [sessionId]);
+    messages.forEach((message, index) => {
+      db.run(`
+        INSERT INTO session_messages (id, session_id, role, content, attachments_json, model_id, prompt_version, tokens_used, timestamp)
+        VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?);
+      `, [
+        `msg-rewind-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`,
+        sessionId,
+        message.role,
+        message.content,
+        now,
+      ]);
+    });
+    db.run("UPDATE chalkboard_sessions SET updated_at = ? WHERE id = ?;", [now, sessionId]);
+    db.run("COMMIT;");
+    saveDbSync();
+  } catch (error) {
+    try {
+      db.run("ROLLBACK;");
+    } catch {
+      // Preserve the original database error.
+    }
+    throw error;
+  }
+}
+
 export async function getSessionHintLevel(sessionId: string): Promise<number> {
   const db = await getDb();
   const res = db.exec("SELECT hint_level FROM chalkboard_sessions WHERE id = ?;", [sessionId]);

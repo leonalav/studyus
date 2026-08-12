@@ -138,6 +138,8 @@ describe("persisted Studyus preferences", () => {
     });
     expect(sanitizePreferences({ tutor: { memory: { minimumEvidence: 2.6 } } }).tutor.memory.minimumEvidence)
       .toBe(DEFAULT_PREFERENCES.tutor.memory.minimumEvidence);
+    expect(sanitizePreferences({ tutor: { advanced: { requestTimeoutSeconds: 60 } } }).tutor.advanced.requestTimeoutSeconds)
+      .toBe(180);
   });
 
   it("compiles constitution, privacy-aware memory, and disabled tools into agent policy", () => {

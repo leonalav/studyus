@@ -362,7 +362,7 @@ export const DEFAULT_TUTOR: TutorPreferences = {
     additionalInstructions: "",
     temperature: 40,
     maxResponseTokens: 4096,
-    requestTimeoutSeconds: 60,
+    requestTimeoutSeconds: 180,
     autonomy: "balanced",
   },
   versions: [],
@@ -542,6 +542,15 @@ function sanitizeTutor(value: unknown): TutorPreferences {
   const breakEvery = numberValue(sessions.breakEvery ?? tutor.breakEvery, DEFAULT_TUTOR.sessions.breakEvery, 10, 60);
   const voiceReplies = booleanValue(voice.voiceReplies ?? tutor.voiceReplies, DEFAULT_TUTOR.voice.voiceReplies);
   const autoNotes = booleanValue(sessions.autoNotes ?? tutor.autoNotes, DEFAULT_TUTOR.sessions.autoNotes);
+  const parsedRequestTimeout = numberValue(
+    advanced.requestTimeoutSeconds,
+    DEFAULT_TUTOR.advanced.requestTimeoutSeconds,
+    15,
+    180
+  );
+  // Migrate the former default in persisted preferences. Learners who already
+  // have 60 seconds saved should receive the longer deadline immediately.
+  const requestTimeoutSeconds = parsedRequestTimeout === 60 ? 180 : parsedRequestTimeout;
 
   const parsedTools = Object.fromEntries(TUTOR_TOOL_IDS.map((id) => [
     id,
@@ -645,7 +654,7 @@ function sanitizeTutor(value: unknown): TutorPreferences {
       additionalInstructions: textValue(advanced.additionalInstructions, DEFAULT_TUTOR.advanced.additionalInstructions, 8000),
       temperature: numberValue(advanced.temperature, DEFAULT_TUTOR.advanced.temperature, 0, 100),
       maxResponseTokens: numberValue(advanced.maxResponseTokens, DEFAULT_TUTOR.advanced.maxResponseTokens, 512, 8192),
-      requestTimeoutSeconds: numberValue(advanced.requestTimeoutSeconds, DEFAULT_TUTOR.advanced.requestTimeoutSeconds, 15, 180),
+      requestTimeoutSeconds,
       autonomy: enumValue(advanced.autonomy, ["ask-first", "balanced", "proactive"], DEFAULT_TUTOR.advanced.autonomy),
     },
     versions: (Array.isArray(tutor.versions) ? tutor.versions : []).map(sanitizeVersion).filter((item): item is TutorVersion => item !== null).slice(0, MAX_TUTOR_VERSIONS),

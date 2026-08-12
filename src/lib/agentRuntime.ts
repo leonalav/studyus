@@ -65,7 +65,7 @@ export interface ResolvedRoleEndpoint {
 }
 
 export const ROLE_LABEL: Record<AgentRole, string> = {
-  tutor: "Socratic Tutor",
+  tutor: "Tutor",
   generation: "Test Generation",
   evaluator: "Test Evaluator",
 };
@@ -254,7 +254,10 @@ interface CompletionOutcome {
   usage: TokenUsage;
 }
 
-export const DEFAULT_TIMEOUT_MS = 60_000;
+// Model endpoints can need substantial cold-start and structured-generation
+// time. Keep the shared deadline aligned with the native transport rather than
+// surfacing the former 60-second cutoff during an otherwise healthy response.
+export const DEFAULT_TIMEOUT_MS = 180_000;
 
 function httpError(status: number, text: string, endpoint: ResolvedRoleEndpoint): AgentRuntimeError {
   const body = text.slice(0, 240);

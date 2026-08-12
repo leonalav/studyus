@@ -3,6 +3,7 @@ import {
   buildAgentInputContent,
   callStructuredAgent,
   chatCompletion,
+  DEFAULT_TIMEOUT_MS,
   extractJsonPayload,
   invalid,
   type ResolvedRoleEndpoint,
@@ -108,6 +109,10 @@ describe("agent file and vision input", () => {
 });
 
 describe("agent request cancellation", () => {
+  it("uses a three-minute shared endpoint deadline", () => {
+    expect(DEFAULT_TIMEOUT_MS).toBe(180_000);
+  });
+
   function hangingFetch(_url: string | URL | Request, init?: RequestInit): Promise<Response> {
     return new Promise((_resolve, reject) => {
       const signal = init?.signal;

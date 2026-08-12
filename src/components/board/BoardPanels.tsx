@@ -11,6 +11,7 @@ import {
   Paperclip,
   Image as ImageIcon,
   Mic,
+  Undo2,
   X,
 } from "lucide-react";
 import type { SessionThreadLog } from "../../lib/tutor";
@@ -299,17 +300,20 @@ function MMButton({
   onClick,
   title,
   label,
+  disabled = false,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   title: string;
   label: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
       title={title}
-      className="flex items-center gap-1 rounded px-1.5 py-1 text-[9.5px] text-white/45 transition-colors hover:bg-white/10 hover:text-white"
+      disabled={disabled}
+      className="flex items-center gap-1 rounded px-1.5 py-1 text-[9.5px] text-white/45 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-white/45"
     >
       {children}
       <span className="font-medium">{label}</span>
@@ -459,6 +463,7 @@ export interface ChatAttachment {
 export function ChatDock({
   messages,
   onSend,
+  onRevertMessage,
   collapsed,
   setCollapsed,
   onClose,
@@ -467,12 +472,14 @@ export function ChatDock({
   onAddAttachment,
   onClearAttachments,
   onRemoveAttachment,
+  rewinding,
   agentStatus,
   activity,
 }: {
   chatOpen?: boolean;
   messages: ChatMsg[];
   onSend: (t: string, imgData?: string) => void;
+  onRevertMessage: (messageId: number) => void;
   collapsed: boolean;
   setCollapsed: (b: boolean) => void;
   onClose: () => void;
@@ -488,6 +495,7 @@ export function ChatDock({
   onClearAttachments: () => void;
   onRemoveAttachment: (index: number) => void;
   onSpeakLast: () => void;
+  rewinding: boolean;
   agentStatus?: "idle" | "thinking" | "writing" | "error";
   activity?: AgentActivity | null;
 }) {
@@ -620,7 +628,7 @@ export function ChatDock({
   }, [messages, typing]);
 
   const send = () => {
-    if (!val.trim() && attachments.length === 0) return;
+    if (rewinding || (!val.trim() && attachments.length === 0)) return;
     const imgAtt = attachments.find((a) => a.kind === "image");
     onSend(val.trim(), imgAtt?.url);
     setVal("");
@@ -672,13 +680,13 @@ export function ChatDock({
         onChange={handleImageUpload}
       />
 
-      <MMButton onClick={() => fileInputRef.current?.click()} title="Attach a file" label="File">
+      <MMButton disabled={rewinding} onClick={() => fileInputRef.current?.click()} title="Attach a file" label="File">
         <Paperclip size={13} />
       </MMButton>
-      <MMButton onClick={() => imageInputRef.current?.click()} title="Attach an image" label="Image">
+      <MMButton disabled={rewinding} onClick={() => imageInputRef.current?.click()} title="Attach an image" label="Image">
         <ImageIcon size={13} />
       </MMButton>
-      <MMButton onClick={toggleVoiceDictation} title="Voice input / Dictation" label="Voice">
+      <MMButton disabled={rewinding} onClick={toggleVoiceDictation} title="Voice input / Dictation" label="Voice">
         <Mic size={13} className={isRecordingVoice ? "text-accent animate-pulse" : ""} />
       </MMButton>
     </div>
@@ -725,14 +733,15 @@ export function ChatDock({
             onKeyDown={(e) => {
               if (e.key === "Enter") send();
             }}
-            placeholder={busy ? "Studyus is responding…" : "Ask anything about the board…"}
-            className="min-w-0 flex-1 cursor-text bg-transparent text-[11px] text-white outline-none placeholder:text-white/35"
+            disabled={rewinding}
+            placeholder={rewinding ? "Returning conversation…" : busy ? "Studyus is responding…" : "Ask anything about the board…"}
+            className="min-w-0 flex-1 cursor-text bg-transparent text-[11px] text-white outline-none placeholder:text-white/35 disabled:cursor-wait disabled:opacity-60"
           />
           <button
             onClick={send}
-            disabled={!val.trim()}
+            disabled={rewinding || !val.trim()}
             className={`rounded px-2.5 py-1 text-[10px] font-medium transition-all ${
-              val.trim() ? "bg-white text-black active:scale-95" : "bg-white/10 text-white/30"
+              !rewinding && val.trim() ? "bg-white text-black active:scale-95" : "bg-white/10 text-white/30"
             }`}
           >
             Send
@@ -807,14 +816,29 @@ export function ChatDock({
                 <div key={m.id} className="anim-msg space-y-1">
                   <div className="text-right text-[8.5px] uppercase tracking-[0.12em] text-white/30">You</div>
                   <div className="ml-auto max-w-[90%] rounded bg-white/[0.07] px-2 py-1.5 text-[10.5px] leading-relaxed text-white/82">
-                    {m.text}
+                    <div>{m.text}</div>
                     {m.imageData && (
                       <img
                         src={m.imageData}
                         alt="User uploaded attachment"
-                        className="mt-2 max-w-full rounded-md object-contain max-h-[160px] border border-white/10"
+                        className="mt-2 max-h-[160px] max-w-full rounded-md border border-white/10 object-contain"
                       />
                     )}
+                    <div className="mt-1 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setVal(m.text);
+                          onRevertMessage(m.id);
+                        }}
+                        disabled={rewinding}
+                        aria-label="Revert to this message"
+                        title="Revert to this message"
+                        className="grid h-5 w-5 place-items-center rounded text-white/35 transition-colors hover:bg-white/10 hover:text-white/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#7dd3fc]/70 disabled:cursor-wait disabled:opacity-35"
+                      >
+                        <Undo2 size={11} aria-hidden="true" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
@@ -853,14 +877,15 @@ export function ChatDock({
               value={val}
               onChange={(e) => setVal(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && send()}
-              placeholder="what if I want to…"
-              className="min-w-0 flex-1 rounded bg-black/15 px-2 py-1.5 text-[10px] text-white outline-none placeholder:text-white/30"
+              disabled={rewinding}
+              placeholder={rewinding ? "Returning conversation…" : "what if I want to…"}
+              className="min-w-0 flex-1 rounded bg-black/15 px-2 py-1.5 text-[10px] text-white outline-none placeholder:text-white/30 disabled:cursor-wait disabled:opacity-60"
             />
             <button
               onClick={send}
-              disabled={!val.trim() && attachments.length === 0}
+              disabled={rewinding || (!val.trim() && attachments.length === 0)}
               className={`rounded px-2.5 py-1.5 text-[9.5px] font-medium transition-all ${
-                val.trim() || attachments.length > 0 ? "bg-white text-black active:scale-95" : "bg-white/10 text-white/30"
+                !rewinding && (val.trim() || attachments.length > 0) ? "bg-white text-black active:scale-95" : "bg-white/10 text-white/30"
               }`}
             >
               Submit
