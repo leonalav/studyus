@@ -88,7 +88,21 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(prompt).not.toMatch(/"kind":\s*"equation"/);
   });
 
-  it("ennumerates the 8 geometry object kinds so the LLM names real ones", () => {
+  it("requires accessible intuition followed by rigorous detail", () => {
+    expect(prompt).toMatch(/simple plain-language intuition first/i);
+    expect(prompt).toMatch(/precise terminology, assumptions, rigorous reasoning/i);
+    expect(prompt).toMatch(/define jargon/i);
+    expect(prompt).toMatch(/connect formal details back to the intuitive idea/i);
+  });
+
+  it("requires substantive lessons to use relevant multimodal board tools", () => {
+    expect(prompt).toMatch(/substantive lesson should not be text-only/i);
+    expect(prompt).toMatch(/equations, function graphs, data charts, and domain-faithful diagrams/i);
+    expect(prompt).toMatch(/never decorative, irrelevant, or semantically misleading figures/i);
+    expect(prompt).toMatch(/obey the enabled tool permissions/i);
+  });
+
+  it("enumerates the 8 geometry object kinds so the LLM names real ones", () => {
     for (const kind of ["point", "line", "segment", "circle", "polygon", "angle", "label", "text"]) {
       expect(prompt).toContain(kind);
     }

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronDown,
+  ChevronUp,
   Download,
   LockKeyhole,
   RotateCcw,
@@ -17,6 +19,11 @@ import {
   type Stroke,
 } from "./board/Chalkboard";
 import type { ChatMsg } from "./board/BoardPanels";
+import {
+  clampSnapshotY,
+  getSnapshotVerticalRange,
+  moveSnapshotY,
+} from "../lib/pastNoteSnapshot";
 
 interface Props {
   sessionId: string;
@@ -210,11 +217,16 @@ function BoardSnapshot({
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const [frameWidth, setFrameWidth] = useState(0);
+  const [contentHeight, setContentHeight] = useState(0);
+  const [snapshotY, setSnapshotY] = useState(view.y);
   const sourceWidth = clampDimension(view.viewportWidth, 1280, 480, 4096);
   const sourceHeight = clampDimension(view.viewportHeight, 720, 320, 2400);
   const scale = frameWidth > 0 ? frameWidth / sourceWidth : 1;
   const displayHeight = frameWidth > 0 ? sourceHeight * scale : Math.min(sourceHeight, 520);
   const theme = THEMES.find((item) => item.id === themeId) ?? THEMES[0];
+  const verticalRange = getSnapshotVerticalRange(contentHeight, sourceHeight, view.s, view.y);
+  const canScrollUp = verticalRange.scrollable && snapshotY < verticalRange.top - 1;
+  const canScrollDown = verticalRange.scrollable && snapshotY > verticalRange.bottom + 1;
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -225,6 +237,29 @@ function BoardSnapshot({
     observer.observe(frame);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    setSnapshotY(view.y);
+  }, [board.id, view.y]);
+
+  useEffect(() => {
+    const content = frameRef.current?.querySelector<HTMLElement>("[data-board-content]");
+    if (!content) return;
+    const measure = () => setContentHeight(content.scrollHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [board.id, board.blocks.length, fontScale, frameWidth]);
+
+  useEffect(() => {
+    if (!verticalRange.scrollable) return;
+    setSnapshotY((current) => clampSnapshotY(current, verticalRange));
+  }, [verticalRange.bottom, verticalRange.scrollable, verticalRange.top]);
+
+  const scrollBoard = (direction: "up" | "down") => {
+    setSnapshotY((current) => moveSnapshotY(current, direction, verticalRange, sourceHeight));
+  };
 
   return (
     <div className="overflow-hidden rounded-xl border border-white/10 bg-black shadow-[0_22px_60px_rgba(0,0,0,0.28)]">
@@ -255,12 +290,39 @@ function BoardSnapshot({
               penColor="#fbbf24"
               penTool="pen"
               strokesKey={`past-note-${board.id}`}
-              initialView={view}
+              initialView={{ ...view, y: snapshotY }}
               initialStrokes={strokes}
               readOnly
             />
           </div>
         )}
+        <div
+          className="absolute right-3 top-1/2 z-20 flex -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-white/15 bg-[#171819]/88 text-white shadow-[0_8px_24px_rgba(0,0,0,0.34)] backdrop-blur-md"
+          role="group"
+          aria-label="Saved chalkboard scroll controls"
+        >
+          <button
+            type="button"
+            onClick={() => scrollBoard("up")}
+            disabled={!canScrollUp}
+            aria-label="Scroll saved chalkboard up"
+            title="Scroll up"
+            className="grid h-9 w-9 place-items-center transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:text-white/25"
+          >
+            <ChevronUp size={17} />
+          </button>
+          <div className="h-px bg-white/10" />
+          <button
+            type="button"
+            onClick={() => scrollBoard("down")}
+            disabled={!canScrollDown}
+            aria-label="Scroll saved chalkboard down"
+            title="Scroll down"
+            className="grid h-9 w-9 place-items-center transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:text-white/25"
+          >
+            <ChevronDown size={17} />
+          </button>
+        </div>
       </div>
     </div>
   );

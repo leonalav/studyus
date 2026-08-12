@@ -163,6 +163,18 @@ export function Chalkboard({
     setAskOpen(false);
   }, [board.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Read-only snapshots may provide a controlled camera (for example, Past
+  // Notes' up/down controls). Keep live boards uncontrolled so their normal
+  // drag and zoom behavior is unchanged.
+  useEffect(() => {
+    if (!readOnly || !initialView) return;
+    setView((current) => (
+      current.x === initialView.x && current.y === initialView.y && current.s === initialView.s
+        ? current
+        : { ...initialView }
+    ));
+  }, [initialView?.x, initialView?.y, initialView?.s, readOnly]);
+
   useEffect(() => {
     const viewport = wrapRef.current;
     onViewChange?.({
@@ -382,6 +394,7 @@ export function Chalkboard({
 
       {/* ordered content stream — vertical stack, never absolute chaos */}
       <div
+        data-board-content
         className="absolute left-0 top-0 origin-top-left"
         style={{
           transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`,

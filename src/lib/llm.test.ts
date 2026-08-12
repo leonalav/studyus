@@ -8,6 +8,7 @@ import {
   storeCredentialLocally,
   getCredentialLocally,
   testModelEndpoint,
+  TUTOR_AGENT_PROMPT_V1,
 } from "./llm";
 
 describe("Three-Role LLM Engine & Security", () => {
@@ -59,6 +60,14 @@ describe("Three-Role LLM Engine & Security", () => {
     expect(bindings.length).toBe(3);
     expect(bindings.map((b) => b.role).sort()).toEqual(["evaluator", "generation", "tutor"]);
     expect(bindings.every((b) => b.modelId === "llama-3-70b")).toBe(true);
+  });
+
+  it("pins layered explanations and meaningful visual board composition in the base tutor rules", () => {
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/simple plain-language intuition/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/precise terminology, assumptions, rigorous reasoning/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/equations, function graphs, data charts, and domain-faithful diagrams/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/never add decorative, irrelevant, or semantically misleading figures/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/respect disabled tool permissions/i);
   });
 
   it("validates endpoint scheme and reports invalid URLs", async () => {

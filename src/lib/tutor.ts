@@ -62,7 +62,7 @@ import {
   type TutorToolPermissions,
 } from "./preferences";
 
-export const TUTOR_PROMPT_VERSION = "tutor_v4";
+export const TUTOR_PROMPT_VERSION = "tutor_v5";
 export const TUTOR_SCHEMA_VERSION = "tutor_turn_v3";
 export const ONBOARDING_PROMPT_VERSION = "tutor_onboarding_v1";
 export const ONBOARDING_SCHEMA_VERSION = "onboarding_questions_v1";
@@ -1452,6 +1452,8 @@ export function buildTutorUserPrompt(params: {
 
   parts.push(
     `GLOBAL BEHAVIOR: If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
+    `For every substantive explanation, layer simple plain-language intuition first, then precise terminology, assumptions, rigorous reasoning, and meaningful equations or worked steps; define jargon and connect formal details back to the intuitive idea. ` +
+    `Treat the chalkboard as a visual teaching surface, not a text transcript: a substantive lesson should not be text-only when relevant tools are available. Deliberately compose and vary a meaningful mix of equations, function graphs, data charts, and domain-faithful diagrams or scientific figures across the lesson. Use only visuals that clarify the subject—never decorative, irrelevant, or semantically misleading figures—and obey the enabled tool permissions. ` +
     `Always include speech, board_ops, and evidence_refs. Use an empty array when there are no board operations. ` +
     (params.cards.length === 0
       ? `No evidence handles were supplied, so evidence_refs MUST be exactly [].`
