@@ -3,6 +3,8 @@ import katex from "katex";
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
+  ArrowDown,
   Check,
   Type,
   Maximize2,
@@ -70,6 +72,8 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     ordinal: number;
   }>());
   const saveTimeoutRef = useRef<number | null>(null);
+  const examScrollRef = useRef<HTMLDivElement>(null);
+  const [scrollAvailability, setScrollAvailability] = useState({ up: false, down: false });
   const [time, setTime] = useState(0);
   const startTime = useRef(Date.now());
 
@@ -168,6 +172,56 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     const t = window.setInterval(() => setTime(Math.floor((Date.now() - startTime.current) / 1000)), 1000);
     return () => window.clearInterval(t);
   }, []);
+
+  // Fullscreen exam mode intentionally hides the app shell's scroller. Give the
+  // runner its own persistent scroll region and keep explicit up/down controls
+  // in sync as proof editors, keyboards, and previews change height.
+  useEffect(() => {
+    const container = examScrollRef.current;
+    if (!container || !dto || submissionResult) return;
+
+    let animationFrame = 0;
+    const updateAvailability = () => {
+      const next = {
+        up: container.scrollTop > 2,
+        down: container.scrollTop + container.clientHeight < container.scrollHeight - 2,
+      };
+      setScrollAvailability((current) =>
+        current.up === next.up && current.down === next.down ? current : next
+      );
+    };
+
+    animationFrame = window.requestAnimationFrame(updateAvailability);
+    container.addEventListener("scroll", updateAvailability, { passive: true });
+    window.addEventListener("resize", updateAvailability);
+
+    const resizeObserver = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(updateAvailability);
+    resizeObserver?.observe(container);
+    if (container.firstElementChild) resizeObserver?.observe(container.firstElementChild);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      container.removeEventListener("scroll", updateAvailability);
+      window.removeEventListener("resize", updateAvailability);
+      resizeObserver?.disconnect();
+    };
+  }, [dto, submissionResult]);
+
+  useEffect(() => {
+    examScrollRef.current?.scrollTo({ top: 0 });
+  }, [index, runnerAttemptId]);
+
+  const scrollExam = (direction: "up" | "down") => {
+    const container = examScrollRef.current;
+    if (!container) return;
+    const distance = Math.max(320, Math.round(container.clientHeight * 0.72));
+    container.scrollBy({
+      top: direction === "up" ? -distance : distance,
+      behavior: "smooth",
+    });
+  };
 
   // Keep every edited question in the debounce queue. A single pending timeout
   // previously allowed a quick edit on question B to cancel question A's save.
@@ -353,7 +407,12 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   }
 
   return (
-    <div className="mx-auto w-full max-w-[1100px] px-5 py-6 select-none">
+    <>
+      <div
+        ref={examScrollRef}
+        className="h-screen w-full overflow-y-scroll overscroll-contain [scrollbar-gutter:stable]"
+      >
+        <div className="mx-auto w-full max-w-[1100px] pt-6 pr-16 pb-24 pl-5 select-none xl:px-5">
       {/* header */}
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -525,7 +584,35 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
           </div>
         </div>
       )}
-    </div>
+        </div>
+      </div>
+
+      <div
+        className="fixed right-3 top-1/2 z-[70] flex -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-edge bg-[#222224]/95 shadow-xl backdrop-blur sm:right-5"
+        aria-label="Exam page scrolling controls"
+      >
+        <button
+          type="button"
+          onClick={() => scrollExam("up")}
+          disabled={!scrollAvailability.up}
+          aria-label="Scroll exam up"
+          title="Scroll up"
+          className="grid h-10 w-10 place-items-center border-b border-edge text-fg transition-colors hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:text-faint disabled:opacity-45"
+        >
+          <ArrowUp size={17} />
+        </button>
+        <button
+          type="button"
+          onClick={() => scrollExam("down")}
+          disabled={!scrollAvailability.down}
+          aria-label="Scroll exam down"
+          title="Scroll down"
+          className="grid h-10 w-10 place-items-center text-fg transition-colors hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:text-faint disabled:opacity-45"
+        >
+          <ArrowDown size={17} />
+        </button>
+      </div>
+    </>
   );
 }
 
