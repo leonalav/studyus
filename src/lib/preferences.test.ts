@@ -90,6 +90,20 @@ describe("persisted Studyus preferences", () => {
     expect(parsed.modelEndpoints).toEqual([]);
   });
 
+  it("preserves the original Inter font and honest email channel choices", () => {
+    const parsed = sanitizePreferences({
+      appearance: { font: "inter" },
+      notifications: {
+        events: { testReady: { enabled: true, channel: "email" } },
+        summary: { cadence: "daily", channel: "email" },
+      },
+    });
+
+    expect(parsed.appearance.font).toBe("inter");
+    expect(parsed.notifications.events.testReady).toEqual({ enabled: true, channel: "email" });
+    expect(parsed.notifications.summary).toEqual({ cadence: "daily", channel: "email" });
+  });
+
   it("keeps one active endpoint and never stores unknown endpoint fields", () => {
     const parsed = sanitizePreferences({
       modelEndpoints: [
@@ -129,6 +143,7 @@ describe("persisted Studyus preferences", () => {
     expect(reminder).toContain("difficulty preference: harder");
     expect(reminder).toContain("45 minutes");
     expect(reminder).toContain("15 minutes");
+    expect(reminder).toContain("Auto-notes are enabled");
   });
 });
 

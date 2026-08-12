@@ -130,13 +130,13 @@ export function checkScheduledSummary(now = Date.now()): boolean {
   }
   if (now - last < period) return false;
 
-  deliver(
+  const delivered = deliver(
     summary.channel,
     "Your Studyus summary is ready",
     "Review your recent study sessions, saved notes, and test activity."
   );
   try { window.localStorage.setItem(LAST_SUMMARY_KEY, String(now)); } catch {}
-  return true;
+  return delivered !== "disabled" && delivered !== "permission-needed";
 }
 
 export function startNotificationRuntime(): () => void {

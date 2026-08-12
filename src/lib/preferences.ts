@@ -2,9 +2,9 @@ export const PREFERENCES_STORAGE_KEY = "studyus.preferences.v1";
 export const PREFERENCES_CHANGED_EVENT = "studyus:preferences-changed";
 
 export type ThemePreference = "system" | "dark" | "light";
-export type FontPreference = "system" | "grotesk" | "serif" | "mono";
+export type FontPreference = "system" | "grotesk" | "inter" | "serif" | "mono";
 export type DensityPreference = "comfortable" | "compact";
-export type NotificationChannel = "in-app" | "desktop" | "both";
+export type NotificationChannel = "in-app" | "desktop" | "both" | "email";
 export type NotificationEventId = "testReady" | "sessionComplete";
 export type SummaryCadence = "off" | "daily" | "weekly" | "monthly";
 export type TutorDifficulty = "easier" | "adaptive" | "harder";
@@ -218,7 +218,7 @@ function sanitizeRule(value: unknown, fallback: NotificationRule): NotificationR
   const rule = object(value);
   return {
     enabled: booleanValue(rule.enabled, fallback.enabled),
-    channel: enumValue(rule.channel, ["in-app", "desktop", "both"], fallback.channel),
+    channel: enumValue(rule.channel, ["in-app", "desktop", "both", "email"], fallback.channel),
   };
 }
 
@@ -291,7 +291,7 @@ export function sanitizePreferences(value: unknown): StudyusPreferences {
   return {
     appearance: {
       theme: enumValue(appearance.theme, ["system", "dark", "light"], DEFAULT_PREFERENCES.appearance.theme),
-      font: enumValue(appearance.font, ["system", "grotesk", "serif", "mono"], DEFAULT_PREFERENCES.appearance.font),
+      font: enumValue(appearance.font, ["system", "grotesk", "inter", "serif", "mono"], DEFAULT_PREFERENCES.appearance.font),
       density: enumValue(appearance.density, ["comfortable", "compact"], DEFAULT_PREFERENCES.appearance.density),
       textSize: numberValue(appearance.textSize, DEFAULT_PREFERENCES.appearance.textSize, 80, 140),
       reducedMotion: booleanValue(appearance.reducedMotion, DEFAULT_PREFERENCES.appearance.reducedMotion),
@@ -306,7 +306,7 @@ export function sanitizePreferences(value: unknown): StudyusPreferences {
       },
       summary: {
         cadence: enumValue(summary.cadence, ["off", "daily", "weekly", "monthly"], DEFAULT_PREFERENCES.notifications.summary.cadence),
-        channel: enumValue(summary.channel, ["in-app", "desktop", "both"], DEFAULT_PREFERENCES.notifications.summary.channel),
+        channel: enumValue(summary.channel, ["in-app", "desktop", "both", "email"], DEFAULT_PREFERENCES.notifications.summary.channel),
       },
     },
     tutor: {
@@ -396,5 +396,8 @@ export function buildTutorPreferenceReminder(preferences: TutorPreferences = loa
     `- Response controls (0–100): verbosity ${style.verbosity}, patience ${style.patience}, challenge ${style.challenge}, humor ${style.humor}.`,
     `- Practice difficulty preference: ${preferences.difficulty}. Treat this as a real calibration target while preserving curriculum correctness and assistance-policy limits.`,
     `- Preferred session length: ${preferences.sessionLength} minutes; suggest a short break after about ${preferences.breakEvery} minutes when relevant.`,
+    preferences.autoNotes
+      ? "- Auto-notes are enabled: keep the chalkboard organized around concise, reusable key points as the session develops."
+      : "- Auto-notes are disabled: do not add summary or key-point blocks unless the learner asks for them.",
   ].join("\n");
 }

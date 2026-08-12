@@ -74,6 +74,27 @@ describe("local notification delivery", () => {
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a saved email preference honest when no mail service exists", () => {
+    const preferences = structuredClone(DEFAULT_PREFERENCES);
+    preferences.notifications.events.testReady = { enabled: true, channel: "email" };
+    const { target } = installWindow(preferences);
+    const listener = vi.fn();
+    target.addEventListener(IN_APP_NOTIFICATION_EVENT, listener);
+
+    expect(notifyStudyusEvent("testReady", "Test ready", "Open Available tests.")).toBe("disabled");
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("does not report an unavailable email summary as delivered", () => {
+    const preferences = structuredClone(DEFAULT_PREFERENCES);
+    preferences.notifications.summary = { cadence: "daily", channel: "email" };
+    const { values } = installWindow(preferences);
+    const start = Date.UTC(2026, 7, 12, 0, 0, 0);
+    values.set(LAST_SUMMARY_KEY, String(start));
+
+    expect(checkScheduledSummary(start + 24 * 60 * 60 * 1000)).toBe(false);
+  });
+
   it("reports desktop delivery as unsupported instead of pretending to send", async () => {
     installWindow();
     vi.stubGlobal("Notification", undefined);
