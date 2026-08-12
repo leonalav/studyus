@@ -14,10 +14,13 @@ import {
   Target,
   Trash2,
 } from "lucide-react";
-import { getDb } from "../db/database";
 import { useCurricula } from "../state/curriculumStore";
 import { deleteChalkboardSession } from "../api";
-import { deleteStudySession } from "../state/studySessionStore";
+import {
+  deleteStudySession,
+  listStudySessions,
+  subscribeToStudySessions,
+} from "../state/studySessionStore";
 
 interface Props {
   onNotify: (text: string) => void;
@@ -39,22 +42,18 @@ export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab }: P
   const [pastNotesOpen, setPastNotesOpen] = useState(true);
 
   const { curricula, addFiles } = useCurricula();
-  const [pastNotes, setPastNotes] = useState<PastNote[]>([]);
+  const [pastNotes, setPastNotes] = useState<PastNote[]>(() => listStudySessions());
 
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    (async () => {
-      const db = await getDb();
-      const notesRes = db.exec("SELECT id, title, domain, updated_at FROM chalkboard_sessions ORDER BY updated_at DESC;");
-      const loadedNotes = notesRes[0]?.values.map((row) => ({
-        id: row[0] as string,
-        title: row[1] as string,
-        domain: row[2] as string,
-        updatedAt: row[3] as string,
-      })) ?? [];
-      setPastNotes(loadedNotes);
-    })();
+    const refresh = () => setPastNotes(listStudySessions());
+    const unsubscribe = subscribeToStudySessions(refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("focus", refresh);
+    };
   }, []);
 
   const handleUploadPDF = async (files: FileList | null) => {
@@ -73,8 +72,8 @@ export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab }: P
   const handleDeleteNote = async (note: PastNote) => {
     try {
       await deleteChalkboardSession(note.id);
+      // This localStorage write broadcasts to Recent Sessions and Past Notes.
       deleteStudySession(note.id);
-      setPastNotes((current) => current.filter((n) => n.id !== note.id));
       onNotify(`Deleted "${note.title}"`);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "Could not delete that note");

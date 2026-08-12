@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Download, GraduationCap, Sparkles } from "lucide-react";
+import { Download } from "lucide-react";
 import type { Tab } from "./TopBar";
 import { TestCenter } from "./test/TestCenter";
 import { QuestionBank } from "./test/QuestionBank";
@@ -143,10 +143,6 @@ function CurriculumTab({
   return (
     <main className="mx-auto w-full max-w-[820px] px-5 pb-20 pt-11 sm:px-8 sm:pt-14">
       <header className="mb-10">
-        <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-[#e8c547]/20 bg-[#e8c547]/[0.06] px-2.5 py-1 font-mono text-[9.5px] uppercase tracking-[0.18em] text-[#e7cb67]">
-          <GraduationCap size={12} />
-          Curriculum PDF
-        </div>
         <h1 className="max-w-[720px] text-[34px] font-bold leading-[1.08] tracking-[-0.035em] text-fg sm:text-[42px]">
           {tab.title}
         </h1>
@@ -160,7 +156,6 @@ function CurriculumTab({
             onClick={() => handlePickSection(tab.title)}
             className="inline-flex h-9 items-center gap-2 rounded-md bg-accent px-3.5 text-[12px] font-semibold text-white transition-colors hover:bg-accent-deep"
           >
-            <Sparkles size={14} />
             Study with Studyus
           </button>
           <button

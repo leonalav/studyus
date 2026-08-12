@@ -25,6 +25,27 @@ export interface StoredStudySession {
 }
 
 const KEY = "studyus.study_sessions.v1";
+export const STUDY_SESSIONS_CHANGED_EVENT = "studyus:study-sessions-changed";
+
+function emitSessionsChanged(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(STUDY_SESSIONS_CHANGED_EVENT));
+  }
+}
+
+/** Subscribe both to same-window writes and cross-window localStorage changes. */
+export function subscribeToStudySessions(listener: () => void): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === KEY) listener();
+  };
+  window.addEventListener(STUDY_SESSIONS_CHANGED_EVENT, listener);
+  window.addEventListener("storage", onStorage);
+  return () => {
+    window.removeEventListener(STUDY_SESSIONS_CHANGED_EVENT, listener);
+    window.removeEventListener("storage", onStorage);
+  };
+}
 
 function read(): StoredStudySession[] {
   try {
@@ -46,10 +67,12 @@ export function getStudySession(id: string): StoredStudySession | null {
 export function saveStudySession(session: StoredStudySession): void {
   const sessions = read().filter((item) => item.id !== session.id);
   localStorage.setItem(KEY, JSON.stringify([session, ...sessions].slice(0, 50)));
+  emitSessionsChanged();
 }
 
 /** Permanently remove one persisted study session. No-op if the id is unknown. */
 export function deleteStudySession(id: string): void {
   const sessions = read().filter((item) => item.id !== id);
   localStorage.setItem(KEY, JSON.stringify(sessions));
+  emitSessionsChanged();
 }

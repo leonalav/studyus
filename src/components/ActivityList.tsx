@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
-import { listStudySessions, deleteStudySession } from "../state/studySessionStore";
+import {
+  deleteStudySession,
+  listStudySessions,
+  subscribeToStudySessions,
+} from "../state/studySessionStore";
 import { deleteChalkboardSession } from "../api";
 
 export function ActivityList({ onOpen, onNotify }: { onOpen: (id: string, title: string) => void; onNotify?: (t: string) => void }) {
@@ -9,21 +13,27 @@ export function ActivityList({ onOpen, onNotify }: { onOpen: (id: string, title:
 
   useEffect(() => {
     const refresh = () => setSessions(listStudySessions());
+    const unsubscribe = subscribeToStudySessions(refresh);
     window.addEventListener("focus", refresh);
-    return () => window.removeEventListener("focus", refresh);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("focus", refresh);
+    };
   }, []);
 
   // Remove a finished session everywhere it is persisted: the localStorage
   // study-session snapshot (what this list reads) AND the SQLite chalkboard
   // session + its cascaded transcript. Both are keyed by the same id.
-  const remove = (id: string, title: string) => {
-    deleteStudySession(id);
-    void deleteChalkboardSession(id).catch(() => {
-      /* SQLite row may not exist for an old snapshot — the localStorage delete
-         above already removed it from this list, so this is non-fatal. */
-    });
-    setSessions(listStudySessions());
-    onNotify?.(`Deleted "${title}"`);
+  const remove = async (id: string, title: string) => {
+    try {
+      // Delete the relational record first; a missing old row is a successful
+      // SQLite no-op. The snapshot write then broadcasts to both visible lists.
+      await deleteChalkboardSession(id);
+      deleteStudySession(id);
+      onNotify?.(`Deleted "${title}"`);
+    } catch (error) {
+      onNotify?.(error instanceof Error ? error.message : "Could not delete that session");
+    }
   };
 
   useEffect(() => {
@@ -62,7 +72,7 @@ export function ActivityList({ onOpen, onNotify }: { onOpen: (id: string, title:
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                remove(session.id, session.title);
+                void remove(session.id, session.title);
               }}
               aria-label={`Delete ${session.title}`}
               title="Delete session"

@@ -266,6 +266,8 @@ export default function App() {
                 notify={notify}
                 inputRef={inputRef}
                 onPrepare={startPrep}
+                selectedSection={chosenSection}
+                onSelectedSectionChange={setChosenSection}
               />
 
               <ActivityList

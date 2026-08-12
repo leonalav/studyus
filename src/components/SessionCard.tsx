@@ -55,6 +55,8 @@ interface Props {
   notify: (text: string) => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   onPrepare: (prompt: string, boundNodes?: string[], onboarding?: OnboardingAnswers) => void;
+  selectedSection?: string | null;
+  onSelectedSectionChange?: (section: string | null) => void;
 }
 
 const DEPTHS: { id: Depth; label: string; desc: string }[] = [
@@ -72,7 +74,13 @@ const COMMANDS: { token: string; label: string; desc: string; intent: Intent; de
   { token: "focus", label: "Focus", desc: "Pull out the one idea to remember", intent: "explain", depth: "simple" },
 ];
 
-export function SessionCard({ notify, inputRef, onPrepare }: Props) {
+export function SessionCard({
+  notify,
+  inputRef,
+  onPrepare,
+  selectedSection = null,
+  onSelectedSectionChange,
+}: Props) {
   const { curricula } = useCurricula();
   const [started, setStarted] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -228,7 +236,12 @@ export function SessionCard({ notify, inputRef, onPrepare }: Props) {
    *  starting the session directly (no fabricated questions) and surface why. */
   async function beginOnboarding(prompt: string) {
     const boundNodes = collectBoundNodeIds(curricula, ctxDoc, ctxSubsection);
-    const concept = resolveConcept(curricula, ctxDoc, ctxSubsection, prompt);
+    const concept = resolveConcept(
+      curricula,
+      ctxDoc,
+      ctxSubsection,
+      selectedSection?.trim() || prompt
+    );
     const agentCount = await safeAgentCount();
 
     setOnboardingStage("generating");
@@ -378,6 +391,8 @@ export function SessionCard({ notify, inputRef, onPrepare }: Props) {
           }}
           subsection={ctxSubsection}
           setSubsection={setCtxSubsection}
+          externalLabel={selectedSection}
+          onLabelChange={onSelectedSectionChange}
           notify={notify}
         />
         <span className="ml-auto flex items-center gap-1.5 font-mono text-[11px] text-dim">
@@ -757,6 +772,8 @@ function ContextPicker({
   setDoc,
   subsection,
   setSubsection,
+  externalLabel,
+  onLabelChange,
   notify,
 }: {
   subject: SubjectKey | null;
@@ -765,6 +782,8 @@ function ContextPicker({
   setDoc: (d: string | null) => void;
   subsection: string | null;
   setSubsection: (s: string | null) => void;
+  externalLabel?: string | null;
+  onLabelChange?: (label: string | null) => void;
   notify: (t: string) => void;
 }) {
   const { curricula } = useCurricula();
@@ -800,7 +819,7 @@ function ContextPicker({
   // "Add context" once a concept is picked from the PDF's bookmarks.
   const label = selectedNode
     ? [selectedNode.sectionNumber, selectedNode.title].filter(Boolean).join(" ")
-    : docName ?? meta?.label ?? "Add context";
+    : docName ?? meta?.label ?? externalLabel ?? "Add context";
 
   return (
     <div className="relative" ref={wrapRef}>
@@ -809,7 +828,7 @@ function ContextPicker({
         className="flex max-w-[280px] items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[15px] transition-colors hover:bg-white/[0.06]"
       >
         {meta && <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: meta.accent }} />}
-        <span className={`truncate ${meta ? "text-fg" : "text-mut"}`}>{label}</span>
+        <span className={`truncate ${meta || externalLabel ? "text-fg" : "text-mut"}`}>{label}</span>
         <ChevronDown size={13} className={`shrink-0 text-dim transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
@@ -827,6 +846,7 @@ function ContextPicker({
                     onClick={() => {
                       setSubject(s.id);
                       setDoc(null);
+                      onLabelChange?.(null);
                       setStep("docs");
                     }}
                     className="flex w-full items-center gap-2.5 rounded px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07]"
@@ -845,6 +865,7 @@ function ContextPicker({
                   onClick={() => {
                     setSubject(null);
                     setDoc(null);
+                    onLabelChange?.(null);
                     setStep("subject");
                   }}
                   className="font-mono text-[10px] uppercase tracking-wider text-dim transition-colors hover:text-fg"
@@ -872,6 +893,7 @@ function ContextPicker({
                       // and that choice becomes this picker's title.
                       setDoc(d.id);
                       setSubsection(null);
+                      onLabelChange?.(null);
                       setExpanded(new Set(d.nodes.slice(0, 1).map((n) => n.id)));
                       setStep("concepts");
                     }}
@@ -892,6 +914,7 @@ function ContextPicker({
                   onClick={() => {
                     setDoc(null);
                     setSubsection(null);
+                    onLabelChange?.(null);
                     setOpen(false);
                     notify("Studying without a curriculum");
                   }}
@@ -941,11 +964,13 @@ function ContextPicker({
                       })
                     }
                     onPick={(picked) => {
+                      const pickedLabel = [picked.sectionNumber, picked.title]
+                        .filter(Boolean)
+                        .join(" ");
                       setSubsection(picked.id);
+                      onLabelChange?.(pickedLabel);
                       setOpen(false);
-                      notify(
-                        `Studying ${[picked.sectionNumber, picked.title].filter(Boolean).join(" ")}`
-                      );
+                      notify(`Studying ${pickedLabel}`);
                     }}
                   />
                 ))}
