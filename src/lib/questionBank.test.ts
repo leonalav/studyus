@@ -8,6 +8,23 @@ describe("Question bank completion boundary", () => {
     seedLegacyData(db);
   });
 
+  it("returns validated stored figures for completed questions", async () => {
+    const db = await getDb();
+    db.run("UPDATE assessment_items SET figure_spec_json = ? WHERE id = 'q1';", [
+      JSON.stringify({
+        type: "equation",
+        latex: "F = ma",
+        variables: [{ symbol: "F", label: "force", unit: "N" }],
+      }),
+    ]);
+
+    const records = await getCompletedQuestionBankRecords();
+    expect(records.find((record) => record.id.endsWith(":q1"))?.figure).toMatchObject({
+      type: "equation",
+      latex: "F = ma",
+    });
+  });
+
   it("returns each completed-attempt item once and hides created or active attempts", async () => {
     const initial = await getCompletedQuestionBankRecords();
 

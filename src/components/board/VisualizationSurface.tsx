@@ -115,6 +115,8 @@ export interface VisualizationSurfaceProps {
   chalk: string;
   accent: string;
   scale?: number;
+  /** Allow navigation/tooltips while preventing authored objects from being moved. */
+  readOnly?: boolean;
   onState?: (next: VisualizationState) => void;
 }
 
@@ -288,6 +290,7 @@ export function VisualizationSurface({
   chalk,
   accent,
   scale = 1,
+  readOnly = false,
   onState,
 }: VisualizationSurfaceProps) {
   const model = useMemo(() => routeVisualization(intent), [intent]);
@@ -311,17 +314,17 @@ export function VisualizationSurface({
 
   switch (model.adapterId) {
     case "jsxgraph":
-      return <JsxGraphSurface intent={intent} state={state} chalk={chalk} accent={accent} scale={scale} onState={onState} />;
+      return <JsxGraphSurface intent={intent} state={state} chalk={chalk} accent={accent} scale={scale} readOnly={readOnly} onState={onState} />;
     case "graph3d-r3f":
       return <Graph3DSurface intent={intent as Graph3DIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
     case "chart-echarts":
       return <ChartSurface intent={intent as ChartIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
     case "graph-theory-cytoscape":
-      return <GraphTheorySurface intent={intent as GraphTheoryIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
+      return <GraphTheorySurface intent={intent as GraphTheoryIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} readOnly={readOnly} onState={onState} />;
     case "physics-svg":
       return <PhysicsSurface intent={intent as PhysicsIntent | CircuitIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
     case "biology-svg":
-      return <BiologySurface intent={intent as BiologyIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
+      return <BiologySurface intent={intent as BiologyIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} readOnly={readOnly} onState={onState} />;
     case "chemistry-rdkit":
       return <ChemistrySurface intent={intent as ChemistryIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
     case "katex":
@@ -860,6 +863,7 @@ function GraphTheorySurface({
   accent,
   scale,
   caption,
+  readOnly,
   onState,
 }: {
   intent: GraphTheoryIntent;
@@ -868,6 +872,7 @@ function GraphTheorySurface({
   accent: string;
   scale: number;
   caption?: string;
+  readOnly: boolean;
   onState?: (next: VisualizationState) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -937,6 +942,7 @@ function GraphTheorySurface({
         ],
         userZoomingEnabled: true,
         userPanningEnabled: true,
+        autoungrabify: readOnly,
         boxSelectionEnabled: false,
       });
       cy = instance;
@@ -965,7 +971,7 @@ function GraphTheorySurface({
       cy?.destroy();
       cy = null;
     };
-  }, [intent, accent, chalk]);
+  }, [intent, accent, chalk, readOnly]);
 
   const heightPx = Math.round(280 * Math.max(0.8, Math.min(scale, 1.2)));
   if (error) return <UnsupportedCard reason={error} chalk={chalk} accent={accent} caption={caption} />;
@@ -1624,6 +1630,7 @@ function BiologySurface({
   accent,
   scale,
   caption,
+  readOnly,
   onState,
 }: {
   intent: BiologyIntent;
@@ -1632,10 +1639,11 @@ function BiologySurface({
   accent: string;
   scale: number;
   caption?: string;
+  readOnly: boolean;
   onState?: (next: VisualizationState) => void;
 }) {
   if (intent.variant === "pathway") {
-    return <BiologyNetworkSurface intent={intent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
+    return <BiologyNetworkSurface intent={intent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} readOnly={readOnly} onState={onState} />;
   }
   const points = (intent.structures ?? []).map((s) => s.at);
   const box = fitScienceBox(points.length ? points : [[0, 0], [6, 4]]);
@@ -1671,6 +1679,7 @@ function BiologyNetworkSurface({
   accent,
   scale,
   caption,
+  readOnly,
   onState,
 }: {
   intent: BiologyIntent;
@@ -1679,6 +1688,7 @@ function BiologyNetworkSurface({
   accent: string;
   scale: number;
   caption?: string;
+  readOnly: boolean;
   onState?: (next: VisualizationState) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -1749,6 +1759,7 @@ function BiologyNetworkSurface({
         ],
         userZoomingEnabled: true,
         userPanningEnabled: true,
+        autoungrabify: readOnly,
         boxSelectionEnabled: false,
       });
       cy = instance;
@@ -1786,7 +1797,7 @@ function BiologyNetworkSurface({
       cy?.destroy();
       cy = null;
     };
-  }, [intent, chalk, accent]);
+  }, [intent, chalk, accent, readOnly]);
 
   const heightPx = Math.round(280 * Math.max(0.8, Math.min(scale, 1.2)));
   if (error) return <UnsupportedCard reason={error} chalk={chalk} accent={accent} caption={caption} />;
@@ -2133,6 +2144,7 @@ function JsxGraphSurface({
   chalk,
   accent,
   scale,
+  readOnly,
   onState,
 }: {
   intent: VisualizationIntent;
@@ -2140,6 +2152,7 @@ function JsxGraphSurface({
   chalk: string;
   accent: string;
   scale: number;
+  readOnly: boolean;
   onState?: (next: VisualizationState) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -2249,7 +2262,7 @@ function JsxGraphSurface({
 
     try {
       if (isGeometry) {
-        renderGeometry(board, intent, created, positions, chalk, accent);
+        renderGeometry(board, intent, created, positions, chalk, accent, readOnly);
       } else if (isFunction) {
         renderFunction(board, intent as FunctionIntent, chalk, accent);
       }
@@ -2333,7 +2346,7 @@ function JsxGraphSurface({
     // depend on `state.pointPositions`: `saveBlockState` echoes our own drag
     // back down as a new `state` prop, which would re-init the board mid-drag.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [intent, chalk, accent, scale]);
+  }, [intent, chalk, accent, scale, readOnly]);
 
   const isGeometry = intent.type === "geometry";
   const isFunction = intent.type === "function";
@@ -2354,7 +2367,8 @@ function renderGeometry(
   created: Record<string, GeometryElement>,
   positions: Record<string, [number, number]>,
   chalk: string,
-  accent: string
+  accent: string,
+  readOnly: boolean
 ) {
   const ref = (id: string): GeometryElement | undefined => created[id];
   const lineStyle = (o: { style?: { color?: string; strokeWidth?: number; dash?: boolean } }) => ({
@@ -2376,7 +2390,7 @@ function renderGeometry(
         fillColor: accent,
         strokeColor: chalk,
         strokeWidth: 1.2,
-        fixed: obj.draggable === false,
+        fixed: readOnly || obj.draggable === false,
         showInfobox: false,
         snapToGrid: false,
         label: {

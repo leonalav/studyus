@@ -1,5 +1,7 @@
 import { getDb, saveDbSync } from "../db/database";
 import { AgentRuntimeError } from "./agentRuntime";
+import { parseAssessmentFigureJson } from "./assessmentFigure";
+import type { VisualizationIntent } from "./visualization/types";
 import {
   evaluateRubricResponse,
   isBlankResponse,
@@ -54,6 +56,18 @@ export interface TypedRubricAnswerSpec {
   criteria: RubricCriterion[];
 }
 
+function validatedStoredFigure(raw: unknown, itemId: string): VisualizationIntent | undefined {
+  const parsed = parseAssessmentFigureJson(raw);
+  if (parsed === null) return undefined;
+  if (!parsed.ok) {
+    throw new AgentRuntimeError(
+      `Assessment item ${itemId} has an invalid stored visualization: ${parsed.error}`,
+      "schema_invalid"
+    );
+  }
+  return parsed.value;
+}
+
 export interface AttemptForTakingDTO {
   attemptId: string;
   formId: string;
@@ -74,6 +88,8 @@ export interface AttemptForTakingDTO {
     bloomTarget: string;
     learningObjective: string;
     curriculumNode: string;
+    /** Validated semantic figure; absent when the question is text-only. */
+    figure?: VisualizationIntent;
     draftResponse: string;
     flags: string[];
     /** Learner-facing MCQ options — never includes the answer key. */
@@ -114,6 +130,7 @@ export interface AttemptResultDTO {
   questions: {
     itemId: string;
     stem: string;
+    figure?: VisualizationIntent;
     maximumMarks: number;
     awardedMarks: number;
     committedResponse: string;
@@ -275,6 +292,7 @@ async function preGradeRubricResponses(
     itemType: string;
     maximumMarks: number;
     learningObjective: string;
+    figure?: VisualizationIntent;
     spec: any;
     responseId: string;
     committedResponse: string;
@@ -304,6 +322,7 @@ async function preGradeRubricResponses(
         response: row.committedResponse,
         referenceSolution: row.spec?.reference_solution ?? null,
         learningObjective: row.learningObjective,
+        figure: row.figure,
       });
       graded.set(row.responseId, {
         responseId: row.responseId,
@@ -376,7 +395,7 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
   // Get items
   const itemsRes = db.exec(`
     SELECT i.id, i.stable_ordinal, i.stem, i.item_type, i.maximum_marks, i.bloom_target, i.learning_objective, i.curriculum_node,
-           r.draft_response, r.response_flags, i.answer_spec_json
+           r.draft_response, r.response_flags, i.answer_spec_json, i.figure_spec_json
     FROM assessment_items i
     LEFT JOIN attempt_responses r ON i.id = r.item_id AND r.attempt_id = ?
     WHERE i.form_id = ?
@@ -404,6 +423,7 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
       bloomTarget: q[5] as string,
       learningObjective: q[6] as string,
       curriculumNode: q[7] as string,
+      figure: validatedStoredFigure(q[11], q[0] as string),
       draftResponse: (q[8] as string) ?? "",
       flags,
       options:
@@ -606,7 +626,7 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
   // Read what will be graded. The response the learner sees committed is the
   // draft, so grade against the same text the transaction is about to commit.
   const planRes = db.exec(`
-    SELECT i.id, i.item_type, i.maximum_marks, i.answer_spec_json, i.stem, i.learning_objective,
+    SELECT i.id, i.item_type, i.maximum_marks, i.answer_spec_json, i.stem, i.learning_objective, i.figure_spec_json,
            r.id AS resp_id, COALESCE(r.committed_response, r.draft_response, '') AS response_text
     FROM assessment_items i
     LEFT JOIN attempt_responses r ON i.id = r.item_id AND r.attempt_id = ?
@@ -621,6 +641,7 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
     spec: any;
     stem: string;
     learningObjective: string;
+    figure?: VisualizationIntent;
     responseId: string;
     committedResponse: string;
   }
@@ -635,8 +656,9 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
       spec,
       stem: (row[4] as string) ?? "",
       learningObjective: (row[5] as string) ?? "",
-      responseId: (row[6] as string) ?? `resp-${attemptId}-${row[0] as string}`,
-      committedResponse: (row[7] as string) ?? "",
+      figure: validatedStoredFigure(row[6], row[0] as string),
+      responseId: (row[7] as string) ?? `resp-${attemptId}-${row[0] as string}`,
+      committedResponse: (row[8] as string) ?? "",
     };
   });
 
@@ -824,7 +846,7 @@ export async function getAttemptResult(attemptId: string): Promise<AttemptResult
   const att = attRes[0].values[0];
 
   const itemsRes = db.exec(`
-    SELECT i.id, i.stem, i.maximum_marks, r.id AS resp_id, r.committed_response, r.grading_status
+    SELECT i.id, i.stem, i.figure_spec_json, i.maximum_marks, r.id AS resp_id, r.committed_response, r.grading_status
     FROM assessment_items i
     LEFT JOIN attempt_responses r ON i.id = r.item_id AND r.attempt_id = ?
     WHERE i.form_id = ?
@@ -835,10 +857,11 @@ export async function getAttemptResult(attemptId: string): Promise<AttemptResult
   const questions = (itemsRes[0]?.values ?? []).map((row) => {
     const itemId = row[0] as string;
     const stem = row[1] as string;
-    const maxMarks = row[2] as number;
-    const respId = row[3] as string | null;
-    const committedResponse = (row[4] as string) ?? "";
-    const gradingStatus = (row[5] as string) ?? "unseen";
+    const figure = validatedStoredFigure(row[2], itemId);
+    const maxMarks = row[3] as number;
+    const respId = row[4] as string | null;
+    const committedResponse = (row[5] as string) ?? "";
+    const gradingStatus = (row[6] as string) ?? "unseen";
 
     totalPossible += maxMarks;
 
@@ -892,6 +915,7 @@ export async function getAttemptResult(attemptId: string): Promise<AttemptResult
     return {
       itemId,
       stem,
+      figure,
       maximumMarks: maxMarks,
       awardedMarks: questionAwarded,
       committedResponse,

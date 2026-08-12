@@ -25,6 +25,8 @@ import {
   AttemptForTakingDTO,
   AttemptResultDTO,
 } from "../../api";
+import type { VisualizationIntent } from "../../lib/visualization/types";
+import { AssessmentFigure } from "./AssessmentFigure";
 
 interface Props {
   attemptId: string;
@@ -40,6 +42,7 @@ interface Question {
   format: "mcq" | "numeric" | "proof";
   maximumMarks: number;
   learningObjective: string;
+  figure?: VisualizationIntent;
   options?: { id: string; text: string }[];
   unit?: string | null;
   responseRequirement?: string | null;
@@ -134,6 +137,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         format: q.itemType === "mcq" ? "mcq" : q.itemType === "numeric" ? "numeric" : "proof",
         maximumMarks: q.maximumMarks,
         learningObjective: q.learningObjective,
+        figure: q.figure,
         options: q.options,
         unit: q.unit,
         responseRequirement: q.responseRequirement,
@@ -618,6 +622,15 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   );
 }
 
+export function QuestionPrompt({ stem, figure }: { stem: string; figure?: VisualizationIntent }) {
+  return (
+    <div className="min-w-0 max-w-full">
+      <h2 className="break-words text-[24px] font-semibold leading-snug text-fg">{stem}</h2>
+      {figure && <AssessmentFigure intent={figure} />}
+    </div>
+  );
+}
+
 function QuestionHint({ objective, mode, revealed, remaining, onReveal }: QuestionHintProps) {
   if (!objective || mode === "none") return null;
   if (mode === "full" || revealed) {
@@ -657,7 +670,7 @@ function McqQuestion({
 }) {
   return (
     <div>
-      <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.stem}</h2>
+      <QuestionPrompt stem={q.stem} figure={q.figure} />
       <QuestionHint {...hint} />
       <div className="mt-5 space-y-2.5">
         {q.options?.length ? (
@@ -706,7 +719,7 @@ function NumericQuestion({
 }) {
   return (
     <div>
-      <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.stem}</h2>
+      <QuestionPrompt stem={q.stem} figure={q.figure} />
       <QuestionHint {...hint} />
       <div className="mt-5 flex items-center gap-2">
         <input
@@ -780,7 +793,7 @@ function ProofQuestion({
 
   return (
     <div className="min-w-0">
-      <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.stem}</h2>
+      <QuestionPrompt stem={q.stem} figure={q.figure} />
       {q.responseRequirement && (
         <div className="mt-3 rounded-md border border-dashed border-accent/40 bg-accent/[0.04] px-3 py-2">
           <div className="mb-0.5 font-mono text-[10px] uppercase tracking-wider text-accent">Requirement</div>
@@ -989,7 +1002,8 @@ function SubmittedView({
             <div className="flex items-start gap-3 px-4 py-3">
               <span className="w-7 shrink-0 font-mono text-[12px] text-dim">{String(i + 1).padStart(2, "0")}</span>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-[13px] text-fg">{q.stem}</div>
+                <div className="break-words text-[13px] text-fg">{q.stem}</div>
+                {q.figure && <AssessmentFigure intent={q.figure} />}
                 <div className="mt-1 font-mono text-[10.5px] text-dim">
                   Committed: {q.committedResponse || "blank"}
                 </div>

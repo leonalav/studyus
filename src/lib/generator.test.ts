@@ -3,7 +3,7 @@ import type { SqlValue } from "sql.js";
 import { getDb } from "../db/database";
 import { callStructuredAgent, type ResolvedRoleEndpoint } from "./agentRuntime";
 import { defaultCapabilities } from "./llm";
-import { getAttemptForTaking } from "./assessment";
+import { getAttemptForTaking, getAttemptResult } from "./assessment";
 import {
   BLOOM_STEM_COMMANDS,
   DIFFICULTY_PROFILES,
@@ -205,6 +205,33 @@ describe("generated item semantic validation", () => {
     if (result.ok) expect(result.value.map((item) => item.ordinal)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
+  it("accepts a validated semantic figure but rejects malformed, answer-revealing, or unreferenced visuals", () => {
+    const blueprint = createAssessmentBlueprint(request({ format: "mcq", count: 1, nodeIds: ["node-a"] }), [cards[0]]);
+    const base = modelItem(blueprint[0]);
+    const figure = {
+      type: "chart",
+      chartType: "histogram",
+      xLabel: "Speed (m/s)",
+      series: [{ kind: "histogram", id: "speed", name: "Trials", values: [2, 3, 3, 5], bins: 3 }],
+    };
+    const opts = { blueprint, evidenceByRef: new Map([[cards[0].ref, cards[0]]]) };
+
+    const valid = validateGeneratedItems({
+      items: [{ ...base, stem: `${base.stem} Analyze the shown histogram.`, figure }],
+    }, opts);
+    expect(valid.ok).toBe(true);
+    if (valid.ok) expect(valid.value[0].figure).toMatchObject({ type: "chart", chartType: "histogram" });
+
+    const unreferenced = validateGeneratedItems({ items: [{ ...base, figure }] }, opts);
+    expect(unreferenced.ok).toBe(false);
+    if (!unreferenced.ok) expect(unreferenced.errors.join(" ")).toMatch(/stem must explicitly/i);
+
+    const revealing = validateGeneratedItems({
+      items: [{ ...base, stem: `${base.stem} Analyze the shown equation.`, figure: { type: "equation", latex: "v=3", caption: "Correct answer is 3" } }],
+    }, opts);
+    expect(revealing.ok).toBe(false);
+  });
+
   it.each([
     ["item type", "item_type", "numeric"],
     ["Bloom target", "bloom_target", "remember"],
@@ -259,6 +286,26 @@ describe("generated item semantic validation", () => {
       }
     );
     expect(result.ok).toBe(false);
+  });
+
+  it("revalidates figures at the persistence boundary", async () => {
+    const req = request({ format: "mcq", count: 1, nodeIds: ["node-a"] });
+    const blueprint = createAssessmentBlueprint(req, [cards[0]]);
+    const validated = validateGeneratedItems(
+      { items: [modelItem(blueprint[0])] },
+      { blueprint, evidenceByRef: new Map([[cards[0].ref, cards[0]]]) }
+    );
+    expect(validated.ok).toBe(true);
+    if (!validated.ok) return;
+
+    const unsafe = {
+      ...validated.value[0],
+      stem: `${validated.value[0].stem} Use the shown diagram.`,
+      figure: { type: "diagram", variant: "unsupported" },
+    } as unknown as GeneratedItem;
+    const db = await getDb();
+    expect(() => persistGeneratedForm({ db, req, items: [unsafe], cards: [cards[0]], title: "Unsafe" }))
+      .toThrow(/invalid figure/i);
   });
 
   it("feeds semantic contract errors back to the model and accepts a conforming repair", async () => {
@@ -389,12 +436,26 @@ describe("generation orchestration", () => {
     ];
     const blueprint = createAssessmentBlueprint(generationRequest, generationCards);
     const progress: Array<[number, string]> = [];
-    const fetchMock = vi.fn(async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
       const callIndex = fetchMock.mock.calls.length - 1;
       const batch = blueprint.slice(callIndex * 6, callIndex * 6 + 6);
+      const items = batch.map(modelItem);
+      if (batch[0]?.ordinal === 1) {
+        items[0] = {
+          ...items[0],
+          stem: `${items[0].stem} Analyze the shown momentum histogram.`,
+          figure: {
+            type: "chart",
+            title: "Momentum observations",
+            chartType: "histogram",
+            xLabel: "Momentum (kg m/s)",
+            series: [{ kind: "histogram", id: "p", name: "observations", values: [1, 2, 2, 3, 4], bins: 4 }],
+          },
+        };
+      }
       return new Response(
         JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({ items: batch.map(modelItem) }) } }],
+          choices: [{ message: { content: JSON.stringify({ items }) } }],
           usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300 },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } }
@@ -436,6 +497,22 @@ describe("generation orchestration", () => {
     ]);
     expect(loaded?.questions.every((question) => ["analyze", "evaluate", "create"].includes(question.bloomTarget)))
       .toBe(true);
+    expect(loaded?.questions[0].figure).toMatchObject({ type: "chart", chartType: "histogram" });
+    const resultDto = await getAttemptResult(result.attemptId);
+    expect(resultDto.questions[0].figure).toMatchObject({ type: "chart", chartType: "histogram" });
+
+    const storedFigure = db.exec(
+      "SELECT figure_spec_json FROM assessment_items WHERE form_id = ? AND stable_ordinal = 1;",
+      [result.formId]
+    );
+    expect(JSON.parse(String(storedFigure[0].values[0][0]))).toMatchObject({
+      type: "chart",
+      chartType: "histogram",
+    });
+
+    const firstRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(firstRequest.messages[0].content).toContain("ASSESSMENT VISUALIZATION TOOL");
+    expect(firstRequest.messages[0].content).toContain("histogram");
   });
 });
 

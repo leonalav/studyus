@@ -5,6 +5,7 @@ import {
   type QuestionBankRecord,
   type QuestionBankStatus,
 } from "../../lib/questionBank";
+import { AssessmentFigure } from "./AssessmentFigure";
 
 export type { QuestionBankRecord } from "../../lib/questionBank";
 type Status = QuestionBankStatus;
@@ -262,6 +263,13 @@ function QuestionDetail({
         </div>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+          {item.figure && (
+            <section>
+              <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Question figure</div>
+              <AssessmentFigure intent={item.figure} />
+            </section>
+          )}
+
           <section>
             <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-dim">
               <span>Your answer</span>

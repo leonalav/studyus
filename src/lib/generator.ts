@@ -29,6 +29,12 @@ import {
 } from "./agentRuntime";
 import { TEST_GENERATION_AGENT_PROMPT_V1 } from "./llm";
 import {
+  ASSESSMENT_VISUALIZATION_AUTHORING_GUIDE,
+  stemReferencesAssessmentFigure,
+  validateAssessmentFigure,
+} from "./assessmentFigure";
+import type { VisualizationIntent } from "./visualization/types";
+import {
   ensureTextEvidenceForSelectedNodes,
   getEvidenceForSelectedNodes,
   simpleHash,
@@ -36,9 +42,9 @@ import {
 } from "./curriculum";
 import { maxQuestions, minQuestions } from "../data/curriculum";
 
-export const GENERATION_PROMPT_VERSION = "generation_v2";
-export const GENERATION_SCHEMA_VERSION = "assessment_items_v2";
-export const GENERATION_VERSION = "3.0.0";
+export const GENERATION_PROMPT_VERSION = "generation_v3_visualizations";
+export const GENERATION_SCHEMA_VERSION = "assessment_items_v3_visualizations";
+export const GENERATION_VERSION = "4.0.0";
 
 export type GeneratedItemType = "mcq" | "numeric" | "proof";
 export type QuestionFormatRequest = "mcq" | "proof" | "mixed";
@@ -148,6 +154,8 @@ export interface GeneratedItem {
   criteria?: GeneratedCriterion[];
   referenceSolution?: string | null;
   responseRequirement?: string | null;
+  /** Optional validated semantic figure rendered with the chalkboard toolset. */
+  figure?: VisualizationIntent;
   evidenceRefs: string[];
 }
 
@@ -457,6 +465,20 @@ export function validateGeneratedItems(
       evidenceRefs: refs,
     };
 
+    if (rec.figure !== undefined && rec.figure !== null) {
+      const figure = validateAssessmentFigure(rec.figure);
+      if (!figure.ok) {
+        errors.push(`${path}.figure is invalid: ${figure.error}`);
+      } else {
+        if (!stemReferencesAssessmentFigure(stem)) {
+          errors.push(
+            `${path}.stem must explicitly tell the learner to use the shown figure, graph, chart, equation, or diagram`
+          );
+        }
+        item.figure = figure.value;
+      }
+    }
+
     if (itemType === "mcq") {
       const rawOptions = asArray(rec.options, `${path}.options`, errors);
       if (!rawOptions) return;
@@ -671,10 +693,10 @@ export function buildGenerationUserPrompt(
         .join("\n")
   );
 
-  parts.push(`Return one JSON object with an "items" array. Use these type-specific shapes:
-MCQ: {"item_type":"mcq","stem":"...","maximum_marks":1,"bloom_target":"remember","learning_objective":"...","curriculum_node":"node-id","evidence_refs":["E1"],"options":[{"id":"a","text":"...","correct":true,"misconception":null},{"id":"b","text":"...","correct":false,"misconception":"..."}]}
-NUMERIC: {"item_type":"numeric","stem":"...","maximum_marks":2,"bloom_target":"apply","learning_objective":"...","curriculum_node":"node-id","evidence_refs":["E1"],"accepted":[{"value":"12.5","absolute_tolerance":"0.01","relative_tolerance":"0"}],"unit":null}
-PROOF: {"item_type":"proof","stem":"...","maximum_marks":3,"bloom_target":"apply","learning_objective":"...","curriculum_node":"node-id","evidence_refs":["E1"],"criteria":[{"id":"c1","description":"observable requirement","max_mark":1}],"reference_solution":"full evaluator-only solution","response_requirement":"what the learner must show"}
+  parts.push(`Return one JSON object with an "items" array. Every item may include "figure": null | VisualizationIntent as defined by your assessment visualization tool guide. Use these type-specific shapes:
+MCQ: {"item_type":"mcq","stem":"...","maximum_marks":1,"bloom_target":"remember","learning_objective":"...","curriculum_node":"node-id","evidence_refs":["E1"],"figure":null,"options":[{"id":"a","text":"...","correct":true,"misconception":null},{"id":"b","text":"...","correct":false,"misconception":"..."}]}
+NUMERIC: {"item_type":"numeric","stem":"...","maximum_marks":2,"bloom_target":"apply","learning_objective":"...","curriculum_node":"node-id","evidence_refs":["E1"],"figure":null,"accepted":[{"value":"12.5","absolute_tolerance":"0.01","relative_tolerance":"0"}],"unit":null}
+PROOF: {"item_type":"proof","stem":"...","maximum_marks":3,"bloom_target":"apply","learning_objective":"...","curriculum_node":"node-id","evidence_refs":["E1"],"figure":null,"criteria":[{"id":"c1","description":"observable requirement","max_mark":1}],"reference_solution":"full evaluator-only solution","response_requirement":"what the learner must show"}
 
 HARD RULES:
 - Match every blueprint field exactly; do not reorder, add, omit, or substitute item types.
@@ -684,6 +706,8 @@ HARD RULES:
 - MCQ option IDs must be unique; exactly one option is correct; every distractor has a specific misconception.
 - Do not put option letters inside option text.
 - Proof items contain no options, accepted values, or answer key.
+- Use a figure when it materially tests a visual, spatial, structural, graphical, or data relationship supported by the evidence; otherwise use null. A figure-bearing stem must explicitly reference the visual.
+- Cross-check every figure against the stem, every option/accepted value, the rubric, response requirement, and reference solution. Learner-visible figure text or styling must never identify or disclose the answer.
 - Questions must be distinct and answerable using the cited evidence. Return JSON only.`);
 
   return parts.join("\n\n");
@@ -745,7 +769,29 @@ export function persistGeneratedForm({
   const attemptId = `attempt-gen-${stamp}`;
   const cardByRef = new Map(cards.map((c) => [c.ref, c]));
   const profile = DIFFICULTY_PROFILES[req.rigor];
+  const figureJsonByOrdinal = new Map<number, string>();
   let evidenceCitations = 0;
+
+  // Callers normally pass the output of validateGeneratedItems, but persistence
+  // is a separate trust boundary: never write an unchecked figure even if this
+  // function is called directly from another workflow.
+  for (const item of items) {
+    if (!item.figure) continue;
+    const figure = validateAssessmentFigure(item.figure);
+    if (!figure.ok) {
+      throw new AgentRuntimeError(
+        `Assessment item ${item.ordinal} has an invalid figure: ${figure.error}`,
+        "schema_invalid"
+      );
+    }
+    if (!stemReferencesAssessmentFigure(item.stem)) {
+      throw new AgentRuntimeError(
+        `Assessment item ${item.ordinal} has a figure but its stem does not reference it.`,
+        "schema_invalid"
+      );
+    }
+    figureJsonByOrdinal.set(item.ordinal, JSON.stringify(figure.value));
+  }
 
   db.run("BEGIN TRANSACTION;");
   try {
@@ -777,8 +823,8 @@ export function persistGeneratedForm({
       const itemId = `item-${stamp}-${item.ordinal}`;
 
       db.run(
-        `INSERT INTO assessment_items (id, form_id, stable_ordinal, stem, item_type, maximum_marks, bloom_target, learning_objective, curriculum_node, answer_spec_json, provenance, generation_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'agent_generated', ?);`,
+        `INSERT INTO assessment_items (id, form_id, stable_ordinal, stem, item_type, maximum_marks, bloom_target, learning_objective, curriculum_node, answer_spec_json, figure_spec_json, provenance, generation_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'agent_generated', ?);`,
         [
           itemId,
           formId,
@@ -790,6 +836,7 @@ export function persistGeneratedForm({
           item.learningObjective,
           item.curriculumNode,
           JSON.stringify(toAnswerSpec(item)),
+          figureJsonByOrdinal.get(item.ordinal) ?? null,
           GENERATION_VERSION,
         ]
       );
@@ -885,12 +932,12 @@ export async function generateAssessment(req: GenerationRequest): Promise<Genera
     const result = await callStructuredAgent({
       role: "generation",
       endpoint,
-      system: TEST_GENERATION_AGENT_PROMPT_V1,
+      system: `${TEST_GENERATION_AGENT_PROMPT_V1}\n\n${ASSESSMENT_VISUALIZATION_AUTHORING_GUIDE}`,
       user: buildGenerationUserPrompt(normalized, batchCards, batch),
       promptVersion: GENERATION_PROMPT_VERSION,
       schemaVersion: GENERATION_SCHEMA_VERSION,
       temperature: profile.temperature,
-      maxTokens: Math.min(16_000, Math.max(4_096, batch.length * 1_800)),
+      maxTokens: Math.min(16_000, Math.max(4_096, batch.length * 2_500)),
       signal: normalized.signal,
       validate: (payload) =>
         validateGeneratedItems(payload, {

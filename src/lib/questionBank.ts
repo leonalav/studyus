@@ -1,4 +1,6 @@
 import { getDb } from "../db/database";
+import { parseAssessmentFigureJson } from "./assessmentFigure";
+import type { VisualizationIntent } from "./visualization/types";
 
 export type QuestionBankStatus = "correct" | "wrong" | "unattempted";
 
@@ -12,6 +14,7 @@ export interface QuestionBankRecord {
   yourAnswer: string;
   correctAnswer: string;
   reason: string;
+  figure?: VisualizationIntent;
 }
 
 /**
@@ -23,7 +26,7 @@ export async function getCompletedQuestionBankRecords(): Promise<QuestionBankRec
   const db = await getDb();
   const itemsRes = db.exec(`
     SELECT a.id, i.id, i.stem, i.curriculum_node, i.item_type,
-           i.answer_spec_json, f.subject, r.committed_response,
+           i.answer_spec_json, i.figure_spec_json, f.subject, r.committed_response,
            scores.awarded_mark, scores.maximum_mark, scores.rationale
     FROM assessment_attempts a
     JOIN assessment_forms f ON f.id = a.form_id
@@ -51,11 +54,13 @@ export async function getCompletedQuestionBankRecords(): Promise<QuestionBankRec
     const topic = (row[3] as string) || "General Concept";
     const itemType = row[4] as string;
     const specRaw = row[5] as string;
-    const rawSubject = (row[6] as string) || "General";
-    const userResp = (row[7] as string) || "";
-    const awarded = (row[8] as number) ?? 0;
-    const maxMark = (row[9] as number) ?? 1;
-    const rationale = (row[10] as string) || "";
+    const storedFigure = parseAssessmentFigureJson(row[6]);
+    const figure = storedFigure?.ok ? storedFigure.value : undefined;
+    const rawSubject = (row[7] as string) || "General";
+    const userResp = (row[8] as string) || "";
+    const awarded = (row[9] as number) ?? 0;
+    const maxMark = (row[10] as number) ?? 1;
+    const rationale = (row[11] as string) || "";
 
     let status: QuestionBankStatus = "unattempted";
     if (userResp.trim()) {
@@ -84,6 +89,7 @@ export async function getCompletedQuestionBankRecords(): Promise<QuestionBankRec
       reason:
         rationale
         || (status === "correct" ? "Evaluation verified requirement." : "Review required step."),
+      figure,
     };
   });
 }
