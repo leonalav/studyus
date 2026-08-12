@@ -20,6 +20,7 @@ interface Props {
   tab: Tab;
   onNotify: (t: string) => void;
   onStartTest: (params: TestParams) => void;
+  onTestGenerated: () => void;
   onExitTest: () => void;
   onSelectSectionForStudy?: (sectionTitle: string) => void;
   onReopenSession?: (sessionId: string) => void;
@@ -32,6 +33,7 @@ export function TabContent({
   tab,
   onNotify,
   onStartTest,
+  onTestGenerated,
   onExitTest,
   onSelectSectionForStudy,
   onReopenSession,
@@ -60,7 +62,7 @@ export function TabContent({
   }
 
   if (tab.kind === "test") {
-    if (tab.id === "test-take") return <TestCenter onNotify={onNotify} onStart={onStartTest} />;
+    if (tab.id === "test-take") return <TestCenter onNotify={onNotify} onGenerated={onTestGenerated} />;
     if (tab.id === "test-bank") return <QuestionBank onNotify={onNotify} />;
     if (tab.id === "test-available")
       return <AvailableTests onNotify={onNotify} onStart={onStartTest} refreshKey={availableTestsRefreshKey} />;
@@ -75,7 +77,7 @@ export function TabContent({
         />
       );
     }
-    return <TestCenter onNotify={onNotify} onStart={onStartTest} />;
+    return <TestCenter onNotify={onNotify} onGenerated={onTestGenerated} />;
   }
 
   return null;

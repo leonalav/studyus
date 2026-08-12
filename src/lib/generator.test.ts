@@ -421,7 +421,7 @@ describe("generation orchestration", () => {
     expect(loaded).toMatchObject({
       attemptId: result.attemptId,
       formId: result.formId,
-      status: "active",
+      status: "created",
       assistancePolicy: "no_hints",
     });
     expect(loaded?.questions).toHaveLength(7);

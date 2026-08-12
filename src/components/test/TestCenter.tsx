@@ -15,16 +15,7 @@ import { getCurriculumTree, CurriculumNodeRecord } from "../../lib/curriculum";
 
 interface Props {
   onNotify: (t: string) => void;
-  onStart: (params: {
-    attemptId: string;
-    title: string;
-    subject: SubjectKey;
-    format: QuestionFormat;
-    count: number;
-    rigor: Rigor;
-    docId: string | null;
-    picked: string[];
-  }) => void;
+  onGenerated: () => void;
 }
 
 export interface RealPdfSource {
@@ -55,7 +46,7 @@ function flattenNodeIds(nodes: CurriculumNodeRecord[]): string[] {
   return nodes.flatMap((node) => [node.id, ...flattenNodeIds(node.children ?? [])]);
 }
 
-export function TestCenter({ onNotify, onStart }: Props) {
+export function TestCenter({ onNotify, onGenerated }: Props) {
   const [subject, setSubject] = useState<SubjectKey>("physics");
   const [sources, setSources] = useState<RealPdfSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string>("");
@@ -197,17 +188,10 @@ export function TestCenter({ onNotify, onStart }: Props) {
         sourceName: selectedSource?.name,
         onProgress: (pct, stage) => setGenProgress({ pct, stage }),
       });
-      onNotify(`Generated ${result.itemCount} grounded questions`);
-      onStart({
-        attemptId: result.attemptId,
-        title: result.title,
-        subject,
-        format,
-        count: result.itemCount,
-        rigor,
-        docId: selectedSourceId,
-        picked: Array.from(effectivePicked),
-      });
+      onGenerated();
+      onNotify(
+        `Generated ${result.itemCount} grounded questions. Open Available tests when you are ready to start.`
+      );
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "Test generation failed");
     } finally {
@@ -522,7 +506,7 @@ export function TestCenter({ onNotify, onStart }: Props) {
           }`}
         >
           <Play size={13} fill="currentColor" />
-          {generating ? "Generating…" : "Generate & start"}
+          {generating ? "Generating…" : "Generate test"}
         </button>
       </div>
 

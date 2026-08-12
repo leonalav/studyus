@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import {
   getAttemptForTaking,
+  beginAttempt,
   createRetakeAttempt,
   autosaveDraft,
   submitAttempt,
@@ -350,6 +351,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   const startRetake = async () => {
     try {
       const nextAttemptId = await createRetakeAttempt(runnerAttemptId);
+      await beginAttempt(nextAttemptId);
       pendingDraftsRef.current.clear();
       setDto(null);
       setLoadError(null);

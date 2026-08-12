@@ -108,9 +108,12 @@ export default function App() {
     openTab({ id, title: "New session", kind: "board" });
   }, [openTab]);
 
+  const testGenerated = useCallback(() => {
+    setAvailableTestsRefreshKey((n) => n + 1);
+  }, []);
+
   const startTest = useCallback((params: TestParams) => {
     setActiveTest(params);
-    setAvailableTestsRefreshKey((n) => n + 1);
     const id = encodeTestTabId(params);
     const title = `${params.title} · ${params.count}q`;
     setTabs((current) => {
@@ -208,6 +211,7 @@ export default function App() {
           tab={activeTab}
           onNotify={notify}
           onStartTest={startTest}
+          onTestGenerated={testGenerated}
           onExitTest={exitTest}
           onReopenSession={openStoredSession}
           activeTest={activeTest}
@@ -283,6 +287,7 @@ export default function App() {
               tab={activeTab}
               onNotify={notify}
               onStartTest={startTest}
+              onTestGenerated={testGenerated}
               onExitTest={exitTest}
               onSelectSectionForStudy={(sectionTitle) => {
                 setChosenSection(sectionTitle);

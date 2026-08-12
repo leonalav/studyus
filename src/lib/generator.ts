@@ -814,9 +814,11 @@ export function persistGeneratedForm({
       });
     }
 
+    // Generation creates an available test, not an already-started attempt. The
+    // attempt becomes active only when the learner explicitly presses Start.
     db.run(
       `INSERT INTO assessment_attempts (id, form_id, learner_id, status, mode, assistance_policy, started_at, deadline_at, submitted_at, completed_at, current_ordinal, aggregate_score, grading_status, audit_created_at, audit_updated_at)
-       VALUES (?, ?, 'default_learner', 'active', 'FORMATIVE', ?, ?, NULL, NULL, NULL, 1, 0, 'unseen', ?, ?);`,
+       VALUES (?, ?, 'default_learner', 'created', 'FORMATIVE', ?, ?, NULL, NULL, NULL, 1, 0, 'unseen', ?, ?);`,
       [attemptId, formId, profile.assistancePolicy, now, now, now]
     );
 

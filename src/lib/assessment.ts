@@ -437,6 +437,70 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
   };
 }
 
+/**
+ * Mark an available attempt as explicitly started by the learner.
+ *
+ * Generation deliberately leaves attempts in `created`. Keeping this transition
+ * separate from loading means inspecting an available test can never turn its
+ * Start button into Resume. The audit event also repairs the ambiguity of older
+ * generated attempts that were persisted as active before they were opened.
+ */
+export async function beginAttempt(attemptId: string): Promise<{ status: "active"; startedNow: boolean }> {
+  const db = await getDb();
+  const attempt = db.exec(`
+    SELECT status, deadline_at,
+           (SELECT COUNT(*) FROM attempt_responses r WHERE r.attempt_id = a.id),
+           (SELECT COUNT(*) FROM assessment_events e WHERE e.attempt_id = a.id AND e.event_type = 'attempt_started')
+    FROM assessment_attempts a
+    WHERE a.id = ?;
+  `, [attemptId]);
+  if (!attempt[0] || attempt[0].values.length === 0) {
+    throw new Error("Attempt not found");
+  }
+
+  const [status, deadlineAt, responseCount, startEventCount] = attempt[0].values[0] as [
+    AttemptStatus,
+    string | null,
+    number,
+    number,
+  ];
+  if (status !== "created" && status !== "active") {
+    throw new Error(`Cannot start an attempt in status: ${status}`);
+  }
+  if (deadlineAt && new Date(deadlineAt).getTime() <= Date.now()) {
+    db.run("UPDATE assessment_attempts SET status = 'expired' WHERE id = ?;", [attemptId]);
+    saveDbSync();
+    throw new Error("This attempt has expired");
+  }
+
+  const now = new Date().toISOString();
+  const startedNow = status === "created" || (responseCount === 0 && startEventCount === 0);
+  db.run("BEGIN TRANSACTION;");
+  try {
+    db.run(
+      `UPDATE assessment_attempts
+       SET status = 'active',
+           started_at = CASE WHEN ? = 1 THEN ? ELSE started_at END,
+           audit_updated_at = ?
+       WHERE id = ?;`,
+      [startedNow ? 1 : 0, now, now, attemptId]
+    );
+    if (startEventCount === 0) {
+      db.run(
+        `INSERT INTO assessment_events (id, attempt_id, response_id, event_type, metadata_json, timestamp)
+         VALUES (?, ?, NULL, 'attempt_started', ?, ?);`,
+        [`evt-start-${attemptId}-${Date.now()}`, attemptId, JSON.stringify({ explicit: true }), now]
+      );
+    }
+    db.run("COMMIT;");
+  } catch (error) {
+    db.run("ROLLBACK;");
+    throw error;
+  }
+  saveDbSync();
+  return { status: "active", startedNow };
+}
+
 /** Create a clean attempt for the same immutable generated form. */
 export async function createRetakeAttempt(attemptId: string): Promise<string> {
   const db = await getDb();
@@ -491,10 +555,9 @@ export async function autosaveDraft(
     return { success: false, status: "expired" };
   }
 
-  // Ensure state is 'active' once draft is saved
-  if (status === "created") {
-    db.run("UPDATE assessment_attempts SET status = 'active' WHERE id = ?;", [attemptId]);
-  }
+  // A draft is also an unambiguous start signal for callers that bypass the
+  // Available tests button. This transition is idempotent and logs one event.
+  await beginAttempt(attemptId);
 
   if (currentOrdinal !== undefined) {
     db.run("UPDATE assessment_attempts SET current_ordinal = ? WHERE id = ?;", [currentOrdinal, attemptId]);
