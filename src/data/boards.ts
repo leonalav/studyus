@@ -32,6 +32,12 @@ export type Block =
   | { id: string; kind: "callout"; text: string }
   | { id: string; kind: "row"; children: Block[] };
 
+export interface ThreadMetadata {
+  createdBy: "learner" | "agent";
+  reason: string;
+  createdAt: string;
+}
+
 export interface BoardDoc {
   id: string;
   title: string;
@@ -39,6 +45,9 @@ export interface BoardDoc {
   domain: Domain;
   blocks: Block[];
   parentId?: string;
+  /** Present for boards that were branched from another board. This metadata
+   * round-trips with the stored study session and mirrors the SQLite thread log. */
+  thread?: ThreadMetadata;
 }
 
 let boardSeq = 0;
@@ -86,6 +95,11 @@ export function buildSubBoard(selection: string, question: string, parent: Board
     domain,
     blocks,
     parentId: parent.id,
+    thread: {
+      createdBy: "learner",
+      reason: question.trim() || `Explore the highlighted passage: ${s}`,
+      createdAt: new Date().toISOString(),
+    },
   };
 }
 

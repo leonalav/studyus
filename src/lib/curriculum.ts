@@ -1,3 +1,4 @@
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { getDb, saveDbSync } from "../db/database";
 import { renderPageRange, saveSourcePdf, TauriUnavailableError } from "./tauri";
 import { resolveRoleEndpoint, chatCompletion, type ContentPart, type RuntimeMessage } from "./agentRuntime";
@@ -75,7 +76,7 @@ export async function extractPdfOutline(file: File): Promise<{
   outline: { title: string; destPage: number; depth: number }[];
 }> {
   const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist");
-  GlobalWorkerOptions.workerSrc = new URL("pdf.worker.min.mjs", document.baseURI).toString();
+  GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const data = new Uint8Array(await file.arrayBuffer());
   const pdf = await getDocument({ data }).promise;
   const raw = await pdf.getOutline();
@@ -100,6 +101,131 @@ export async function extractPdfOutline(file: File): Promise<{
   return { name: file.name, pageCount: pdf.numPages, outline: flat };
 }
 
+const ORIGINAL_PDF_DB = "studyus-curriculum-files";
+const ORIGINAL_PDF_STORE = "pdfs";
+const inMemoryOriginalPdfs = new Map<string, Blob>();
+
+/**
+ * Keep the original import available to the document viewer's Download action.
+ * SQLite stores the outline and metadata, while IndexedDB is the browser-safe
+ * place for the (potentially large) binary. The small in-memory fallback keeps
+ * the action working for the current run when IndexedDB is unavailable.
+ */
+async function persistOriginalPdf(sourceId: string, file: File): Promise<void> {
+  const blob = file.slice(0, file.size, "application/pdf");
+  inMemoryOriginalPdfs.set(sourceId, blob);
+  if (typeof indexedDB === "undefined") return;
+
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open(ORIGINAL_PDF_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(ORIGINAL_PDF_STORE)) {
+        db.createObjectStore(ORIGINAL_PDF_STORE);
+      }
+    };
+    request.onerror = () => reject(request.error ?? new Error("Could not open curriculum file storage"));
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction(ORIGINAL_PDF_STORE, "readwrite");
+      transaction.objectStore(ORIGINAL_PDF_STORE).put(blob, sourceId);
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error ?? new Error("Could not store the curriculum PDF"));
+      };
+    };
+  });
+}
+
+async function deletePersistedOriginalPdf(sourceId: string): Promise<void> {
+  inMemoryOriginalPdfs.delete(sourceId);
+  if (typeof indexedDB === "undefined") return;
+  await new Promise<void>((resolve) => {
+    const request = indexedDB.open(ORIGINAL_PDF_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(ORIGINAL_PDF_STORE)) db.createObjectStore(ORIGINAL_PDF_STORE);
+    };
+    request.onerror = () => resolve();
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction(ORIGINAL_PDF_STORE, "readwrite");
+      transaction.objectStore(ORIGINAL_PDF_STORE).delete(sourceId);
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onerror = () => {
+        db.close();
+        resolve();
+      };
+    };
+  });
+}
+
+/** Rename a curriculum source without changing its stable node/source identity. */
+export async function renameCurriculumSource(sourceId: string, name: string): Promise<void> {
+  const clean = name.trim().slice(0, 240);
+  if (!clean) throw new Error("Curriculum name cannot be empty");
+  const db = await getDb();
+  db.run("UPDATE curriculum_sources SET name = ? WHERE id = ?;", [clean, sourceId]);
+  saveDbSync();
+}
+
+/** Remove a curriculum and all of its node evidence from durable storage. */
+export async function deleteCurriculumSource(sourceId: string): Promise<void> {
+  const db = await getDb();
+  // Delete explicitly as well as relying on foreign-key cascades: sql.js builds
+  // can differ in their PRAGMA defaults, and no orphaned evidence should remain.
+  db.run(`DELETE FROM curriculum_assets WHERE node_id IN (SELECT id FROM curriculum_nodes WHERE source_id = ?);`, [sourceId]);
+  db.run(`DELETE FROM curriculum_chunks WHERE node_id IN (SELECT id FROM curriculum_nodes WHERE source_id = ?);`, [sourceId]);
+  db.run("DELETE FROM curriculum_nodes WHERE source_id = ?;", [sourceId]);
+  db.run("DELETE FROM curriculum_sources WHERE id = ?;", [sourceId]);
+  saveDbSync();
+  await deletePersistedOriginalPdf(sourceId);
+}
+
+/** Return the exact imported PDF bytes when they are available in this client. */
+export async function getOriginalCurriculumPdf(sourceId: string): Promise<Blob | null> {
+  const cached = inMemoryOriginalPdfs.get(sourceId);
+  if (cached) return cached;
+  if (typeof indexedDB === "undefined") return null;
+
+  return new Promise<Blob | null>((resolve, reject) => {
+    const request = indexedDB.open(ORIGINAL_PDF_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(ORIGINAL_PDF_STORE)) {
+        db.createObjectStore(ORIGINAL_PDF_STORE);
+      }
+    };
+    request.onerror = () => reject(request.error ?? new Error("Could not open curriculum file storage"));
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction(ORIGINAL_PDF_STORE, "readonly");
+      const getRequest = transaction.objectStore(ORIGINAL_PDF_STORE).get(sourceId);
+      getRequest.onsuccess = () => {
+        const value = getRequest.result;
+        db.close();
+        if (value instanceof Blob) {
+          inMemoryOriginalPdfs.set(sourceId, value);
+          resolve(value);
+        } else {
+          resolve(null);
+        }
+      };
+      getRequest.onerror = () => {
+        db.close();
+        reject(getRequest.error ?? new Error("Could not read the curriculum PDF"));
+      };
+    };
+  });
+}
+
 export async function ingestPdfFile(file: File): Promise<CurriculumSourceRecord> {
   const parsed = await extractPdfOutline(file);
   if (parsed.outline.length === 0) {
@@ -118,13 +244,22 @@ export async function ingestPdfFile(file: File): Promise<CurriculumSourceRecord>
   } catch {
     /* not running under Tauri — leave filePath unset */
   }
-  return parseAndIngestPdfOutline({
+  const source = await parseAndIngestPdfOutline({
     sourceId,
     name: parsed.name,
     pageCount: parsed.pageCount,
     outline: parsed.outline,
     filePath,
   });
+  // Binary persistence is deliberately best-effort: a browser with storage
+  // disabled can still index and study the outline, while ordinary clients get
+  // a durable Download original action.
+  try {
+    await persistOriginalPdf(source.id, file);
+  } catch {
+    inMemoryOriginalPdfs.set(source.id, file);
+  }
+  return source;
 }
 export async function parseAndIngestPdfOutline({
   sourceId,
@@ -291,16 +426,36 @@ export async function getEvidenceForSelectedNodes(nodeIds: string[]): Promise<{
   const db = await getDb();
   const placeholders = nodeIds.map(() => "?").join(",");
 
+  // A selected chapter/section includes all of its descendants. Without this
+  // closure, selecting a parent bookmark could produce no evidence even though
+  // its transcribed subsections were fully indexed.
   const nodesRes = db.exec(`
-    SELECT id, source_id, parent_node_id, ordinal, depth, title, section_number, start_page, end_page, node_kind, extraction_status, content_hash
-    FROM curriculum_nodes
-    WHERE id IN (${placeholders});
+    WITH RECURSIVE scoped_nodes(id) AS (
+      SELECT id FROM curriculum_nodes WHERE id IN (${placeholders})
+      UNION
+      SELECT n.id
+      FROM curriculum_nodes n
+      JOIN scoped_nodes parent ON n.parent_node_id = parent.id
+    )
+    SELECT n.id, n.source_id, n.parent_node_id, n.ordinal, n.depth, n.title, n.section_number,
+           n.start_page, n.end_page, n.node_kind, n.extraction_status, n.content_hash
+    FROM curriculum_nodes n
+    JOIN scoped_nodes scoped ON scoped.id = n.id
+    ORDER BY n.ordinal ASC;
   `, nodeIds);
 
   const chunksRes = db.exec(`
-    SELECT id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind
-    FROM curriculum_chunks
-    WHERE node_id IN (${placeholders});
+    WITH RECURSIVE scoped_nodes(id) AS (
+      SELECT id FROM curriculum_nodes WHERE id IN (${placeholders})
+      UNION
+      SELECT n.id
+      FROM curriculum_nodes n
+      JOIN scoped_nodes parent ON n.parent_node_id = parent.id
+    )
+    SELECT c.id, c.node_id, c.page, c.chunk_ordinal, c.text_content, c.excerpt_hash, c.chunk_kind
+    FROM curriculum_chunks c
+    JOIN scoped_nodes scoped ON scoped.id = c.node_id
+    ORDER BY c.node_id ASC, c.chunk_ordinal ASC;
   `, nodeIds);
 
   const nodes = (nodesRes[0]?.values ?? []).map((r) => ({
@@ -329,6 +484,110 @@ export async function getEvidenceForSelectedNodes(nodeIds: string[]): Promise<{
   }));
 
   return { nodes, chunks };
+}
+
+/**
+ * Deterministic browser fallback for generation. Imported PDFs are retained in
+ * IndexedDB, so text-based pages can be indexed on demand without requiring a
+ * learner to open every subsection in the tutor first. Vision transcription
+ * remains the higher-fidelity path for vector math and scanned pages.
+ *
+ * Evidence is extracted for the leaf nodes in the selected scope. This avoids
+ * duplicating an entire chapter into each ancestor while ensuring parent
+ * selections still become generatable through their descendants.
+ */
+export async function ensureTextEvidenceForSelectedNodes(nodeIds: string[]): Promise<number> {
+  if (nodeIds.length === 0) return 0;
+  const db = await getDb();
+  const placeholders = nodeIds.map(() => "?").join(",");
+  const scopedRes = db.exec(`
+    WITH RECURSIVE scoped_nodes(id) AS (
+      SELECT id FROM curriculum_nodes WHERE id IN (${placeholders})
+      UNION
+      SELECT n.id
+      FROM curriculum_nodes n
+      JOIN scoped_nodes parent ON n.parent_node_id = parent.id
+    )
+    SELECT n.id, n.source_id, n.start_page, n.end_page
+    FROM curriculum_nodes n
+    JOIN scoped_nodes scoped ON scoped.id = n.id
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM curriculum_nodes child
+      JOIN scoped_nodes child_scope ON child_scope.id = child.id
+      WHERE child.parent_node_id = n.id
+    )
+    AND NOT EXISTS (SELECT 1 FROM curriculum_chunks c WHERE c.node_id = n.id)
+    ORDER BY n.source_id, n.ordinal;
+  `, nodeIds);
+
+  const missing = (scopedRes[0]?.values ?? []).map((row) => ({
+    id: String(row[0]),
+    sourceId: String(row[1]),
+    startPage: Number(row[2]),
+    endPage: Number(row[3]),
+  }));
+  if (missing.length === 0) return 0;
+
+  const bySource = new Map<string, typeof missing>();
+  for (const node of missing) {
+    const nodes = bySource.get(node.sourceId) ?? [];
+    nodes.push(node);
+    bySource.set(node.sourceId, nodes);
+  }
+
+  let inserted = 0;
+  for (const [sourceId, sourceNodes] of bySource) {
+    let blob: Blob | null = null;
+    try {
+      blob = await getOriginalCurriculumPdf(sourceId);
+    } catch {
+      blob = null;
+    }
+    if (!blob) continue;
+
+    const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist");
+    GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+    const loadingTask = getDocument({ data: new Uint8Array(await blob.arrayBuffer()) });
+    const pdf = await loadingTask.promise;
+    const pageTextCache = new Map<number, string>();
+
+    for (const node of sourceNodes) {
+      let ordinal = 0;
+      const firstPage = Math.max(1, node.startPage);
+      const lastPage = Math.min(pdf.numPages, node.endPage);
+      for (let pageNumber = firstPage; pageNumber <= lastPage; pageNumber++) {
+        let text = pageTextCache.get(pageNumber);
+        if (text === undefined) {
+          const page = await pdf.getPage(pageNumber);
+          const content = await page.getTextContent();
+          text = (content.items as Array<{ str?: string; hasEOL?: boolean }>)
+            .map((item) => `${typeof item.str === "string" ? item.str : ""}${item.hasEOL ? "\n" : " "}`)
+            .join("")
+            .replace(/[ \t]+\n/g, "\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .replace(/[ \t]{2,}/g, " ")
+            .trim();
+          pageTextCache.set(pageNumber, text);
+        }
+        if (text.length < 20) continue;
+
+        ordinal++;
+        const excerptHash = simpleHash(text);
+        db.run(
+          `INSERT OR IGNORE INTO curriculum_chunks
+             (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind)
+           VALUES (?, ?, ?, ?, ?, ?, 'prose');`,
+          [`chunk-text-${simpleHash(`${node.id}:${pageNumber}:${excerptHash}`)}`, node.id, pageNumber, ordinal, text, excerptHash]
+        );
+        inserted++;
+      }
+    }
+    await loadingTask.destroy();
+  }
+
+  if (inserted > 0) saveDbSync();
+  return inserted;
 }
 
 /* ─────────────────────────────────────────────────────────────

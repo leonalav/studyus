@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Play } from "lucide-react";
 import { getDb } from "../../db/database";
+import { beginAttempt } from "../../api";
 import type { TestParams } from "../testTabIds";
 
 export interface RealAvailableTestRecord {
@@ -10,7 +11,7 @@ export interface RealAvailableTestRecord {
   format: string;
   rigor: string;
   questions: number;
-  status: "new" | "in-progress" | "completed";
+  status: "new" | "in-progress" | "completed" | "grading-blocked";
   score?: number;
   due: string;
   /** Reconstructed TestParams for re-entering the attempt. */
@@ -25,9 +26,23 @@ interface Props {
   refreshKey?: number;
 }
 
+export function resolveAvailableTestStatus(
+  persistedStatus: string,
+  responseCount: number,
+  startEventCount: number
+): RealAvailableTestRecord["status"] {
+  if (persistedStatus === "completed") return "completed";
+  if (persistedStatus === "grading_blocked") return "grading-blocked";
+  if (persistedStatus === "active" && (responseCount > 0 || startEventCount > 0)) {
+    return "in-progress";
+  }
+  return "new";
+}
+
 export function AvailableTests({ onNotify, onStart, refreshKey }: Props) {
   const [filter, setFilter] = useState<"all" | "new" | "in-progress" | "completed">("all");
   const [tests, setTests] = useState<RealAvailableTestRecord[]>([]);
+  const [openingAttemptId, setOpeningAttemptId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -40,7 +55,11 @@ export function AvailableTests({ onNotify, onStart, refreshKey }: Props) {
       const res = db.exec(`
         SELECT a.id, f.title, f.subject, f.format, a.status, a.aggregate_score,
                f.config_json,
-               (SELECT COUNT(*) FROM assessment_items i WHERE i.form_id = f.id) AS q_count
+               (SELECT COUNT(*) FROM assessment_items i WHERE i.form_id = f.id) AS q_count,
+               (SELECT COALESCE(SUM(i.maximum_marks), 0) FROM assessment_items i WHERE i.form_id = f.id) AS total_marks,
+               (SELECT COUNT(*) FROM attempt_responses r WHERE r.attempt_id = a.id) AS response_count,
+               (SELECT COUNT(*) FROM assessment_events e
+                  WHERE e.attempt_id = a.id AND e.event_type = 'attempt_started') AS start_count
         FROM assessment_attempts a
         JOIN assessment_forms f ON a.form_id = f.id
         ORDER BY a.audit_created_at DESC;
@@ -65,13 +84,19 @@ export function AvailableTests({ onNotify, onStart, refreshKey }: Props) {
           config = {};
         }
         const qCount = (row[7] as number) ?? 0;
+        const totalMarks = (row[8] as number) ?? 0;
+        // Older generated tests were saved as active immediately. Do not call
+        // them resumable unless a response or explicit start event proves that
+        // the learner actually opened the attempt.
+        const st = resolveAvailableTestStatus(
+          statusRaw,
+          (row[9] as number) ?? 0,
+          (row[10] as number) ?? 0
+        );
 
-        let st: "new" | "in-progress" | "completed" = "new";
-        if (statusRaw === "completed") st = "completed";
-        else if (statusRaw === "active") st = "in-progress";
-
-        // Score percentage — items are worth up to 2 marks each in the schema.
-        const pct = Math.round((aggScore / Math.max(1, qCount * 2)) * 100);
+        // Difficulty profiles use different mark weights, so percentage must use
+        // the persisted maximum-mark total rather than assuming two per item.
+        const pct = Math.round((aggScore / Math.max(1, totalMarks)) * 100);
         const rigorLabel =
           config.rigor === "casual" ? "Casual"
             : config.rigor === "rigorous" ? "Rigorous"
@@ -109,16 +134,38 @@ export function AvailableTests({ onNotify, onStart, refreshKey }: Props) {
     };
   }, [refreshKey]);
 
-  const rows = tests.filter((t) => filter === "all" || t.status === filter);
+  const openTest = async (test: RealAvailableTestRecord) => {
+    if (openingAttemptId) return;
+    setOpeningAttemptId(test.id);
+    try {
+      // Only this explicit learner action turns a never-opened test into an
+      // active attempt. Generation itself must leave it in the Start state.
+      await beginAttempt(test.id);
+      onStart(test.params);
+      onNotify(`${test.status === "in-progress" ? "Resuming" : "Starting"} "${test.title}"`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not open this test");
+    } finally {
+      setOpeningAttemptId(null);
+    }
+  };
 
-  const statusStyle = (s: string) =>
+  const rows = tests.filter((t) =>
+    filter === "all"
+      || t.status === filter
+      || (filter === "completed" && t.status === "grading-blocked")
+  );
+
+  const statusStyle = (s: RealAvailableTestRecord["status"]) =>
     s === "new"
       ? { bg: "rgba(125,211,252,0.14)", fg: "#7dd3fc", label: "New" }
       : s === "in-progress"
       ? { bg: "rgba(252,211,77,0.14)", fg: "#fcd34d", label: "In progress" }
-      : { bg: "rgba(134,239,172,0.14)", fg: "#86efac", label: "Completed" };
+      : s === "grading-blocked"
+        ? { bg: "rgba(252,165,165,0.14)", fg: "#fca5a5", label: "Grading blocked" }
+        : { bg: "rgba(134,239,172,0.14)", fg: "#86efac", label: "Completed" };
 
-  const pendingCount = tests.filter((t) => t.status !== "completed").length;
+  const pendingCount = tests.filter((t) => t.status === "new" || t.status === "in-progress").length;
   const completedCount = tests.filter((t) => t.status === "completed").length;
   const completedTests = tests.filter((t) => t.status === "completed" && t.score !== undefined);
   const avgScore = completedTests.length
@@ -184,16 +231,16 @@ export function AvailableTests({ onNotify, onStart, refreshKey }: Props) {
               </div>
               {t.score !== undefined ? (
                 <span className="shrink-0 font-mono text-[15px] font-semibold text-[#86efac]">{t.score}%</span>
+              ) : t.status === "grading-blocked" ? (
+                <span className="shrink-0 font-mono text-[10.5px] text-[#fca5a5]">Needs review</span>
               ) : (
                 <button
-                  onClick={() => {
-                    onStart(t.params);
-                    onNotify(`Opening "${t.title}"`);
-                  }}
-                  className="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-accent-deep"
+                  onClick={() => void openTest(t)}
+                  disabled={openingAttemptId !== null}
+                  className="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-accent-deep disabled:cursor-wait disabled:opacity-55"
                 >
                   <Play size={11} fill="currentColor" />
-                  {t.status === "in-progress" ? "Resume" : "Start"}
+                  {openingAttemptId === t.id ? "Opening…" : t.status === "in-progress" ? "Resume" : "Start"}
                 </button>
               )}
             </div>

@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   isBlankResponse,
   blankEvaluation,
+  buildEvaluatorSystemPrompt,
+  buildEvaluatorUserPrompt,
   validateEvaluatorPayload,
   type UncertaintyState,
 } from "./evaluator";
@@ -87,6 +89,36 @@ describe("Evaluator payload validation", () => {
       CRITERIA
     );
     expect(res.ok).toBe(false);
+  });
+});
+
+describe("Visualization-aware examiner prompt", () => {
+  it("connects the shared spatial and domain interpretation guide to the examiner system prompt", () => {
+    const system = buildEvaluatorSystemPrompt();
+    expect(system).toContain("ASSESSMENT VISUALIZATION INTERPRETATION");
+    expect(system).toContain("Circuits: nodes establish electrical junctions");
+    expect(system).toContain("Graph theory: nodes, directedness, edges, weights");
+  });
+
+  it("includes the actual semantic figure specification rather than asking the examiner to infer an image", () => {
+    const prompt = buildEvaluatorUserPrompt({
+      stem: "Analyze the shown weighted network.",
+      itemType: "proof",
+      maximumMarks: 5,
+      criteria: CRITERIA,
+      response: "A to B has weight 4.",
+      figure: {
+        type: "graph_theory",
+        directed: true,
+        nodes: [{ id: "A" }, { id: "B" }],
+        edges: [{ from: "A", to: "B", weight: 4 }],
+      },
+    });
+
+    expect(prompt).toContain("AUTHORITATIVE LEARNER-VISIBLE VISUALIZATION SPECIFICATION");
+    expect(prompt).toContain('"type": "graph_theory"');
+    expect(prompt).toContain('"weight": 4');
+    expect(prompt).toContain("JSON data only");
   });
 });
 

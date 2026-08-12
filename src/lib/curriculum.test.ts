@@ -32,6 +32,32 @@ describe("Curriculum Ingestion & Bookmark Tree", () => {
     expect(tree[0].children?.[0].endPage).toBe(24); // Derived from next sibling at page 25
   });
 
+  it("includes descendant evidence when a parent curriculum section is selected", async () => {
+    await parseAndIngestPdfOutline({
+      sourceId: "cur-parent-scope-test",
+      name: "Scoped curriculum.pdf",
+      pageCount: 20,
+      outline: [
+        { title: "Chapter 1", destPage: 1, depth: 0 },
+        { title: "1.1 Child section", destPage: 3, depth: 1 },
+      ],
+    });
+    const db = await getDb();
+    const text = "Child evidence remains in scope when its chapter is selected.";
+    db.run(
+      `INSERT OR REPLACE INTO curriculum_chunks (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind)
+       VALUES ('parent-scope-chunk', 'node-cur-parent-scope-test-2', 3, 1, ?, ?, 'prose');`,
+      [text, simpleHash(text)]
+    );
+
+    const evidence = await getEvidenceForSelectedNodes(["node-cur-parent-scope-test-1"]);
+    expect(evidence.nodes.map((node) => node.id)).toEqual([
+      "node-cur-parent-scope-test-1",
+      "node-cur-parent-scope-test-2",
+    ]);
+    expect(evidence.chunks.map((chunk) => chunk.id)).toContain("parent-scope-chunk");
+  });
+
   it("extracts evidence chunks for multi-selected disjoint nodes", async () => {
     const db = await getDb();
     const excerpts = [

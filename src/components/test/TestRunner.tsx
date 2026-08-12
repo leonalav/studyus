@@ -3,6 +3,8 @@ import katex from "katex";
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
+  ArrowDown,
   Check,
   Type,
   Maximize2,
@@ -12,8 +14,19 @@ import {
   Sigma,
   Save,
   AlertCircle,
+  Lightbulb,
 } from "lucide-react";
-import { getAttemptForTaking, autosaveDraft, submitAttempt, AttemptForTakingDTO, AttemptResultDTO } from "../../api";
+import {
+  getAttemptForTaking,
+  beginAttempt,
+  createRetakeAttempt,
+  autosaveDraft,
+  submitAttempt,
+  AttemptForTakingDTO,
+  AttemptResultDTO,
+} from "../../api";
+import type { VisualizationIntent } from "../../lib/visualization/types";
+import { AssessmentFigure } from "./AssessmentFigure";
 
 interface Props {
   attemptId: string;
@@ -29,12 +42,25 @@ interface Question {
   format: "mcq" | "numeric" | "proof";
   maximumMarks: number;
   learningObjective: string;
+  figure?: VisualizationIntent;
   options?: { id: string; text: string }[];
   unit?: string | null;
   responseRequirement?: string | null;
+  flags: string[];
+}
+
+type HintMode = "full" | "limited" | "none";
+
+interface QuestionHintProps {
+  objective: string;
+  mode: HintMode;
+  revealed: boolean;
+  remaining: number;
+  onReveal: () => void;
 }
 
 export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props) {
+  const [runnerAttemptId, setRunnerAttemptId] = useState(attemptId);
   const [dto, setDto] = useState<AttemptForTakingDTO | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
@@ -42,13 +68,37 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">("saved");
   const [confirmSubmitOpen, setConfirmSubmitOpen] = useState(false);
   const [submissionResult, setSubmissionResult] = useState<AttemptResultDTO | null>(null);
+  const [hintedItems, setHintedItems] = useState<Set<string>>(new Set());
+  const questionFlagsRef = useRef<Record<string, string[]>>({});
+  const pendingDraftsRef = useRef(new Map<string, {
+    responseValue: string;
+    flags: string[];
+    ordinal: number;
+  }>());
+  const saveTimeoutRef = useRef<number | null>(null);
+  const examScrollRef = useRef<HTMLDivElement>(null);
+  const [scrollAvailability, setScrollAvailability] = useState({ up: false, down: false });
   const [time, setTime] = useState(0);
   const startTime = useRef(Date.now());
+
+  useEffect(() => {
+    setRunnerAttemptId(attemptId);
+    setDto(null);
+    setLoadError(null);
+    setIndex(0);
+    setAnswers({});
+    setSubmissionResult(null);
+    setHintedItems(new Set());
+    questionFlagsRef.current = {};
+    pendingDraftsRef.current.clear();
+    startTime.current = Date.now();
+    setTime(0);
+  }, [attemptId]);
 
   /* Load the real attempt: items, drafts and flags all come from SQLite. */
   useEffect(() => {
     let cancelled = false;
-    getAttemptForTaking(attemptId)
+    getAttemptForTaking(runnerAttemptId)
       .then((d) => {
         if (cancelled) return;
         if (!d || d.questions.length === 0) {
@@ -57,12 +107,18 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         }
         setDto(d);
         const restored: Record<string, { mcq?: string; numeric?: string; proof?: string }> = {};
+        const restoredFlags: Record<string, string[]> = {};
+        const restoredHints = new Set<string>();
         for (const q of d.questions) {
+          restoredFlags[q.id] = [...q.flags];
+          if (q.flags.includes("hint_used")) restoredHints.add(q.id);
           const draft = q.draftResponse ?? "";
           if (!draft) continue;
           if (q.itemType === "mcq") restored[q.id] = { mcq: draft };
           else restored[q.id] = { [q.itemType === "numeric" ? "numeric" : "proof"]: draft };
         }
+        questionFlagsRef.current = restoredFlags;
+        setHintedItems(restoredHints);
         setAnswers(restored);
       })
       .catch(() => {
@@ -71,7 +127,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     return () => {
       cancelled = true;
     };
-  }, [attemptId]);
+  }, [runnerAttemptId]);
 
   const questions = useMemo<Question[]>(
     () =>
@@ -81,9 +137,11 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         format: q.itemType === "mcq" ? "mcq" : q.itemType === "numeric" ? "numeric" : "proof",
         maximumMarks: q.maximumMarks,
         learningObjective: q.learningObjective,
+        figure: q.figure,
         options: q.options,
         unit: q.unit,
         responseRequirement: q.responseRequirement,
+        flags: q.flags,
       })),
     [dto]
   );
@@ -96,9 +154,23 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
       : total > 0 && questions.every((x) => x.format === "mcq")
       ? "mcq"
       : "mixed";
+  const hintMode: HintMode =
+    dto?.assistancePolicy === "full_hints"
+      ? "full"
+      : dto?.assistancePolicy === "limited_hints"
+        ? "limited"
+        : dto?.assistancePolicy === "no_hints"
+          ? "none"
+          : rigor === "casual"
+            ? "full"
+            : rigor === "rigorous"
+              ? "none"
+              : "limited";
+  const hintBudget = hintMode === "limited" ? Math.max(1, Math.ceil(total * 0.2)) : 0;
+  const hintsRemaining = Math.max(0, hintBudget - hintedItems.size);
 
   useEffect(() => {
-    setIndex((i) => Math.min(i, total - 1));
+    setIndex((i) => Math.max(0, Math.min(i, Math.max(0, total - 1))));
   }, [total]);
 
   useEffect(() => {
@@ -106,19 +178,112 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     return () => window.clearInterval(t);
   }, []);
 
-  // Debounced draft autosave to backend SQLite
-  const saveTimeoutRef = useRef<any>(null);
-  const handleDraftChange = (itemId: string, responseVal: string) => {
+  // Fullscreen exam mode intentionally hides the app shell's scroller. Give the
+  // runner its own persistent scroll region and keep explicit up/down controls
+  // in sync as proof editors, keyboards, and previews change height.
+  useEffect(() => {
+    const container = examScrollRef.current;
+    if (!container || !dto || submissionResult) return;
+
+    let animationFrame = 0;
+    const updateAvailability = () => {
+      const next = {
+        up: container.scrollTop > 2,
+        down: container.scrollTop + container.clientHeight < container.scrollHeight - 2,
+      };
+      setScrollAvailability((current) =>
+        current.up === next.up && current.down === next.down ? current : next
+      );
+    };
+
+    animationFrame = window.requestAnimationFrame(updateAvailability);
+    container.addEventListener("scroll", updateAvailability, { passive: true });
+    window.addEventListener("resize", updateAvailability);
+
+    const resizeObserver = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(updateAvailability);
+    resizeObserver?.observe(container);
+    if (container.firstElementChild) resizeObserver?.observe(container.firstElementChild);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      container.removeEventListener("scroll", updateAvailability);
+      window.removeEventListener("resize", updateAvailability);
+      resizeObserver?.disconnect();
+    };
+  }, [dto, submissionResult]);
+
+  useEffect(() => {
+    examScrollRef.current?.scrollTo({ top: 0 });
+  }, [index, runnerAttemptId]);
+
+  const scrollExam = (direction: "up" | "down") => {
+    const container = examScrollRef.current;
+    if (!container) return;
+    const distance = Math.max(320, Math.round(container.clientHeight * 0.72));
+    container.scrollBy({
+      top: direction === "up" ? -distance : distance,
+      behavior: "smooth",
+    });
+  };
+
+  // Keep every edited question in the debounce queue. A single pending timeout
+  // previously allowed a quick edit on question B to cancel question A's save.
+  const flushPendingDrafts = async () => {
+    if (saveTimeoutRef.current !== null) {
+      window.clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+    const pending = [...pendingDraftsRef.current.entries()];
+    if (pending.length === 0) return;
+
     setSaveStatus("saving");
-    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-    saveTimeoutRef.current = setTimeout(async () => {
-      try {
-        await autosaveDraft(attemptId, itemId, responseVal, [], index + 1);
-        setSaveStatus("saved");
-      } catch {
-        setSaveStatus("error");
-      }
+    try {
+      await Promise.all(
+        pending.map(async ([itemId, draft]) => {
+          const saved = await autosaveDraft(runnerAttemptId, itemId, draft.responseValue, draft.flags, draft.ordinal);
+          if (!saved.success) {
+            throw new Error(`Cannot save an attempt in status: ${saved.status}`);
+          }
+          // Do not delete a newer edit that arrived while this write was running.
+          if (pendingDraftsRef.current.get(itemId) === draft) {
+            pendingDraftsRef.current.delete(itemId);
+          }
+        })
+      );
+      setSaveStatus(pendingDraftsRef.current.size === 0 ? "saved" : "saving");
+    } catch (error) {
+      setSaveStatus("error");
+      throw error;
+    }
+  };
+
+  const handleDraftChange = (
+    itemId: string,
+    responseValue: string,
+    flags = questionFlagsRef.current[itemId] ?? [],
+    ordinal = index + 1
+  ) => {
+    pendingDraftsRef.current.set(itemId, {
+      responseValue,
+      flags: [...flags],
+      ordinal,
+    });
+    setSaveStatus("saving");
+    if (saveTimeoutRef.current !== null) window.clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = window.setTimeout(() => {
+      void flushPendingDrafts().catch(() => undefined);
     }, 400);
+  };
+
+  const saveAndExit = async () => {
+    try {
+      await flushPendingDrafts();
+      onExit();
+    } catch {
+      onNotify("Could not save the latest draft. Please retry before leaving the attempt.");
+    }
   };
 
   const answered = questions.filter((item) => {
@@ -147,6 +312,24 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     handleDraftChange(q.id, val);
   };
 
+  const revealHint = () => {
+    if (!q || hintMode !== "limited" || hintedItems.has(q.id) || hintsRemaining <= 0) return;
+    const nextFlags = [...new Set([...(questionFlagsRef.current[q.id] ?? []), "hint_used"])];
+    questionFlagsRef.current[q.id] = nextFlags;
+    setHintedItems((current) => new Set(current).add(q.id));
+    const currentAnswer = answers[q.id];
+    const draft =
+      q.format === "mcq"
+        ? currentAnswer?.mcq ?? ""
+        : q.format === "numeric"
+          ? currentAnswer?.numeric ?? ""
+          : currentAnswer?.proof ?? "";
+    handleDraftChange(q.id, draft, nextFlags, index + 1);
+    void flushPendingDrafts().catch(() => {
+      onNotify("Could not save hint usage. Try again before leaving this question.");
+    });
+  };
+
   const requestSubmit = () => {
     if (answered < total) {
       setConfirmSubmitOpen(true);
@@ -158,11 +341,36 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   const executeSubmit = async () => {
     setConfirmSubmitOpen(false);
     try {
-      const res = await submitAttempt(attemptId);
+      // Scoring must observe the latest keystroke, even when Submit is pressed
+      // before the 400 ms autosave debounce has elapsed.
+      await flushPendingDrafts();
+      const res = await submitAttempt(runnerAttemptId);
       setSubmissionResult(res);
       onNotify(`Exam submitted · Final score: ${res.aggregateScore}/${res.totalPossibleMarks}`);
     } catch (err) {
       onNotify(err instanceof Error ? err.message : "Submission error. Attempt recorded as retryable.");
+    }
+  };
+
+  const startRetake = async () => {
+    try {
+      const nextAttemptId = await createRetakeAttempt(runnerAttemptId);
+      await beginAttempt(nextAttemptId);
+      pendingDraftsRef.current.clear();
+      setDto(null);
+      setLoadError(null);
+      setIndex(0);
+      setAnswers({});
+      setSubmissionResult(null);
+      setHintedItems(new Set());
+      questionFlagsRef.current = {};
+      startTime.current = Date.now();
+      setTime(0);
+      setSaveStatus("saved");
+      setRunnerAttemptId(nextAttemptId);
+      onNotify("Fresh retake started");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not start a retake");
     }
   };
 
@@ -197,13 +405,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     return (
       <SubmittedView
         result={submissionResult}
-        onRetake={() => {
-          setAnswers({});
-          setSubmissionResult(null);
-          setIndex(0);
-          startTime.current = Date.now();
-          onNotify("Retake started");
-        }}
+        onRetake={() => void startRetake()}
         onExit={onExit}
         time={time}
       />
@@ -211,12 +413,17 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   }
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-72px)] w-full max-w-[1100px] flex-col px-5 pt-6 select-none">
+    <>
+      <div
+        ref={examScrollRef}
+        className="h-screen w-full overflow-y-scroll overscroll-contain [scrollbar-gutter:stable]"
+      >
+        <div className="mx-auto w-full max-w-[1100px] pt-6 pr-16 pb-24 pl-5 select-none xl:px-5">
       {/* header */}
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <button
-            onClick={onExit}
+            onClick={() => void saveAndExit()}
             className="grid h-8 w-8 place-items-center rounded-md border border-edge bg-raise text-mut transition-colors hover:bg-white/[0.07] hover:text-fg"
             title="Back"
           >
@@ -247,9 +454,9 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-5 lg:grid-cols-[1fr_280px]">
+      <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
         {/* question pane */}
-        <div className="flex min-h-0 flex-col rounded-lg border border-edge bg-raise p-5">
+        <div className="flex min-w-0 flex-col rounded-lg border border-edge bg-raise p-5">
           <div className="mb-3 flex items-center justify-between font-mono text-[10.5px] text-dim">
             <span>QUESTION {String(index + 1).padStart(2, "0")} · {String(total).padStart(2, "0")}</span>
             <span>{q?.format === "proof" ? "Proof-based" : q?.format === "numeric" ? "Numeric" : "Multiple choice"}</span>
@@ -260,21 +467,39 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
               q={q}
               selected={answers[q.id]?.mcq}
               onSelect={select}
-              showHints={rigor !== "rigorous"}
+              hint={{
+                objective: q.learningObjective,
+                mode: hintMode,
+                revealed: hintedItems.has(q.id),
+                remaining: hintsRemaining,
+                onReveal: revealHint,
+              }}
             />
           ) : q && q.format === "numeric" ? (
             <NumericQuestion
               q={q}
               answer={answers[q.id]?.numeric ?? ""}
               onChange={setNumeric}
-              showHints={rigor !== "rigorous"}
+              hint={{
+                objective: q.learningObjective,
+                mode: hintMode,
+                revealed: hintedItems.has(q.id),
+                remaining: hintsRemaining,
+                onReveal: revealHint,
+              }}
             />
           ) : q && q.format === "proof" ? (
             <ProofQuestion
               q={q}
               answer={answers[q.id]?.proof ?? ""}
               onChange={setProof}
-              showHints={rigor !== "rigorous"}
+              hint={{
+                objective: q.learningObjective,
+                mode: hintMode,
+                revealed: hintedItems.has(q.id),
+                remaining: hintsRemaining,
+                onReveal: revealHint,
+              }}
             />
           ) : null}
 
@@ -302,7 +527,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         </div>
 
         {/* nav rail */}
-        <aside className="flex min-h-0 flex-col gap-4">
+        <aside className="flex min-w-0 flex-col gap-4">
           <div className="rounded-lg border border-edge bg-raise p-3">
             <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Navigation</div>
             <div className="grid grid-cols-6 gap-1.5">
@@ -365,7 +590,68 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
           </div>
         </div>
       )}
+        </div>
+      </div>
+
+      <div
+        className="fixed right-3 top-1/2 z-[70] flex -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-edge bg-[#222224]/95 shadow-xl backdrop-blur sm:right-5"
+        aria-label="Exam page scrolling controls"
+      >
+        <button
+          type="button"
+          onClick={() => scrollExam("up")}
+          disabled={!scrollAvailability.up}
+          aria-label="Scroll exam up"
+          title="Scroll up"
+          className="grid h-10 w-10 place-items-center border-b border-edge text-fg transition-colors hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:text-faint disabled:opacity-45"
+        >
+          <ArrowUp size={17} />
+        </button>
+        <button
+          type="button"
+          onClick={() => scrollExam("down")}
+          disabled={!scrollAvailability.down}
+          aria-label="Scroll exam down"
+          title="Scroll down"
+          className="grid h-10 w-10 place-items-center text-fg transition-colors hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:text-faint disabled:opacity-45"
+        >
+          <ArrowDown size={17} />
+        </button>
+      </div>
+    </>
+  );
+}
+
+export function QuestionPrompt({ stem, figure }: { stem: string; figure?: VisualizationIntent }) {
+  return (
+    <div className="min-w-0 max-w-full">
+      <h2 className="break-words text-[24px] font-semibold leading-snug text-fg">{stem}</h2>
+      {figure && <AssessmentFigure intent={figure} />}
     </div>
+  );
+}
+
+function QuestionHint({ objective, mode, revealed, remaining, onReveal }: QuestionHintProps) {
+  if (!objective || mode === "none") return null;
+  if (mode === "full" || revealed) {
+    return (
+      <div className="mt-2 flex items-start gap-1.5 rounded-md border border-[#86efac]/20 bg-[#86efac]/[0.05] px-2.5 py-2 text-[12.5px] text-dim">
+        <Lightbulb size={13} className="mt-0.5 shrink-0 text-[#86efac]" />
+        <span>{mode === "full" ? "Objective hint" : "Revealed hint"} · {objective}</span>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onReveal}
+      disabled={remaining <= 0}
+      className="mt-2 flex items-center gap-1.5 rounded-md border border-edge bg-card px-2.5 py-1.5 text-[12px] text-mut transition-colors hover:bg-white/[0.06] hover:text-fg disabled:cursor-not-allowed disabled:opacity-45"
+    >
+      <Lightbulb size={12} />
+      {remaining > 0 ? `Reveal objective hint · ${remaining} remaining` : "Hint budget used"}
+    </button>
   );
 }
 
@@ -375,19 +661,17 @@ function McqQuestion({
   q,
   selected,
   onSelect,
-  showHints,
+  hint,
 }: {
   q: Question;
   selected?: string;
   onSelect: (id: string) => void;
-  showHints: boolean;
+  hint: QuestionHintProps;
 }) {
   return (
     <div>
-      <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.stem}</h2>
-      {showHints && q.learningObjective && (
-        <p className="mt-2 text-[12.5px] text-dim">Objective · {q.learningObjective}</p>
-      )}
+      <QuestionPrompt stem={q.stem} figure={q.figure} />
+      <QuestionHint {...hint} />
       <div className="mt-5 space-y-2.5">
         {q.options?.length ? (
           q.options.map((opt) => {
@@ -426,19 +710,17 @@ function NumericQuestion({
   q,
   answer,
   onChange,
-  showHints,
+  hint,
 }: {
   q: Question;
   answer: string;
   onChange: (v: string) => void;
-  showHints: boolean;
+  hint: QuestionHintProps;
 }) {
   return (
     <div>
-      <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.stem}</h2>
-      {showHints && q.learningObjective && (
-        <p className="mt-2 text-[12.5px] text-dim">Objective · {q.learningObjective}</p>
-      )}
+      <QuestionPrompt stem={q.stem} figure={q.figure} />
+      <QuestionHint {...hint} />
       <div className="mt-5 flex items-center gap-2">
         <input
           value={answer}
@@ -458,7 +740,7 @@ function NumericQuestion({
 
 const LATEX_PRESETS = [
   { id: "frac", label: "a/b", insert: "\\frac{a}{b}" },
-  { id: "pow", label: "x²", insert: "^{2}" },
+  { id: "pow", label: "x²", insert: "x^{2}" },
   { id: "sqrt", label: "√", insert: "\\sqrt{}" },
   { id: "int", label: "∫", insert: "\\int" },
   { id: "sum", label: "Σ", insert: "\\sum_{i=1}^{n}" },
@@ -479,12 +761,12 @@ function ProofQuestion({
   q,
   answer,
   onChange,
-  showHints,
+  hint,
 }: {
   q: Question;
   answer: string;
   onChange: (v: string) => void;
-  showHints: boolean;
+  hint: QuestionHintProps;
 }) {
   const [fontSize, setFontSize] = useState(15);
   const [kbOpen, setKbOpen] = useState(true);
@@ -492,114 +774,137 @@ function ProofQuestion({
 
   const insert = (snippet: string) => {
     const el = taRef.current;
-    if (!el) {
-      onChange(answer + snippet);
-      return;
-    }
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
-    const next = answer.slice(0, start) + snippet + answer.slice(end);
+    const start = el?.selectionStart ?? answer.length;
+    const end = el?.selectionEnd ?? answer.length;
+    const prefix = answer.slice(0, start);
+    const unescapedPrefix = prefix.replace(/\\\$/g, "");
+    const dollarMarkers = unescapedPrefix.match(/\$\$|\$/g) ?? [];
+    const insideDollarMath = dollarMarkers.length % 2 === 1;
+    const insideDisplayMath = prefix.lastIndexOf("\\[") > prefix.lastIndexOf("\\]");
+    const insertion = insideDollarMath || insideDisplayMath ? snippet : `$${snippet}$`;
+    const next = answer.slice(0, start) + insertion + answer.slice(end);
     onChange(next);
     requestAnimationFrame(() => {
-      el.focus();
-      const cursor = start + snippet.length;
-      el.setSelectionRange(cursor, cursor);
+      el?.focus();
+      const cursor = start + insertion.length;
+      el?.setSelectionRange(cursor, cursor);
     });
   };
 
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-[1fr_1.1fr]">
-      <div className="flex min-h-0 flex-col">
-        <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.stem}</h2>
-        {q.responseRequirement && (
-          <div className="mt-3 rounded-md border border-dashed border-accent/40 bg-accent/[0.04] px-3 py-2">
-            <div className="mb-0.5 font-mono text-[10px] uppercase tracking-wider text-accent">Requirement</div>
-            <p className="text-[12.5px] text-fg/90">{q.responseRequirement}</p>
-          </div>
-        )}
-        {showHints && q.learningObjective && (
-          <p className="mt-2 text-[12.5px] text-dim">Objective · {q.learningObjective}</p>
-        )}
+    <div className="min-w-0">
+      <QuestionPrompt stem={q.stem} figure={q.figure} />
+      {q.responseRequirement && (
+        <div className="mt-3 rounded-md border border-dashed border-accent/40 bg-accent/[0.04] px-3 py-2">
+          <div className="mb-0.5 font-mono text-[10px] uppercase tracking-wider text-accent">Requirement</div>
+          <p className="text-[12.5px] text-fg/90">{q.responseRequirement}</p>
+        </div>
+      )}
+      <QuestionHint {...hint} />
 
-        <div className="mt-4 rounded-md border border-edge bg-card">
-          <button
-            onClick={() => setKbOpen((v) => !v)}
-            className="flex w-full items-center justify-between px-3 py-2 text-left"
-          >
-            <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-fg">
-              <Sigma size={12} className="text-accent" />
+      {/* The keyboard owns a full-width row. Keeping it out of the answer and
+          preview layout prevents its contents from overflowing a compressed
+          grid track on shorter screens. */}
+      <section className="mt-5 overflow-hidden rounded-lg border border-edge bg-card">
+        <button
+          type="button"
+          onClick={() => setKbOpen((value) => !value)}
+          aria-expanded={kbOpen}
+          className="flex w-full items-center justify-between px-4 py-3 text-left transition-colors hover:bg-white/[0.025]"
+        >
+          <span>
+            <span className="flex items-center gap-2 text-[12.5px] font-semibold text-fg">
+              <Sigma size={14} className="text-accent" />
               LaTeX keyboard
             </span>
-            <ChevronDown size={13} className={`text-dim transition-transform ${kbOpen ? "" : "-rotate-90"}`} />
-          </button>
-          {kbOpen && (
-            <div className="grid grid-cols-4 gap-1.5 px-3 pb-3">
-              {LATEX_PRESETS.map((p) => (
+            <span className="mt-0.5 block pl-[22px] text-[11px] text-dim">
+              Insert mathematical notation at the cursor
+            </span>
+          </span>
+          <ChevronDown
+            size={14}
+            className={`shrink-0 text-dim transition-transform ${kbOpen ? "" : "-rotate-90"}`}
+          />
+        </button>
+        {kbOpen && (
+          <div className="border-t border-edge-soft px-4 py-4">
+            <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+              {LATEX_PRESETS.map((preset) => (
                 <button
-                  key={p.id}
-                  onClick={() => insert(p.insert)}
-                  className="rounded border border-edge bg-raise px-2 py-1.5 text-center text-[11.5px] text-mut transition-colors hover:bg-white/[0.07] hover:text-fg"
+                  key={preset.id}
+                  type="button"
+                  onClick={() => insert(preset.insert)}
+                  className="grid min-h-10 place-items-center rounded-md border border-edge bg-raise px-2 py-2 text-center text-[12px] text-mut transition-colors hover:border-accent/40 hover:bg-white/[0.07] hover:text-fg"
+                  title={`Insert ${preset.insert}`}
                 >
-                  {p.label}
+                  {preset.label}
                 </button>
               ))}
             </div>
-          )}
-        </div>
-
-        <div className="mt-3 flex min-h-0 flex-1 flex-col rounded-md border border-edge bg-ink/60">
-          <div className="flex items-center justify-between border-b border-edge px-3 py-1.5">
-            <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
-              <Type size={11} />
-              Your proof
-            </span>
-            <span className="flex items-center gap-2 font-mono text-[10px] text-dim">
-              <button
-                onClick={() => setFontSize((s) => Math.max(11, s - 1))}
-                className="grid h-5 w-5 place-items-center rounded hover:bg-white/[0.07]"
-              >
-                <Minimize2 size={10} />
-              </button>
-              {fontSize}px
-              <button
-                onClick={() => setFontSize((s) => Math.min(22, s + 1))}
-                className="grid h-5 w-5 place-items-center rounded hover:bg-white/[0.07]"
-              >
-                <Maximize2 size={10} />
-              </button>
-            </span>
           </div>
-          <textarea
-            ref={taRef}
-            value={answer}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder="Type your proof here. Use the LaTeX keyboard for equations."
-            className="min-h-[180px] flex-1 resize-none bg-transparent px-3 py-2.5 font-mono leading-relaxed text-fg outline-none placeholder:text-faint"
-            style={{ fontSize }}
-          />
-        </div>
-      </div>
+        )}
+      </section>
 
-      <div className="flex min-h-0 flex-col rounded-md border border-edge bg-card">
-        <div className="flex items-center justify-between border-b border-edge px-3 py-2">
-          <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
-            <PenLine size={11} className="text-accent" />
-            Live preview
+      {/* The editable answer is a second independent full-width region. It has
+          an explicit natural height and can grow, rather than being forced into
+          the remaining pixels of a viewport-height flex container. */}
+      <section className="mt-4 overflow-hidden rounded-lg border border-edge bg-ink/60">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-edge px-4 py-2.5">
+          <span className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-dim">
+            <Type size={12} className="text-accent" />
+            Your proof answer
           </span>
-          <span className="rounded-full bg-accent/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-accent">
+          <span className="flex items-center gap-2 font-mono text-[10px] text-dim">
+            <button
+              type="button"
+              onClick={() => setFontSize((size) => Math.max(11, size - 1))}
+              className="grid h-6 w-6 place-items-center rounded hover:bg-white/[0.07] hover:text-fg"
+              aria-label="Decrease answer font size"
+            >
+              <Minimize2 size={11} />
+            </button>
+            {fontSize}px
+            <button
+              type="button"
+              onClick={() => setFontSize((size) => Math.min(22, size + 1))}
+              className="grid h-6 w-6 place-items-center rounded hover:bg-white/[0.07] hover:text-fg"
+              aria-label="Increase answer font size"
+            >
+              <Maximize2 size={11} />
+            </button>
+          </span>
+        </div>
+        <textarea
+          ref={taRef}
+          value={answer}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="Write your complete proof here. Use $...$ or \\[...\\] around LaTeX expressions."
+          className="block min-h-[240px] w-full resize-y bg-transparent px-4 py-3.5 font-mono leading-relaxed text-fg outline-none placeholder:text-faint"
+          style={{ fontSize }}
+        />
+      </section>
+
+      {/* Rendered output gets its own wide row below the editor. */}
+      <section className="mt-4 overflow-hidden rounded-lg border border-edge bg-card">
+        <div className="flex items-center justify-between border-b border-edge px-4 py-2.5">
+          <span className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-dim">
+            <PenLine size={12} className="text-accent" />
+            Typeset answer output
+          </span>
+          <span className="rounded-full bg-accent/15 px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider text-accent">
             KaTeX
           </span>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <div className="min-h-[160px] overflow-x-auto px-4 py-4">
           {answer.trim() ? (
             <RenderedProof text={answer} />
           ) : (
             <p className="font-mono text-[11.5px] text-faint">
-              Your typeset answer will appear here as you type.
+              Your typeset proof will appear in this dedicated output area as you type.
             </p>
           )}
         </div>
-      </div>
+      </section>
     </div>
   );
 }
@@ -623,7 +928,7 @@ function RenderedProof({ text }: { text: string }) {
 
 function splitMathAndText(text: string): { kind: "text" | "math"; value: string }[] {
   const out: { kind: "text" | "math"; value: string }[] = [];
-  const re = /(\$\$[^$]+\$|\$[^$]+\$|\\\[[\s\S]*?\\\])/g;
+  const re = /(\$\$[\s\S]*?\$\$|\$[^$\n]+?\$|\\\[[\s\S]*?\\\])/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
@@ -697,7 +1002,8 @@ function SubmittedView({
             <div className="flex items-start gap-3 px-4 py-3">
               <span className="w-7 shrink-0 font-mono text-[12px] text-dim">{String(i + 1).padStart(2, "0")}</span>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-[13px] text-fg">{q.stem}</div>
+                <div className="break-words text-[13px] text-fg">{q.stem}</div>
+                {q.figure && <AssessmentFigure intent={q.figure} />}
                 <div className="mt-1 font-mono text-[10.5px] text-dim">
                   Committed: {q.committedResponse || "blank"}
                 </div>

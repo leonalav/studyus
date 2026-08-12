@@ -14,16 +14,29 @@ import {
   Target,
   Trash2,
 } from "lucide-react";
-import { getDb } from "../db/database";
 import { useCurricula } from "../state/curriculumStore";
 import { deleteChalkboardSession } from "../api";
-import { deleteStudySession } from "../state/studySessionStore";
+import { ContextMenu, type ContextMenuTarget } from "./ContextMenu";
+import {
+  deleteStudySession,
+  getStudySession,
+  listStudySessions,
+  pastePastNoteClipboard,
+  readPastNoteClipboard,
+  renameStudySession,
+  subscribeToStudySessions,
+  writePastNoteClipboard,
+} from "../state/studySessionStore";
 
 interface Props {
   onNotify: (text: string) => void;
   onOpenSearch: () => void;
   onOpenSettings: () => void;
   onOpenTab: (tab: { id: string; title: string; kind: "curriculum" | "test" | "note" }) => void;
+  onPastNoteDeleted?: (id: string) => void;
+  onPastNoteRenamed?: (id: string, title: string) => void;
+  onCurriculumDeleted?: (id: string) => void;
+  onCurriculumRenamed?: (id: string, title: string) => void;
 }
 
 export interface PastNote {
@@ -33,28 +46,34 @@ export interface PastNote {
   updatedAt: string;
 }
 
-export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab }: Props) {
+export function Sidebar({
+  onNotify,
+  onOpenSearch,
+  onOpenSettings,
+  onOpenTab,
+  onPastNoteDeleted,
+  onPastNoteRenamed,
+  onCurriculumDeleted,
+  onCurriculumRenamed,
+}: Props) {
   const [curriculaOpen, setCurriculaOpen] = useState(true);
   const [testingOpen, setTestingOpen] = useState(true);
   const [pastNotesOpen, setPastNotesOpen] = useState(true);
+  const [contextMenu, setContextMenu] = useState<ContextMenuTarget | null>(null);
 
-  const { curricula, addFiles } = useCurricula();
-  const [pastNotes, setPastNotes] = useState<PastNote[]>([]);
+  const { curricula, addFiles, renameCurriculum, deleteCurriculum } = useCurricula();
+  const [pastNotes, setPastNotes] = useState<PastNote[]>(() => listStudySessions());
 
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    (async () => {
-      const db = await getDb();
-      const notesRes = db.exec("SELECT id, title, domain, updated_at FROM chalkboard_sessions ORDER BY updated_at DESC;");
-      const loadedNotes = notesRes[0]?.values.map((row) => ({
-        id: row[0] as string,
-        title: row[1] as string,
-        domain: row[2] as string,
-        updatedAt: row[3] as string,
-      })) ?? [];
-      setPastNotes(loadedNotes);
-    })();
+    const refresh = () => setPastNotes(listStudySessions());
+    const unsubscribe = subscribeToStudySessions(refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("focus", refresh);
+    };
   }, []);
 
   const handleUploadPDF = async (files: FileList | null) => {
@@ -73,11 +92,78 @@ export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab }: P
   const handleDeleteNote = async (note: PastNote) => {
     try {
       await deleteChalkboardSession(note.id);
+      // This localStorage write broadcasts to Recent Sessions and Past Notes.
       deleteStudySession(note.id);
-      setPastNotes((current) => current.filter((n) => n.id !== note.id));
+      onPastNoteDeleted?.(note.id);
       onNotify(`Deleted "${note.title}"`);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "Could not delete that note");
+    }
+  };
+
+  const handleContextAction = async (actionId: string, data?: any) => {
+    if (actionId.endsWith("_past_note")) {
+      const note = data?.note as PastNote | undefined;
+      if (!note) return;
+      if (actionId === "delete_past_note") {
+        await handleDeleteNote(note);
+        return;
+      }
+      if (actionId === "rename_past_note") {
+        const title = window.prompt("Rename Past Note", note.title)?.trim();
+        if (!title) return;
+        const renamed = renameStudySession(note.id, title);
+        if (!renamed) return onNotify("Could not rename that note");
+        onPastNoteRenamed?.(note.id, renamed.title);
+        onNotify(`Renamed Past Note to "${renamed.title}"`);
+        return;
+      }
+      if (actionId === "copy_past_note" || actionId === "cut_past_note") {
+        const mode = actionId === "cut_past_note" ? "cut" : "copy";
+        const clipboard = writePastNoteClipboard(note.id, mode);
+        if (!clipboard) return onNotify("That Past Note is no longer available");
+        const full = getStudySession(note.id);
+        const transcript = full?.messages.map((message) => message.text).join("\n\n") ?? "";
+        void navigator.clipboard?.writeText(`${note.title}${transcript ? `\n\n${transcript}` : ""}`).catch(() => undefined);
+        onNotify(mode === "cut" ? `Cut "${note.title}" — paste it to move it to the top` : `Copied "${note.title}"`);
+        return;
+      }
+      if (actionId === "paste_past_note") {
+        const pasted = pastePastNoteClipboard();
+        if (!pasted) return onNotify("Copy or cut a Past Note first");
+        onNotify(`Pasted "${pasted.title}"`);
+      }
+      return;
+    }
+
+    const sourceId = typeof data?.id === "string" ? data.id : null;
+    if (!sourceId) return;
+    if (actionId === "delete_curriculum") {
+      try {
+        await deleteCurriculum(sourceId);
+        onCurriculumDeleted?.(sourceId);
+        onNotify(`Deleted curriculum "${data.name}"`);
+      } catch (error) {
+        onNotify(error instanceof Error ? error.message : "Could not delete that curriculum");
+      }
+      return;
+    }
+    if (actionId === "rename_curriculum") {
+      const currentName = String(data.name ?? "Curriculum");
+      const displayName = currentName.replace(/\.pdf$/i, "");
+      const requested = window.prompt("Rename curriculum", displayName)?.trim();
+      if (!requested) return;
+      const nextName = /\.pdf$/i.test(currentName) && !/\.pdf$/i.test(requested)
+        ? `${requested}.pdf`
+        : requested;
+      try {
+        await renameCurriculum(sourceId, nextName);
+        const nextTitle = nextName.replace(/\.pdf$/i, "");
+        onCurriculumRenamed?.(sourceId, nextTitle);
+        onNotify(`Renamed curriculum to "${nextTitle}"`);
+      } catch (error) {
+        onNotify(error instanceof Error ? error.message : "Could not rename that curriculum");
+      }
     }
   };
 
@@ -179,6 +265,16 @@ export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab }: P
               <button
                 key={c.id}
                 onClick={() => onOpenTab({ id: `cur-${c.id}`, title: c.name.replace(/\.pdf$/i, ""), kind: "curriculum" })}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setContextMenu({
+                    type: "curriculum_source",
+                    x: event.clientX,
+                    y: event.clientY,
+                    data: { id: c.id, name: c.name },
+                  });
+                }}
                 title={`${c.name} [${c.subject}] · ${c.pageCount} pages`}
                 className="group flex w-full items-center gap-1.5 rounded-[4px] px-2 py-[5px] text-left text-mut transition-colors hover:bg-white/[0.055] hover:text-fg"
               >
@@ -205,6 +301,16 @@ export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab }: P
             {pastNotes.map((note) => (
               <div
                 key={note.id}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setContextMenu({
+                    type: "past_note",
+                    x: event.clientX,
+                    y: event.clientY,
+                    data: { note, canPaste: readPastNoteClipboard() != null },
+                  });
+                }}
                 className="group flex w-full items-center gap-1.5 rounded-[4px] px-2 py-[5px] text-mut transition-colors hover:bg-white/[0.055] hover:text-fg"
               >
                 <button
@@ -259,6 +365,12 @@ export function Sidebar({ onNotify, onOpenSearch, onOpenSettings, onOpenTab }: P
           Library
         </button>
       </div>
+
+      <ContextMenu
+        target={contextMenu}
+        onClose={() => setContextMenu(null)}
+        onAction={(actionId, data) => void handleContextAction(actionId, data)}
+      />
     </aside>
   );
 }

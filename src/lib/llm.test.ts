@@ -8,6 +8,7 @@ import {
   storeCredentialLocally,
   getCredentialLocally,
   testModelEndpoint,
+  TUTOR_AGENT_PROMPT_V1,
 } from "./llm";
 
 describe("Three-Role LLM Engine & Security", () => {
@@ -31,6 +32,23 @@ describe("Three-Role LLM Engine & Security", () => {
     expect(settingsStr).not.toContain("sk-secret-12345");
   });
 
+  it("replaces and clears stale role credentials when an assignment changes", async () => {
+    await bindModelRole("tutor", {
+      provider: "openai",
+      baseUrl: "https://api.example/v1",
+      modelId: "private-model",
+      apiKey: "sk-old-provider",
+    });
+    expect(getCredentialLocally("role_tutor")).toBe("sk-old-provider");
+
+    await bindModelRole("tutor", {
+      provider: "custom",
+      baseUrl: "http://localhost:11434/v1",
+      modelId: "local-model",
+    });
+    expect(getCredentialLocally("role_tutor")).toBe("");
+  });
+
   it("supports binding one model to all three roles in a single action", async () => {
     await bindAllModelRoles({
       provider: "custom",
@@ -42,6 +60,16 @@ describe("Three-Role LLM Engine & Security", () => {
     expect(bindings.length).toBe(3);
     expect(bindings.map((b) => b.role).sort()).toEqual(["evaluator", "generation", "tutor"]);
     expect(bindings.every((b) => b.modelId === "llama-3-70b")).toBe(true);
+  });
+
+  it("pins layered explanations and pedagogical-necessity gating in the base tutor rules", () => {
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/simple plain-language intuition/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/precise terminology, assumptions, rigorous reasoning/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/Use the board only when it is pedagogically necessary/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/greetings, thanks, acknowledgements, social chat, navigation questions/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/smallest relevant representation only when the answer is yes/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/Never add decorative, redundant, irrelevant, or semantically misleading content/i);
+    expect(TUTOR_AGENT_PROMPT_V1).toMatch(/respect disabled tool permissions/i);
   });
 
   it("validates endpoint scheme and reports invalid URLs", async () => {

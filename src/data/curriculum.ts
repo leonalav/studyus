@@ -32,8 +32,13 @@ export type QuestionFormat = "mcq" | "proof" | "mixed";
 export const MAX_MCQ = 50;
 export const MAX_PROOF = 15;
 
+export function minQuestions(format: QuestionFormat) {
+  // A one-item assessment cannot contain a genuine mix of response types.
+  return format === "mixed" ? 2 : 1;
+}
+
 export function maxQuestions(format: QuestionFormat) {
   if (format === "mcq") return MAX_MCQ;
   if (format === "proof") return MAX_PROOF;
-  return Math.round((MAX_MCQ + MAX_PROOF) / 2); // mixed
+  return Math.floor((MAX_MCQ + MAX_PROOF) / 2); // mixed
 }

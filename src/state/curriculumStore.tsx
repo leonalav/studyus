@@ -1,6 +1,13 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { getDb } from "../db/database";
-import { getCurriculumTree, ingestPdfFile, type CurriculumNodeRecord, type CurriculumSourceRecord } from "../lib/curriculum";
+import {
+  deleteCurriculumSource,
+  getCurriculumTree,
+  ingestPdfFile,
+  renameCurriculumSource,
+  type CurriculumNodeRecord,
+  type CurriculumSourceRecord,
+} from "../lib/curriculum";
 import type { SubjectKey } from "../data/curriculum";
 
 export interface StoredCurriculum extends CurriculumSourceRecord {
@@ -22,6 +29,8 @@ interface CurriculumContextValue {
   curricula: StoredCurriculum[];
   refresh: () => Promise<void>;
   addFiles: (files: FileList | File[]) => Promise<StoredCurriculum[]>;
+  renameCurriculum: (id: string, name: string) => Promise<void>;
+  deleteCurriculum: (id: string) => Promise<void>;
 }
 
 const CurriculumContext = createContext<CurriculumContextValue | null>(null);
@@ -52,7 +61,20 @@ export function CurriculumProvider({ children }: { children: ReactNode }) {
     return added;
   };
 
-  const value = useMemo(() => ({ curricula, refresh, addFiles }), [curricula]);
+  const renameCurriculum = async (id: string, name: string) => {
+    await renameCurriculumSource(id, name);
+    await refresh();
+  };
+
+  const deleteCurriculum = async (id: string) => {
+    await deleteCurriculumSource(id);
+    await refresh();
+  };
+
+  const value = useMemo(
+    () => ({ curricula, refresh, addFiles, renameCurriculum, deleteCurriculum }),
+    [curricula]
+  );
   return <CurriculumContext.Provider value={value}>{children}</CurriculumContext.Provider>;
 }
 

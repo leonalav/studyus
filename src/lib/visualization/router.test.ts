@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { routeVisualization, AdapterId } from "./router";
 import type {
-  VisualizationIntent,
   GeometryIntent,
   FunctionIntent,
   Graph3DIntent,

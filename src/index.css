@@ -20,9 +20,110 @@
   --color-warn: #cb7b3a;
 }
 
+:root {
+  --app-text-scale: 1;
+}
+
 html,
 body {
   height: 100%;
+}
+
+html {
+  font-size: calc(16px * var(--app-text-scale));
+}
+
+html[data-density="compact"] {
+  font-size: calc(15px * var(--app-text-scale));
+}
+
+html[data-font="system"] {
+  --font-display: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+html[data-font="grotesk"] {
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+}
+html[data-font="inter"] {
+  --font-display: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+html[data-font="serif"] {
+  --font-display: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+}
+html[data-font="mono"] {
+  --font-display: "Space Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+html[data-font="dyslexic"] {
+  --font-display: OpenDyslexic, Atkinson Hyperlegible, Verdana, system-ui, sans-serif;
+  letter-spacing: 0.015em;
+  word-spacing: 0.04em;
+}
+
+/* Appearance preferences override the shared Tailwind theme tokens, so app
+   chrome, dialogs and content all update without remounting. Purpose-built
+   chalkboards remain dark because that contrast is part of the drawing UI. */
+html[data-theme="light"] {
+  --color-ink: #f5f5f2;
+  --color-panel: #ffffff;
+  --color-raise: #eeeee9;
+  --color-card: #fafaf7;
+  --color-edge: #d1d1cb;
+  --color-edge-soft: #e2e2dc;
+  --color-fg: #242422;
+  --color-mut: #5e5e5a;
+  --color-dim: #777771;
+  --color-faint: #a0a09a;
+  --color-accent: #176fc1;
+  --color-accent-deep: #125da4;
+  --color-ok: #247c4b;
+  --color-warn: #a65d22;
+}
+
+html[data-theme="light"] [class*="bg-white/["]:not(.settings-modal-original *) {
+  background-color: rgb(24 24 22 / 0.06);
+}
+html[data-theme="light"] [class*="border-white/"]:not(.settings-modal-original *) {
+  border-color: rgb(24 24 22 / 0.12);
+}
+html[data-theme="light"] [class*="bg-black/25"]:not(.settings-modal-original *) {
+  background-color: rgb(24 24 22 / 0.06);
+}
+
+/* Settings keeps its original dark command-palette presentation even while it
+   previews and applies a light theme to the rest of the application. */
+.settings-modal-original {
+  --color-ink: #191919;
+  --color-panel: #202020;
+  --color-raise: #262626;
+  --color-card: #222221;
+  --color-edge: #2f2f2e;
+  --color-edge-soft: #282827;
+  --color-fg: #e7e7e5;
+  --color-mut: #9b9b99;
+  --color-dim: #6e6e6c;
+  --color-faint: #4a4a48;
+  --color-accent: #2383e2;
+  --color-accent-deep: #1b74c9;
+}
+
+html[data-contrast="high"] {
+  --color-edge: color-mix(in srgb, var(--color-fg) 48%, transparent);
+  --color-edge-soft: color-mix(in srgb, var(--color-fg) 28%, transparent);
+  --color-mut: color-mix(in srgb, var(--color-fg) 78%, transparent);
+  --color-dim: color-mix(in srgb, var(--color-fg) 62%, transparent);
+  --color-faint: color-mix(in srgb, var(--color-fg) 48%, transparent);
+}
+
+html[data-motion="reduced"] *,
+html[data-motion="reduced"] *::before,
+html[data-motion="reduced"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+
+html[data-captions="off"] [data-tutor-caption] {
+  display: none !important;
 }
 
 body {
@@ -194,6 +295,17 @@ body {
   text-shadow: 0 0 1px currentColor;
 }
 
+/* Canvas/WebGL adapters must not be blurred or transformed while mounting;
+   doing so can force oversized compositor layers and visible frame flashes. */
+@keyframes chalk-visual-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.anim-chalk-visual {
+  animation: chalk-visual-in 0.2s ease-out both;
+  text-shadow: 0 0 1px currentColor;
+}
+
 .katex-chalk .katex {
   color: inherit !important;
   font-size: 1em !important;
@@ -297,4 +409,49 @@ body {
   padding: 2px 6px !important;
   border-radius: 4px !important;
   font-family: monospace !important;
+}
+
+/* ── live tutor response/activity ── */
+@keyframes agent-activity-sheen {
+  0% { transform: translateX(-130%); opacity: 0; }
+  18% { opacity: 0.7; }
+  72% { opacity: 0.35; }
+  100% { transform: translateX(220%); opacity: 0; }
+}
+.agent-activity-active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 35%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(125, 211, 252, 0.08), transparent);
+  animation: agent-activity-sheen 2.2s ease-in-out infinite;
+}
+
+@keyframes generative-text-in {
+  from { opacity: 0.72; filter: blur(0.5px); }
+  to { opacity: 1; filter: blur(0); }
+}
+.generative-text {
+  animation: generative-text-in 0.24s ease-out both;
+}
+
+@keyframes generative-caret-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+.generative-caret {
+  animation: generative-caret-pulse 0.75s ease-in-out infinite;
+  box-shadow: 0 0 7px rgba(125, 211, 252, 0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-activity-active::after,
+  .generative-text,
+  .generative-caret {
+    animation: none !important;
+  }
+  .generative-caret {
+    display: none;
+  }
 }
