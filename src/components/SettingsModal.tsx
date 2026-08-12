@@ -719,6 +719,8 @@ function Models({ preferences, updatePreferences, onNotify }: {
   const [showAdd, setShowAdd] = useState(false);
   const [draft, setDraft] = useState<SavedModelEndpoint>(EMPTY_ENDPOINT);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<SavedModelEndpoint | null>(null);
   const [assignments, setAssignments] = useState<RoleAssignments>(EMPTY_ASSIGNMENTS);
   const [credentialId, setCredentialId] = useState<string | null>(null);
   const [credentialDraft, setCredentialDraft] = useState("");
@@ -872,6 +874,55 @@ function Models({ preferences, updatePreferences, onNotify }: {
     }
   };
 
+  const beginEndpointEdit = (endpoint: SavedModelEndpoint) => {
+    setEditingId(endpoint.id);
+    setEditDraft({ ...endpoint });
+    setCredentialId(null);
+    setCredentialDraft("");
+  };
+
+  const cancelEndpointEdit = () => {
+    setEditingId(null);
+    setEditDraft(null);
+    setCredentialId(null);
+    setCredentialDraft("");
+  };
+
+  const saveEndpointEdit = async (endpoint: SavedModelEndpoint) => {
+    if (!editDraft || editDraft.id !== endpoint.id) return;
+    const label = editDraft.label.trim();
+    const baseUrl = editDraft.baseUrl.trim();
+    const model = editDraft.model.trim();
+    if (!label || !baseUrl || !model) return onNotify("Label, URL and model are required");
+    if (!/^https?:\/\//i.test(baseUrl)) return onNotify("Endpoint URL must begin with http:// or https://");
+
+    const updated: SavedModelEndpoint = {
+      ...endpoint,
+      label,
+      provider: editDraft.provider,
+      baseUrl,
+      model,
+    };
+    try {
+      // Update every owned role before publishing the new endpoint metadata so
+      // assignment records and the saved card can never disagree.
+      const { bindModelRole, defaultCapabilities } = await import("../lib/llm");
+      for (const [role] of MODEL_ROLES) {
+        if (assignments[role] === endpoint.id) {
+          await bindModelRole(role, await endpointConfig(updated), {
+            ...defaultCapabilities(),
+            vision: updated.vision,
+          });
+        }
+      }
+      setEndpoints(endpoints.map((candidate) => candidate.id === endpoint.id ? updated : candidate));
+      cancelEndpointEdit();
+      onNotify(`Updated endpoint “${label}”`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not update this endpoint");
+    }
+  };
+
   const saveCredential = async (endpoint: SavedModelEndpoint) => {
     const { storeCredentialLocally } = await import("../lib/llm");
     const value = credentialDraft.trim();
@@ -929,53 +980,81 @@ function Models({ preferences, updatePreferences, onNotify }: {
             No custom endpoint is saved on this device.
           </div>
         )}
-        {visibleEndpoints.map((endpoint) => (
-          <div key={endpoint.id} className={`rounded-md border p-2.5 transition-colors ${endpoint.active ? "border-accent/50 bg-accent/[0.05]" : "border-white/8 bg-white/[0.03]"}`}>
-            <div className="flex items-start gap-2">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="truncate text-[12.5px] font-medium text-fg">{endpoint.label}</span>
-                  {endpoint.active && <span className="rounded-full bg-accent/20 px-1.5 py-[1px] text-[9.5px] font-medium text-accent">Active</span>}
-                  {endpoint.vision && <span className="rounded-full bg-[#7dd3fc]/15 px-1.5 py-[1px] text-[9.5px] text-[#7dd3fc]">Vision</span>}
+        {visibleEndpoints.map((endpoint) => {
+          const editing = editingId === endpoint.id && editDraft?.id === endpoint.id;
+          return (
+            <div key={endpoint.id} className={`rounded-md border p-2 transition-colors ${endpoint.active ? "border-accent/50 bg-accent/[0.05]" : "border-white/8 bg-white/[0.03]"}`}>
+              <div className="flex items-start gap-1.5">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-[12.5px] font-medium text-fg">{endpoint.label}</span>
+                    {endpoint.active && <span className="rounded-full bg-accent/20 px-1.5 py-[1px] text-[9.5px] font-medium text-accent">Active</span>}
+                    {endpoint.vision && <span className="rounded-full bg-[#7dd3fc]/15 px-1.5 py-[1px] text-[9.5px] text-[#7dd3fc]">Vision</span>}
+                  </div>
+                  <div className="truncate font-mono text-[10px] text-dim">{endpoint.model} · {endpoint.baseUrl} · key: {endpoint.keyMasked}</div>
                 </div>
-                <div className="truncate font-mono text-[10.5px] text-dim">{endpoint.model} · {endpoint.baseUrl} · key: {endpoint.keyMasked}</div>
+                <button disabled={testingId === endpoint.id} onClick={() => { void testEndpoint(endpoint); }} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[10.5px] text-mut hover:bg-white/[0.12] hover:text-fg disabled:opacity-50">{testingId === endpoint.id ? "Testing…" : "Test"}</button>
+                {endpoint.provider !== "studyus" && (
+                  <button
+                    onClick={() => editing ? cancelEndpointEdit() : beginEndpointEdit(endpoint)}
+                    className={`shrink-0 rounded-md border px-2 py-1 text-[10.5px] transition-colors ${editing ? "border-accent/35 bg-accent/15 text-accent" : "border-white/10 bg-white/[0.07] text-mut hover:bg-white/[0.12] hover:text-fg"}`}
+                  >
+                    Edit
+                  </button>
+                )}
+                {!endpoint.active && <button onClick={() => activateEndpoint(endpoint.id)} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[10.5px] text-mut hover:bg-white/[0.12] hover:text-fg">Use</button>}
+                {endpoint.provider !== "studyus" && <button onClick={() => { void removeEndpoint(endpoint); }} title="Remove saved endpoint" className="grid h-6 w-6 shrink-0 place-items-center rounded text-dim hover:bg-white/[0.07] hover:text-[#ff8b80]"><Trash2 size={12} /></button>}
               </div>
-              <button disabled={testingId === endpoint.id} onClick={() => { void testEndpoint(endpoint); }} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut hover:bg-white/[0.12] hover:text-fg disabled:opacity-50">{testingId === endpoint.id ? "Testing…" : "Test"}</button>
-              {!endpoint.active && <button onClick={() => activateEndpoint(endpoint.id)} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut hover:bg-white/[0.12] hover:text-fg">Use</button>}
-              {endpoint.provider !== "studyus" && <button onClick={() => { void removeEndpoint(endpoint); }} title="Remove saved endpoint" className="grid h-6 w-6 shrink-0 place-items-center rounded text-dim hover:bg-white/[0.07] hover:text-[#ff8b80]"><Trash2 size={12} /></button>}
-            </div>
 
-            <div className="mt-2 grid gap-1 border-t border-white/6 pt-2 sm:grid-cols-2">
-              {MODEL_ROLES.map(([role, label]) => (
-                <label key={role} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-[10.5px] text-mut hover:bg-white/[0.04] hover:text-fg">
-                  <input
-                    type="checkbox"
-                    checked={assignments[role] === endpoint.id}
-                    onChange={() => { void assignRole(role, endpoint); }}
-                    className="h-3.5 w-3.5 accent-[var(--accent)]"
-                  />
-                  {label}
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-0 border-t border-white/6 pt-1.5">
+                {MODEL_ROLES.map(([role, label]) => (
+                  <label key={role} className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded px-1 py-0.5 text-[10.5px] text-mut hover:bg-white/[0.04] hover:text-fg">
+                    <input
+                      type="checkbox"
+                      checked={assignments[role] === endpoint.id}
+                      onChange={() => { void assignRole(role, endpoint); }}
+                      className="h-3.5 w-3.5 accent-[var(--accent)]"
+                    />
+                    {label}
+                  </label>
+                ))}
+                <label className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded px-1 py-0.5 text-[10.5px] text-mut hover:bg-white/[0.04] hover:text-fg">
+                  <input type="checkbox" checked={endpoint.vision} onChange={(event) => { void updateVision(endpoint, event.target.checked); }} className="h-3.5 w-3.5 accent-[var(--accent)]" />
+                  Supports Vision input
                 </label>
-              ))}
-              <label className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-[10.5px] text-mut hover:bg-white/[0.04] hover:text-fg">
-                <input type="checkbox" checked={endpoint.vision} onChange={(event) => { void updateVision(endpoint, event.target.checked); }} className="h-3.5 w-3.5 accent-[var(--accent)]" />
-                Supports Vision input
-              </label>
-            </div>
+              </div>
 
-            {endpoint.provider !== "studyus" && (
-              credentialId === endpoint.id ? (
-                <div className="mt-2 flex gap-1.5 border-t border-white/6 pt-2">
-                  <input type="password" autoFocus value={credentialDraft} onChange={(event) => setCredentialDraft(event.target.value)} placeholder="New API key (blank clears it)" className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[11px] text-fg outline-none placeholder:text-[#6e6e6c]" />
-                  <button onClick={() => { void saveCredential(endpoint); }} className="rounded-md bg-accent px-2.5 py-1 text-[10.5px] font-medium text-white">Save</button>
-                  <button onClick={() => { setCredentialId(null); setCredentialDraft(""); }} className="rounded-md px-2 py-1 text-[10.5px] text-dim hover:text-fg">Cancel</button>
+              {editing && editDraft && (
+                <div className="mt-1.5 space-y-1.5 border-t border-white/6 pt-2">
+                  <div className="grid gap-1.5 sm:grid-cols-[1fr_112px]">
+                    <input value={editDraft.label} onChange={(event) => setEditDraft((current) => current ? { ...current, label: event.target.value } : current)} placeholder="Endpoint label" aria-label="Endpoint label" className="min-w-0 rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[11px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+                    <select value={editDraft.provider} onChange={(event) => setEditDraft((current) => current ? { ...current, provider: event.target.value as SavedModelEndpoint["provider"] } : current)} aria-label="Provider" className="rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[11px] text-fg outline-none"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="custom">Custom</option></select>
+                  </div>
+                  <div className="grid gap-1.5 sm:grid-cols-2">
+                    <input value={editDraft.baseUrl} onChange={(event) => setEditDraft((current) => current ? { ...current, baseUrl: event.target.value } : current)} placeholder="Base URL" aria-label="Base URL" className="min-w-0 rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[10.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+                    <input value={editDraft.model} onChange={(event) => setEditDraft((current) => current ? { ...current, model: event.target.value } : current)} placeholder="Model identifier" aria-label="Model identifier" className="min-w-0 rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[10.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+                  </div>
+                  {credentialId === endpoint.id ? (
+                    <div className="flex gap-1.5">
+                      <input type="password" autoFocus value={credentialDraft} onChange={(event) => setCredentialDraft(event.target.value)} placeholder="New API key (blank clears it)" aria-label="New API key" className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[10.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+                      <button onClick={() => { void saveCredential(endpoint); }} className="rounded-md bg-accent px-2.5 py-1 text-[10.5px] font-medium text-white">Save key</button>
+                      <button onClick={() => { setCredentialId(null); setCredentialDraft(""); }} className="rounded-md px-2 py-1 text-[10.5px] text-dim hover:text-fg">Cancel</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between gap-2 px-0.5 text-[10px] text-dim">
+                      <span>API key · {endpoint.keyMasked}</span>
+                      <button onClick={() => { setCredentialId(endpoint.id); setCredentialDraft(""); }} className="shrink-0 text-mut hover:text-fg">Replace or clear</button>
+                    </div>
+                  )}
+                  <div className="flex justify-end gap-1.5">
+                    <button onClick={cancelEndpointEdit} className="rounded-md px-2.5 py-1 text-[10.5px] text-dim hover:text-fg">Cancel</button>
+                    <button onClick={() => { void saveEndpointEdit(endpoint); }} className="rounded-md bg-accent px-2.5 py-1 text-[10.5px] font-medium text-white">Save changes</button>
+                  </div>
                 </div>
-              ) : (
-                <button onClick={() => { setCredentialId(endpoint.id); setCredentialDraft(""); }} className="mt-2 text-[10.5px] text-dim hover:text-fg">Replace or clear API key</button>
-              )
-            )}
-          </div>
-        ))}
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {category === "custom" && (!showAdd ? (
