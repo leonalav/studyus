@@ -15,6 +15,12 @@ import { WindowControls, DragBar } from "./components/WindowControls";
 import { buildBoard, detectDomain, type BoardDoc } from "./data/boards";
 import { type OnboardingAnswers } from "./data/tutor";
 import { getStudySession, type StoredStudySession } from "./state/studySessionStore";
+import {
+  IN_APP_NOTIFICATION_EVENT,
+  notifyStudyusEvent,
+  startNotificationRuntime,
+  type InAppNotificationDetail,
+} from "./lib/notifications";
 
 function useClock() {
   const [now, setNow] = useState(() => new Date());
@@ -40,6 +46,10 @@ export default function App() {
     "root" | "about" | "appearance" | "tutor" | "notifications" | "models"
   >("root");
   const [chosenSection, setChosenSection] = useState<string | null>(null);
+  const openSettingsRoot = useCallback(() => {
+    setSettingsSection("root");
+    setSettingsOpen(true);
+  }, []);
 
   const [tabs, setTabs] = useState<Tab[]>([
     { id: HOME_TAB_ID, title: chosenSection ?? "Study", kind: "board" },
@@ -58,6 +68,19 @@ export default function App() {
     setToasts((t) => [...t.slice(-2), { id, text }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2600);
   }, []);
+
+  useEffect(() => {
+    const onNotification = (event: Event) => {
+      const detail = (event as CustomEvent<InAppNotificationDetail>).detail;
+      if (detail?.title) notify(detail.body ? `${detail.title} — ${detail.body}` : detail.title);
+    };
+    window.addEventListener(IN_APP_NOTIFICATION_EVENT, onNotification);
+    const stopRuntime = startNotificationRuntime();
+    return () => {
+      stopRuntime();
+      window.removeEventListener(IN_APP_NOTIFICATION_EVENT, onNotification);
+    };
+  }, [notify]);
 
   const startPrep = useCallback(
     (prompt: string, boundNodes?: string[], onboarding?: OnboardingAnswers) => {
@@ -110,6 +133,11 @@ export default function App() {
 
   const testGenerated = useCallback(() => {
     setAvailableTestsRefreshKey((n) => n + 1);
+    notifyStudyusEvent(
+      "testReady",
+      "Your generated test is ready",
+      "Open Available tests when you are ready to begin."
+    );
   }, []);
 
   const startTest = useCallback((params: TestParams) => {
@@ -139,12 +167,13 @@ export default function App() {
       } else if (meta && e.key === ",") {
         e.preventDefault();
         setSearchOpen(false);
-        setSettingsOpen((v) => !v);
+        if (settingsOpen) setSettingsOpen(false);
+        else openSettingsRoot();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [openSettingsRoot, settingsOpen]);
 
   const activeTab = useMemo(
     () => tabs.find((t) => t.id === activeTabId) ?? tabs[0],
@@ -190,7 +219,14 @@ export default function App() {
           notify={notify}
           onLeave={() => {
             setBoard(null);
-            notify("Left the chalkboard — back to prep");
+            const delivered = notifyStudyusEvent(
+              "sessionComplete",
+              "Study session saved",
+              "Your chalkboard and transcript are available in Recent Sessions and Past Notes."
+            );
+            if (delivered === "disabled" || delivered === "permission-needed") {
+              notify("Left the chalkboard — back to prep");
+            }
           }}
         />
         <DragBar />
@@ -240,7 +276,7 @@ export default function App() {
           <Sidebar
             onNotify={notify}
             onOpenSearch={() => setSearchOpen(true)}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettings={openSettingsRoot}
             onOpenTab={openTab}
           />
         )}

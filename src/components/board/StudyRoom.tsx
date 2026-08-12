@@ -18,6 +18,11 @@ import { ContextMenu, ContextMenuTarget } from "../ContextMenu";
 import { toPng } from "html-to-image";
 import { saveStudySession, type StoredStudySession } from "../../state/studySessionStore";
 import type { OnboardingAnswers } from "../../data/tutor";
+import {
+  PREFERENCES_CHANGED_EVENT,
+  loadPreferences,
+  type StudyusPreferences,
+} from "../../lib/preferences";
 
 interface Props {
   initialBoard: BoardDoc;
@@ -50,6 +55,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const [chatCollapsed, setChatCollapsed] = useState(false);
   const [messages, setMessages] = useState<ChatMsg[]>(initialSession?.messages ?? []);
   const [typing, setTyping] = useState(false);
+  const [speechCaption, setSpeechCaption] = useState<string | null>(null);
 
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
@@ -57,6 +63,10 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const [agentStatus, setAgentStatus] = useState<"idle" | "thinking" | "writing" | "error">("idle");
   const [agentActivity, setAgentActivity] = useState<AgentActivity | null>(null);
   const [threadLog, setThreadLog] = useState<SessionThreadLog[]>([]);
+  const [pacing, setPacing] = useState(() => {
+    const tutor = loadPreferences().tutor;
+    return { sessionLength: tutor.sessionLength, breakEvery: tutor.breakEvery };
+  });
   const [penTool, setPenTool] = useState<PenTool>("pen");
   const [penColor, setPenColor] = useState("#fbbf24");
   const clearInkRef = useRef<() => void>(() => {});
@@ -69,6 +79,31 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     () => boundNodes ?? initialSession?.boundNodes ?? [],
     [boundNodes, initialSession?.boundNodes]
   );
+
+  useEffect(() => {
+    const onPreferencesChanged = (event: Event) => {
+      const next = (event as CustomEvent<StudyusPreferences>).detail;
+      if (next?.tutor) {
+        setPacing({ sessionLength: next.tutor.sessionLength, breakEvery: next.tutor.breakEvery });
+      }
+    };
+    window.addEventListener(PREFERENCES_CHANGED_EVENT, onPreferencesChanged);
+    return () => window.removeEventListener(PREFERENCES_CHANGED_EVENT, onPreferencesChanged);
+  }, []);
+
+  useEffect(() => {
+    const breakTimer = window.setInterval(() => {
+      notify(`You have studied for another ${pacing.breakEvery} minutes — consider a short break`);
+    }, pacing.breakEvery * 60_000);
+    const sessionTimer = window.setTimeout(() => {
+      notify(`You reached your preferred ${pacing.sessionLength}-minute session length`);
+    }, pacing.sessionLength * 60_000);
+    return () => {
+      window.clearInterval(breakTimer);
+      window.clearTimeout(sessionTimer);
+    };
+  }, [notify, pacing.breakEvery, pacing.sessionLength]);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -104,8 +139,34 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const msgId = useRef(
     (initialSession?.messages ?? []).reduce((highest, message) => Math.max(highest, message.id), 0)
   );
+  const speechTurnRef = useRef(0);
   const board = boards.find((b) => b.id === activeId) ?? boards[0];
   const fontCss = FONTS.find((f) => f.id === fontId)?.css ?? FONTS[0].css;
+
+  const speakTutorText = useCallback((text: string, announce = false) => {
+    if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+      if (announce) notify("Speech playback is not supported on this device");
+      return false;
+    }
+
+    const speechTurn = ++speechTurnRef.current;
+    window.speechSynthesis.cancel();
+    setSpeechCaption(loadPreferences().appearance.captions ? text : null);
+    const utterance = new SpeechSynthesisUtterance(text);
+    const clearCaption = () => {
+      if (speechTurnRef.current === speechTurn) setSpeechCaption(null);
+    };
+    utterance.onend = clearCaption;
+    utterance.onerror = clearCaption;
+    window.speechSynthesis.speak(utterance);
+    if (announce) notify("Reading the latest tutor reply aloud");
+    return true;
+  }, [notify]);
+
+  useEffect(() => () => {
+    speechTurnRef.current += 1;
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  }, []);
 
   const sessionSnapshot = useMemo<StoredStudySession>(() => ({
     id: sessionId,
@@ -330,6 +391,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         const turn = result.value;
         setTyping(false);
         setMessages((m) => [...m, { id: ++msgId.current, role: "tutor", text: turn.speech }]);
+        if (loadPreferences().tutor.voiceReplies) speakTutorText(turn.speech);
 
         // Validated board operations are applied serially. The chat activity
         // widget describes the concrete operation that is actually executing;
@@ -404,7 +466,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [attachments, board, logThread, notify, onboarding, sessionId, resolvedBoundNodes]
+    [attachments, board, logThread, notify, onboarding, sessionId, resolvedBoundNodes, speakTutorText]
   );
 
   /* markdown recording + export */
@@ -529,6 +591,18 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         </div>
       )}
 
+      {speechCaption && (
+        <div
+          data-tutor-caption
+          role="status"
+          aria-live="polite"
+          className="anim-toast absolute bottom-5 left-1/2 z-50 max-h-28 w-[min(680px,calc(100%_-_32px))] -translate-x-1/2 overflow-y-auto rounded-lg border border-white/15 bg-black/85 px-4 py-2.5 text-center text-[14px] leading-relaxed text-white shadow-2xl backdrop-blur-md"
+        >
+          <span className="mr-2 font-mono text-[10px] uppercase tracking-[0.12em] text-white/55">Tutor</span>
+          {speechCaption}
+        </div>
+      )}
+
       {panel === "threads" && (
         <ThreadsPanel
           boards={boards}
@@ -588,7 +662,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           }
           onSpeakLast={() => {
             const last = [...messages].reverse().find((m) => m.role === "tutor");
-            if (last) notify(`Reading aloud: "${last.text.slice(0, 60)}…"`);
+            if (last) speakTutorText(last.text, true);
             else notify("Nothing to read yet");
           }}
         />

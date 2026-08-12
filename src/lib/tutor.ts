@@ -45,6 +45,7 @@ import { buildOnboardingReminder, type OnboardingAnswers, type OnboardingQuestio
 import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
+import { buildTutorPreferenceReminder } from "./preferences";
 
 export const TUTOR_PROMPT_VERSION = "tutor_v4";
 export const TUTOR_SCHEMA_VERSION = "tutor_turn_v3";
@@ -1253,9 +1254,11 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // tutor @, pace, remarks) into every turn as a consistent system reminder
   // appended to the base Socratic prompt — the agent tutors to these across the
   // whole session rather than forgetting them after the opener.
-  const systemPrompt = req.onboarding
-    ? `${TUTOR_AGENT_PROMPT_V1}\n\n${buildOnboardingReminder(req.onboarding)}`
-    : TUTOR_AGENT_PROMPT_V1;
+  const systemPrompt = [
+    TUTOR_AGENT_PROMPT_V1,
+    req.onboarding ? buildOnboardingReminder(req.onboarding) : "",
+    buildTutorPreferenceReminder(),
+  ].filter(Boolean).join("\n\n");
 
   const result = await callStructuredAgent({
     role: "tutor",

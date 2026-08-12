@@ -9,6 +9,10 @@ import {
   ChevronDown,
   Plus,
   CornerDownLeft,
+  Palette,
+  Bot,
+  Bell,
+  Cpu,
 } from "lucide-react";
 import { buildSearchIndex, RECENCY_LABEL, type Recency, type SearchItem } from "../data/library";
 import { getSettingsSections } from "./SettingsModal";
@@ -111,7 +115,7 @@ export function SearchModal({ open, onClose, onPick }: Props) {
     <div className="fixed inset-0 z-[80] flex justify-center bg-black/45 px-4 pt-[8vh]" onMouseDown={onClose}>
       <div
         onMouseDown={(e) => e.stopPropagation()}
-        className="anim-toast flex h-fit max-h-[74vh] w-[min(600px,100%)] flex-col overflow-hidden rounded-xl border border-[#333] bg-[#1e1e1e] shadow-[0_28px_80px_rgba(0,0,0,0.62)]"
+        className="anim-toast flex h-fit max-h-[74vh] w-[min(600px,100%)] flex-col overflow-hidden rounded-xl border border-edge bg-panel shadow-[0_28px_80px_rgba(0,0,0,0.45)]"
       >
         {/* search row */}
         <div className="flex items-center gap-3 px-4 py-3.5">
@@ -132,7 +136,7 @@ export function SearchModal({ open, onClose, onPick }: Props) {
         </div>
 
         {/* filter chips */}
-        <div className="flex items-center gap-1 border-b border-[#2c2c2c] px-3 pb-2.5">
+        <div className="flex items-center gap-1 border-b border-edge-soft px-3 pb-2.5">
           <Chip active={titleOnly} onClick={() => setTitleOnly((v) => !v)} icon={<CaseSensitive size={14} />}>
             Title only
           </Chip>
@@ -162,6 +166,15 @@ export function SearchModal({ open, onClose, onPick }: Props) {
                 running += 1;
                 const idx = running;
                 const selected = idx === cursor;
+                const ResultIcon = item.type === "setting"
+                  ? ({
+                      about: UserRound,
+                      appearance: Palette,
+                      tutor: Bot,
+                      notifications: Bell,
+                      models: Cpu,
+                    } as const)[item.settingId as "about" | "appearance" | "tutor" | "notifications" | "models"] ?? FileText
+                  : FileText;
                 return (
                   <button
                     key={item.id}
@@ -176,7 +189,7 @@ export function SearchModal({ open, onClose, onPick }: Props) {
                     }`}
                   >
                     <span className="grid h-[18px] w-[18px] shrink-0 place-items-center rounded-[3px]" style={{ background: `${item.accent}1f`, color: item.accent }}>
-                      <FileText size={11} />
+                      <ResultIcon size={11} />
                     </span>
                     <span className="truncate text-[13.5px] font-medium text-fg">{item.label}</span>
                     {item.path && (
@@ -191,7 +204,7 @@ export function SearchModal({ open, onClose, onPick }: Props) {
         </div>
 
         {/* footer */}
-        <div className="flex items-center gap-4 border-t border-[#2c2c2c] px-4 py-2.5">
+        <div className="flex items-center gap-4 border-t border-edge-soft px-4 py-2.5">
           <Hint keys="Ctrl+↵">Open in new tab</Hint>
           <Hint keys="Ctrl+L">Copy link</Hint>
           <Hint keys="Shift+Ctrl+K">Command Search</Hint>
