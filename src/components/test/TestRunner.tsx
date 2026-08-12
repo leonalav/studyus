@@ -353,7 +353,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   }
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-72px)] w-full max-w-[1100px] flex-col px-5 pt-6 select-none">
+    <div className="mx-auto w-full max-w-[1100px] px-5 py-6 select-none">
       {/* header */}
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -389,9 +389,9 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-5 lg:grid-cols-[1fr_280px]">
+      <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
         {/* question pane */}
-        <div className="flex min-h-0 flex-col rounded-lg border border-edge bg-raise p-5">
+        <div className="flex min-w-0 flex-col rounded-lg border border-edge bg-raise p-5">
           <div className="mb-3 flex items-center justify-between font-mono text-[10.5px] text-dim">
             <span>QUESTION {String(index + 1).padStart(2, "0")} · {String(total).padStart(2, "0")}</span>
             <span>{q?.format === "proof" ? "Proof-based" : q?.format === "numeric" ? "Numeric" : "Multiple choice"}</span>
@@ -462,7 +462,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         </div>
 
         {/* nav rail */}
-        <aside className="flex min-h-0 flex-col gap-4">
+        <aside className="flex min-w-0 flex-col gap-4">
           <div className="rounded-lg border border-edge bg-raise p-3">
             <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Navigation</div>
             <div className="grid grid-cols-6 gap-1.5">
@@ -638,7 +638,7 @@ function NumericQuestion({
 
 const LATEX_PRESETS = [
   { id: "frac", label: "a/b", insert: "\\frac{a}{b}" },
-  { id: "pow", label: "x²", insert: "^{2}" },
+  { id: "pow", label: "x²", insert: "x^{2}" },
   { id: "sqrt", label: "√", insert: "\\sqrt{}" },
   { id: "int", label: "∫", insert: "\\int" },
   { id: "sum", label: "Σ", insert: "\\sum_{i=1}^{n}" },
@@ -672,112 +672,137 @@ function ProofQuestion({
 
   const insert = (snippet: string) => {
     const el = taRef.current;
-    if (!el) {
-      onChange(answer + snippet);
-      return;
-    }
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
-    const next = answer.slice(0, start) + snippet + answer.slice(end);
+    const start = el?.selectionStart ?? answer.length;
+    const end = el?.selectionEnd ?? answer.length;
+    const prefix = answer.slice(0, start);
+    const unescapedPrefix = prefix.replace(/\\\$/g, "");
+    const dollarMarkers = unescapedPrefix.match(/\$\$|\$/g) ?? [];
+    const insideDollarMath = dollarMarkers.length % 2 === 1;
+    const insideDisplayMath = prefix.lastIndexOf("\\[") > prefix.lastIndexOf("\\]");
+    const insertion = insideDollarMath || insideDisplayMath ? snippet : `$${snippet}$`;
+    const next = answer.slice(0, start) + insertion + answer.slice(end);
     onChange(next);
     requestAnimationFrame(() => {
-      el.focus();
-      const cursor = start + snippet.length;
-      el.setSelectionRange(cursor, cursor);
+      el?.focus();
+      const cursor = start + insertion.length;
+      el?.setSelectionRange(cursor, cursor);
     });
   };
 
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-[1fr_1.1fr]">
-      <div className="flex min-h-0 flex-col">
-        <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.stem}</h2>
-        {q.responseRequirement && (
-          <div className="mt-3 rounded-md border border-dashed border-accent/40 bg-accent/[0.04] px-3 py-2">
-            <div className="mb-0.5 font-mono text-[10px] uppercase tracking-wider text-accent">Requirement</div>
-            <p className="text-[12.5px] text-fg/90">{q.responseRequirement}</p>
-          </div>
-        )}
-        <QuestionHint {...hint} />
+    <div className="min-w-0">
+      <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.stem}</h2>
+      {q.responseRequirement && (
+        <div className="mt-3 rounded-md border border-dashed border-accent/40 bg-accent/[0.04] px-3 py-2">
+          <div className="mb-0.5 font-mono text-[10px] uppercase tracking-wider text-accent">Requirement</div>
+          <p className="text-[12.5px] text-fg/90">{q.responseRequirement}</p>
+        </div>
+      )}
+      <QuestionHint {...hint} />
 
-        <div className="mt-4 rounded-md border border-edge bg-card">
-          <button
-            onClick={() => setKbOpen((v) => !v)}
-            className="flex w-full items-center justify-between px-3 py-2 text-left"
-          >
-            <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-fg">
-              <Sigma size={12} className="text-accent" />
+      {/* The keyboard owns a full-width row. Keeping it out of the answer and
+          preview layout prevents its contents from overflowing a compressed
+          grid track on shorter screens. */}
+      <section className="mt-5 overflow-hidden rounded-lg border border-edge bg-card">
+        <button
+          type="button"
+          onClick={() => setKbOpen((value) => !value)}
+          aria-expanded={kbOpen}
+          className="flex w-full items-center justify-between px-4 py-3 text-left transition-colors hover:bg-white/[0.025]"
+        >
+          <span>
+            <span className="flex items-center gap-2 text-[12.5px] font-semibold text-fg">
+              <Sigma size={14} className="text-accent" />
               LaTeX keyboard
             </span>
-            <ChevronDown size={13} className={`text-dim transition-transform ${kbOpen ? "" : "-rotate-90"}`} />
-          </button>
-          {kbOpen && (
-            <div className="grid grid-cols-4 gap-1.5 px-3 pb-3">
-              {LATEX_PRESETS.map((p) => (
+            <span className="mt-0.5 block pl-[22px] text-[11px] text-dim">
+              Insert mathematical notation at the cursor
+            </span>
+          </span>
+          <ChevronDown
+            size={14}
+            className={`shrink-0 text-dim transition-transform ${kbOpen ? "" : "-rotate-90"}`}
+          />
+        </button>
+        {kbOpen && (
+          <div className="border-t border-edge-soft px-4 py-4">
+            <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+              {LATEX_PRESETS.map((preset) => (
                 <button
-                  key={p.id}
-                  onClick={() => insert(p.insert)}
-                  className="rounded border border-edge bg-raise px-2 py-1.5 text-center text-[11.5px] text-mut transition-colors hover:bg-white/[0.07] hover:text-fg"
+                  key={preset.id}
+                  type="button"
+                  onClick={() => insert(preset.insert)}
+                  className="grid min-h-10 place-items-center rounded-md border border-edge bg-raise px-2 py-2 text-center text-[12px] text-mut transition-colors hover:border-accent/40 hover:bg-white/[0.07] hover:text-fg"
+                  title={`Insert ${preset.insert}`}
                 >
-                  {p.label}
+                  {preset.label}
                 </button>
               ))}
             </div>
-          )}
-        </div>
-
-        <div className="mt-3 flex min-h-0 flex-1 flex-col rounded-md border border-edge bg-ink/60">
-          <div className="flex items-center justify-between border-b border-edge px-3 py-1.5">
-            <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
-              <Type size={11} />
-              Your proof
-            </span>
-            <span className="flex items-center gap-2 font-mono text-[10px] text-dim">
-              <button
-                onClick={() => setFontSize((s) => Math.max(11, s - 1))}
-                className="grid h-5 w-5 place-items-center rounded hover:bg-white/[0.07]"
-              >
-                <Minimize2 size={10} />
-              </button>
-              {fontSize}px
-              <button
-                onClick={() => setFontSize((s) => Math.min(22, s + 1))}
-                className="grid h-5 w-5 place-items-center rounded hover:bg-white/[0.07]"
-              >
-                <Maximize2 size={10} />
-              </button>
-            </span>
           </div>
-          <textarea
-            ref={taRef}
-            value={answer}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder="Type your proof here. Use the LaTeX keyboard for equations."
-            className="min-h-[180px] flex-1 resize-none bg-transparent px-3 py-2.5 font-mono leading-relaxed text-fg outline-none placeholder:text-faint"
-            style={{ fontSize }}
-          />
-        </div>
-      </div>
+        )}
+      </section>
 
-      <div className="flex min-h-0 flex-col rounded-md border border-edge bg-card">
-        <div className="flex items-center justify-between border-b border-edge px-3 py-2">
-          <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-dim">
-            <PenLine size={11} className="text-accent" />
-            Live preview
+      {/* The editable answer is a second independent full-width region. It has
+          an explicit natural height and can grow, rather than being forced into
+          the remaining pixels of a viewport-height flex container. */}
+      <section className="mt-4 overflow-hidden rounded-lg border border-edge bg-ink/60">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-edge px-4 py-2.5">
+          <span className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-dim">
+            <Type size={12} className="text-accent" />
+            Your proof answer
           </span>
-          <span className="rounded-full bg-accent/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-accent">
+          <span className="flex items-center gap-2 font-mono text-[10px] text-dim">
+            <button
+              type="button"
+              onClick={() => setFontSize((size) => Math.max(11, size - 1))}
+              className="grid h-6 w-6 place-items-center rounded hover:bg-white/[0.07] hover:text-fg"
+              aria-label="Decrease answer font size"
+            >
+              <Minimize2 size={11} />
+            </button>
+            {fontSize}px
+            <button
+              type="button"
+              onClick={() => setFontSize((size) => Math.min(22, size + 1))}
+              className="grid h-6 w-6 place-items-center rounded hover:bg-white/[0.07] hover:text-fg"
+              aria-label="Increase answer font size"
+            >
+              <Maximize2 size={11} />
+            </button>
+          </span>
+        </div>
+        <textarea
+          ref={taRef}
+          value={answer}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="Write your complete proof here. Use $...$ or \\[...\\] around LaTeX expressions."
+          className="block min-h-[240px] w-full resize-y bg-transparent px-4 py-3.5 font-mono leading-relaxed text-fg outline-none placeholder:text-faint"
+          style={{ fontSize }}
+        />
+      </section>
+
+      {/* Rendered output gets its own wide row below the editor. */}
+      <section className="mt-4 overflow-hidden rounded-lg border border-edge bg-card">
+        <div className="flex items-center justify-between border-b border-edge px-4 py-2.5">
+          <span className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-dim">
+            <PenLine size={12} className="text-accent" />
+            Typeset answer output
+          </span>
+          <span className="rounded-full bg-accent/15 px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider text-accent">
             KaTeX
           </span>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <div className="min-h-[160px] overflow-x-auto px-4 py-4">
           {answer.trim() ? (
             <RenderedProof text={answer} />
           ) : (
             <p className="font-mono text-[11.5px] text-faint">
-              Your typeset answer will appear here as you type.
+              Your typeset proof will appear in this dedicated output area as you type.
             </p>
           )}
         </div>
-      </div>
+      </section>
     </div>
   );
 }
@@ -801,7 +826,7 @@ function RenderedProof({ text }: { text: string }) {
 
 function splitMathAndText(text: string): { kind: "text" | "math"; value: string }[] {
   const out: { kind: "text" | "math"; value: string }[] = [];
-  const re = /(\$\$[^$]+\$|\$[^$]+\$|\\\[[\s\S]*?\\\])/g;
+  const re = /(\$\$[\s\S]*?\$\$|\$[^$\n]+?\$|\\\[[\s\S]*?\\\])/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
