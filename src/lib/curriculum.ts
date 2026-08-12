@@ -1,3 +1,4 @@
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { getDb, saveDbSync } from "../db/database";
 import { renderPageRange, saveSourcePdf, TauriUnavailableError } from "./tauri";
 import { resolveRoleEndpoint, chatCompletion, type ContentPart, type RuntimeMessage } from "./agentRuntime";
@@ -75,7 +76,7 @@ export async function extractPdfOutline(file: File): Promise<{
   outline: { title: string; destPage: number; depth: number }[];
 }> {
   const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist");
-  GlobalWorkerOptions.workerSrc = new URL("pdf.worker.min.mjs", document.baseURI).toString();
+  GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const data = new Uint8Array(await file.arrayBuffer());
   const pdf = await getDocument({ data }).promise;
   const raw = await pdf.getOutline();
@@ -377,16 +378,36 @@ export async function getEvidenceForSelectedNodes(nodeIds: string[]): Promise<{
   const db = await getDb();
   const placeholders = nodeIds.map(() => "?").join(",");
 
+  // A selected chapter/section includes all of its descendants. Without this
+  // closure, selecting a parent bookmark could produce no evidence even though
+  // its transcribed subsections were fully indexed.
   const nodesRes = db.exec(`
-    SELECT id, source_id, parent_node_id, ordinal, depth, title, section_number, start_page, end_page, node_kind, extraction_status, content_hash
-    FROM curriculum_nodes
-    WHERE id IN (${placeholders});
+    WITH RECURSIVE scoped_nodes(id) AS (
+      SELECT id FROM curriculum_nodes WHERE id IN (${placeholders})
+      UNION
+      SELECT n.id
+      FROM curriculum_nodes n
+      JOIN scoped_nodes parent ON n.parent_node_id = parent.id
+    )
+    SELECT n.id, n.source_id, n.parent_node_id, n.ordinal, n.depth, n.title, n.section_number,
+           n.start_page, n.end_page, n.node_kind, n.extraction_status, n.content_hash
+    FROM curriculum_nodes n
+    JOIN scoped_nodes scoped ON scoped.id = n.id
+    ORDER BY n.ordinal ASC;
   `, nodeIds);
 
   const chunksRes = db.exec(`
-    SELECT id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind
-    FROM curriculum_chunks
-    WHERE node_id IN (${placeholders});
+    WITH RECURSIVE scoped_nodes(id) AS (
+      SELECT id FROM curriculum_nodes WHERE id IN (${placeholders})
+      UNION
+      SELECT n.id
+      FROM curriculum_nodes n
+      JOIN scoped_nodes parent ON n.parent_node_id = parent.id
+    )
+    SELECT c.id, c.node_id, c.page, c.chunk_ordinal, c.text_content, c.excerpt_hash, c.chunk_kind
+    FROM curriculum_chunks c
+    JOIN scoped_nodes scoped ON scoped.id = c.node_id
+    ORDER BY c.node_id ASC, c.chunk_ordinal ASC;
   `, nodeIds);
 
   const nodes = (nodesRes[0]?.values ?? []).map((r) => ({
@@ -415,6 +436,110 @@ export async function getEvidenceForSelectedNodes(nodeIds: string[]): Promise<{
   }));
 
   return { nodes, chunks };
+}
+
+/**
+ * Deterministic browser fallback for generation. Imported PDFs are retained in
+ * IndexedDB, so text-based pages can be indexed on demand without requiring a
+ * learner to open every subsection in the tutor first. Vision transcription
+ * remains the higher-fidelity path for vector math and scanned pages.
+ *
+ * Evidence is extracted for the leaf nodes in the selected scope. This avoids
+ * duplicating an entire chapter into each ancestor while ensuring parent
+ * selections still become generatable through their descendants.
+ */
+export async function ensureTextEvidenceForSelectedNodes(nodeIds: string[]): Promise<number> {
+  if (nodeIds.length === 0) return 0;
+  const db = await getDb();
+  const placeholders = nodeIds.map(() => "?").join(",");
+  const scopedRes = db.exec(`
+    WITH RECURSIVE scoped_nodes(id) AS (
+      SELECT id FROM curriculum_nodes WHERE id IN (${placeholders})
+      UNION
+      SELECT n.id
+      FROM curriculum_nodes n
+      JOIN scoped_nodes parent ON n.parent_node_id = parent.id
+    )
+    SELECT n.id, n.source_id, n.start_page, n.end_page
+    FROM curriculum_nodes n
+    JOIN scoped_nodes scoped ON scoped.id = n.id
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM curriculum_nodes child
+      JOIN scoped_nodes child_scope ON child_scope.id = child.id
+      WHERE child.parent_node_id = n.id
+    )
+    AND NOT EXISTS (SELECT 1 FROM curriculum_chunks c WHERE c.node_id = n.id)
+    ORDER BY n.source_id, n.ordinal;
+  `, nodeIds);
+
+  const missing = (scopedRes[0]?.values ?? []).map((row) => ({
+    id: String(row[0]),
+    sourceId: String(row[1]),
+    startPage: Number(row[2]),
+    endPage: Number(row[3]),
+  }));
+  if (missing.length === 0) return 0;
+
+  const bySource = new Map<string, typeof missing>();
+  for (const node of missing) {
+    const nodes = bySource.get(node.sourceId) ?? [];
+    nodes.push(node);
+    bySource.set(node.sourceId, nodes);
+  }
+
+  let inserted = 0;
+  for (const [sourceId, sourceNodes] of bySource) {
+    let blob: Blob | null = null;
+    try {
+      blob = await getOriginalCurriculumPdf(sourceId);
+    } catch {
+      blob = null;
+    }
+    if (!blob) continue;
+
+    const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist");
+    GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+    const loadingTask = getDocument({ data: new Uint8Array(await blob.arrayBuffer()) });
+    const pdf = await loadingTask.promise;
+    const pageTextCache = new Map<number, string>();
+
+    for (const node of sourceNodes) {
+      let ordinal = 0;
+      const firstPage = Math.max(1, node.startPage);
+      const lastPage = Math.min(pdf.numPages, node.endPage);
+      for (let pageNumber = firstPage; pageNumber <= lastPage; pageNumber++) {
+        let text = pageTextCache.get(pageNumber);
+        if (text === undefined) {
+          const page = await pdf.getPage(pageNumber);
+          const content = await page.getTextContent();
+          text = (content.items as Array<{ str?: string; hasEOL?: boolean }>)
+            .map((item) => `${typeof item.str === "string" ? item.str : ""}${item.hasEOL ? "\n" : " "}`)
+            .join("")
+            .replace(/[ \t]+\n/g, "\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .replace(/[ \t]{2,}/g, " ")
+            .trim();
+          pageTextCache.set(pageNumber, text);
+        }
+        if (text.length < 20) continue;
+
+        ordinal++;
+        const excerptHash = simpleHash(text);
+        db.run(
+          `INSERT OR IGNORE INTO curriculum_chunks
+             (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind)
+           VALUES (?, ?, ?, ?, ?, ?, 'prose');`,
+          [`chunk-text-${simpleHash(`${node.id}:${pageNumber}:${excerptHash}`)}`, node.id, pageNumber, ordinal, text, excerptHash]
+        );
+        inserted++;
+      }
+    }
+    await loadingTask.destroy();
+  }
+
+  if (inserted > 0) saveDbSync();
+  return inserted;
 }
 
 /* ─────────────────────────────────────────────────────────────

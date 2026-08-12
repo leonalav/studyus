@@ -4,6 +4,7 @@ import {
   parseRationalNumber,
   gradeNumericResponse,
   getAttemptForTaking,
+  createRetakeAttempt,
   autosaveDraft,
   submitAttempt,
   applyScoreOverride,
@@ -94,6 +95,23 @@ describe("Assessment & Numeric Grader Engine", () => {
       const res2 = await submitAttempt("attempt-legacy-1");
       expect(res2.status).toBe("completed");
       expect(res2.aggregateScore).toBe(res1.aggregateScore);
+    });
+
+    it("creates retakes as clean attempts against the same immutable form", async () => {
+      await submitAttempt("attempt-legacy-1");
+      const original = await getAttemptForTaking("attempt-legacy-1");
+      const retakeId = await createRetakeAttempt("attempt-legacy-1");
+      const retake = await getAttemptForTaking(retakeId);
+
+      expect(retake).toMatchObject({
+        attemptId: retakeId,
+        formId: original?.formId,
+        status: "created",
+      });
+      expect(retake?.questions.every((question) => question.draftResponse === "")).toBe(true);
+
+      const db = await getDb();
+      db.run("DELETE FROM assessment_attempts WHERE id = ?;", [retakeId]);
     });
 
     it("applies score override transactionally and recomputes total", async () => {

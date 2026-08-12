@@ -59,6 +59,7 @@ export interface AttemptForTakingDTO {
   formId: string;
   title: string;
   mode: string;
+  assistancePolicy: string;
   status: AttemptStatus;
   startedAt: string;
   deadlineAt: string | null;
@@ -340,7 +341,7 @@ async function preGradeRubricResponses(
 export async function getAttemptForTaking(attemptId: string): Promise<AttemptForTakingDTO | null> {
   const db = await getDb();
   const attRes = db.exec(`
-    SELECT a.id, a.form_id, f.title, a.mode, a.status, a.started_at, a.deadline_at, a.current_ordinal
+    SELECT a.id, a.form_id, f.title, a.mode, a.assistance_policy, a.status, a.started_at, a.deadline_at, a.current_ordinal
     FROM assessment_attempts a
     JOIN assessment_forms f ON a.form_id = f.id
     WHERE a.id = ?;
@@ -353,10 +354,11 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
   const formId = row[1] as string;
   const title = row[2] as string;
   const mode = row[3] as string;
-  let status = row[4] as AttemptStatus;
-  const startedAt = row[5] as string;
-  const deadlineAt = row[6] as string | null;
-  const currentOrdinal = row[7] as number;
+  const assistancePolicy = row[4] as string;
+  let status = row[5] as AttemptStatus;
+  const startedAt = row[6] as string;
+  const deadlineAt = row[7] as string | null;
+  const currentOrdinal = row[8] as number;
 
   // Derive remaining time in backend
   let remainingSeconds: number | null = null;
@@ -425,6 +427,7 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
     formId,
     title,
     mode,
+    assistancePolicy,
     status,
     startedAt,
     deadlineAt,
@@ -432,6 +435,32 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
     currentOrdinal,
     questions,
   };
+}
+
+/** Create a clean attempt for the same immutable generated form. */
+export async function createRetakeAttempt(attemptId: string): Promise<string> {
+  const db = await getDb();
+  const source = db.exec(`
+    SELECT form_id, learner_id, mode, assistance_policy
+    FROM assessment_attempts
+    WHERE id = ?;
+  `, [attemptId]);
+  if (!source[0] || source[0].values.length === 0) {
+    throw new Error("Attempt not found");
+  }
+
+  const [formId, learnerId, mode, assistancePolicy] = source[0].values[0] as [string, string, string, string];
+  const now = new Date().toISOString();
+  const retakeId = `attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  db.run(`
+    INSERT INTO assessment_attempts (
+      id, form_id, learner_id, status, mode, assistance_policy, started_at,
+      deadline_at, submitted_at, completed_at, current_ordinal,
+      aggregate_score, grading_status, audit_created_at, audit_updated_at
+    ) VALUES (?, ?, ?, 'created', ?, ?, ?, NULL, NULL, NULL, 1, 0, 'unseen', ?, ?);
+  `, [retakeId, formId, learnerId, mode, assistancePolicy, now, now, now]);
+  saveDbSync();
+  return retakeId;
 }
 
 export async function autosaveDraft(

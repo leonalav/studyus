@@ -12,8 +12,16 @@ import {
   Sigma,
   Save,
   AlertCircle,
+  Lightbulb,
 } from "lucide-react";
-import { getAttemptForTaking, autosaveDraft, submitAttempt, AttemptForTakingDTO, AttemptResultDTO } from "../../api";
+import {
+  getAttemptForTaking,
+  createRetakeAttempt,
+  autosaveDraft,
+  submitAttempt,
+  AttemptForTakingDTO,
+  AttemptResultDTO,
+} from "../../api";
 
 interface Props {
   attemptId: string;
@@ -32,9 +40,21 @@ interface Question {
   options?: { id: string; text: string }[];
   unit?: string | null;
   responseRequirement?: string | null;
+  flags: string[];
+}
+
+type HintMode = "full" | "limited" | "none";
+
+interface QuestionHintProps {
+  objective: string;
+  mode: HintMode;
+  revealed: boolean;
+  remaining: number;
+  onReveal: () => void;
 }
 
 export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props) {
+  const [runnerAttemptId, setRunnerAttemptId] = useState(attemptId);
   const [dto, setDto] = useState<AttemptForTakingDTO | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
@@ -42,13 +62,35 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">("saved");
   const [confirmSubmitOpen, setConfirmSubmitOpen] = useState(false);
   const [submissionResult, setSubmissionResult] = useState<AttemptResultDTO | null>(null);
+  const [hintedItems, setHintedItems] = useState<Set<string>>(new Set());
+  const questionFlagsRef = useRef<Record<string, string[]>>({});
+  const pendingDraftsRef = useRef(new Map<string, {
+    responseValue: string;
+    flags: string[];
+    ordinal: number;
+  }>());
+  const saveTimeoutRef = useRef<number | null>(null);
   const [time, setTime] = useState(0);
   const startTime = useRef(Date.now());
+
+  useEffect(() => {
+    setRunnerAttemptId(attemptId);
+    setDto(null);
+    setLoadError(null);
+    setIndex(0);
+    setAnswers({});
+    setSubmissionResult(null);
+    setHintedItems(new Set());
+    questionFlagsRef.current = {};
+    pendingDraftsRef.current.clear();
+    startTime.current = Date.now();
+    setTime(0);
+  }, [attemptId]);
 
   /* Load the real attempt: items, drafts and flags all come from SQLite. */
   useEffect(() => {
     let cancelled = false;
-    getAttemptForTaking(attemptId)
+    getAttemptForTaking(runnerAttemptId)
       .then((d) => {
         if (cancelled) return;
         if (!d || d.questions.length === 0) {
@@ -57,12 +99,18 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         }
         setDto(d);
         const restored: Record<string, { mcq?: string; numeric?: string; proof?: string }> = {};
+        const restoredFlags: Record<string, string[]> = {};
+        const restoredHints = new Set<string>();
         for (const q of d.questions) {
+          restoredFlags[q.id] = [...q.flags];
+          if (q.flags.includes("hint_used")) restoredHints.add(q.id);
           const draft = q.draftResponse ?? "";
           if (!draft) continue;
           if (q.itemType === "mcq") restored[q.id] = { mcq: draft };
           else restored[q.id] = { [q.itemType === "numeric" ? "numeric" : "proof"]: draft };
         }
+        questionFlagsRef.current = restoredFlags;
+        setHintedItems(restoredHints);
         setAnswers(restored);
       })
       .catch(() => {
@@ -71,7 +119,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     return () => {
       cancelled = true;
     };
-  }, [attemptId]);
+  }, [runnerAttemptId]);
 
   const questions = useMemo<Question[]>(
     () =>
@@ -84,6 +132,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         options: q.options,
         unit: q.unit,
         responseRequirement: q.responseRequirement,
+        flags: q.flags,
       })),
     [dto]
   );
@@ -96,9 +145,23 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
       : total > 0 && questions.every((x) => x.format === "mcq")
       ? "mcq"
       : "mixed";
+  const hintMode: HintMode =
+    dto?.assistancePolicy === "full_hints"
+      ? "full"
+      : dto?.assistancePolicy === "limited_hints"
+        ? "limited"
+        : dto?.assistancePolicy === "no_hints"
+          ? "none"
+          : rigor === "casual"
+            ? "full"
+            : rigor === "rigorous"
+              ? "none"
+              : "limited";
+  const hintBudget = hintMode === "limited" ? Math.max(1, Math.ceil(total * 0.2)) : 0;
+  const hintsRemaining = Math.max(0, hintBudget - hintedItems.size);
 
   useEffect(() => {
-    setIndex((i) => Math.min(i, total - 1));
+    setIndex((i) => Math.max(0, Math.min(i, Math.max(0, total - 1))));
   }, [total]);
 
   useEffect(() => {
@@ -106,19 +169,62 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     return () => window.clearInterval(t);
   }, []);
 
-  // Debounced draft autosave to backend SQLite
-  const saveTimeoutRef = useRef<any>(null);
-  const handleDraftChange = (itemId: string, responseVal: string) => {
+  // Keep every edited question in the debounce queue. A single pending timeout
+  // previously allowed a quick edit on question B to cancel question A's save.
+  const flushPendingDrafts = async () => {
+    if (saveTimeoutRef.current !== null) {
+      window.clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+    const pending = [...pendingDraftsRef.current.entries()];
+    if (pending.length === 0) return;
+
     setSaveStatus("saving");
-    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-    saveTimeoutRef.current = setTimeout(async () => {
-      try {
-        await autosaveDraft(attemptId, itemId, responseVal, [], index + 1);
-        setSaveStatus("saved");
-      } catch {
-        setSaveStatus("error");
-      }
+    try {
+      await Promise.all(
+        pending.map(async ([itemId, draft]) => {
+          const saved = await autosaveDraft(runnerAttemptId, itemId, draft.responseValue, draft.flags, draft.ordinal);
+          if (!saved.success) {
+            throw new Error(`Cannot save an attempt in status: ${saved.status}`);
+          }
+          // Do not delete a newer edit that arrived while this write was running.
+          if (pendingDraftsRef.current.get(itemId) === draft) {
+            pendingDraftsRef.current.delete(itemId);
+          }
+        })
+      );
+      setSaveStatus(pendingDraftsRef.current.size === 0 ? "saved" : "saving");
+    } catch (error) {
+      setSaveStatus("error");
+      throw error;
+    }
+  };
+
+  const handleDraftChange = (
+    itemId: string,
+    responseValue: string,
+    flags = questionFlagsRef.current[itemId] ?? [],
+    ordinal = index + 1
+  ) => {
+    pendingDraftsRef.current.set(itemId, {
+      responseValue,
+      flags: [...flags],
+      ordinal,
+    });
+    setSaveStatus("saving");
+    if (saveTimeoutRef.current !== null) window.clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = window.setTimeout(() => {
+      void flushPendingDrafts().catch(() => undefined);
     }, 400);
+  };
+
+  const saveAndExit = async () => {
+    try {
+      await flushPendingDrafts();
+      onExit();
+    } catch {
+      onNotify("Could not save the latest draft. Please retry before leaving the attempt.");
+    }
   };
 
   const answered = questions.filter((item) => {
@@ -147,6 +253,24 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     handleDraftChange(q.id, val);
   };
 
+  const revealHint = () => {
+    if (!q || hintMode !== "limited" || hintedItems.has(q.id) || hintsRemaining <= 0) return;
+    const nextFlags = [...new Set([...(questionFlagsRef.current[q.id] ?? []), "hint_used"])];
+    questionFlagsRef.current[q.id] = nextFlags;
+    setHintedItems((current) => new Set(current).add(q.id));
+    const currentAnswer = answers[q.id];
+    const draft =
+      q.format === "mcq"
+        ? currentAnswer?.mcq ?? ""
+        : q.format === "numeric"
+          ? currentAnswer?.numeric ?? ""
+          : currentAnswer?.proof ?? "";
+    handleDraftChange(q.id, draft, nextFlags, index + 1);
+    void flushPendingDrafts().catch(() => {
+      onNotify("Could not save hint usage. Try again before leaving this question.");
+    });
+  };
+
   const requestSubmit = () => {
     if (answered < total) {
       setConfirmSubmitOpen(true);
@@ -158,11 +282,35 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   const executeSubmit = async () => {
     setConfirmSubmitOpen(false);
     try {
-      const res = await submitAttempt(attemptId);
+      // Scoring must observe the latest keystroke, even when Submit is pressed
+      // before the 400 ms autosave debounce has elapsed.
+      await flushPendingDrafts();
+      const res = await submitAttempt(runnerAttemptId);
       setSubmissionResult(res);
       onNotify(`Exam submitted · Final score: ${res.aggregateScore}/${res.totalPossibleMarks}`);
     } catch (err) {
       onNotify(err instanceof Error ? err.message : "Submission error. Attempt recorded as retryable.");
+    }
+  };
+
+  const startRetake = async () => {
+    try {
+      const nextAttemptId = await createRetakeAttempt(runnerAttemptId);
+      pendingDraftsRef.current.clear();
+      setDto(null);
+      setLoadError(null);
+      setIndex(0);
+      setAnswers({});
+      setSubmissionResult(null);
+      setHintedItems(new Set());
+      questionFlagsRef.current = {};
+      startTime.current = Date.now();
+      setTime(0);
+      setSaveStatus("saved");
+      setRunnerAttemptId(nextAttemptId);
+      onNotify("Fresh retake started");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not start a retake");
     }
   };
 
@@ -197,13 +345,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     return (
       <SubmittedView
         result={submissionResult}
-        onRetake={() => {
-          setAnswers({});
-          setSubmissionResult(null);
-          setIndex(0);
-          startTime.current = Date.now();
-          onNotify("Retake started");
-        }}
+        onRetake={() => void startRetake()}
         onExit={onExit}
         time={time}
       />
@@ -216,7 +358,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <button
-            onClick={onExit}
+            onClick={() => void saveAndExit()}
             className="grid h-8 w-8 place-items-center rounded-md border border-edge bg-raise text-mut transition-colors hover:bg-white/[0.07] hover:text-fg"
             title="Back"
           >
@@ -260,21 +402,39 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
               q={q}
               selected={answers[q.id]?.mcq}
               onSelect={select}
-              showHints={rigor !== "rigorous"}
+              hint={{
+                objective: q.learningObjective,
+                mode: hintMode,
+                revealed: hintedItems.has(q.id),
+                remaining: hintsRemaining,
+                onReveal: revealHint,
+              }}
             />
           ) : q && q.format === "numeric" ? (
             <NumericQuestion
               q={q}
               answer={answers[q.id]?.numeric ?? ""}
               onChange={setNumeric}
-              showHints={rigor !== "rigorous"}
+              hint={{
+                objective: q.learningObjective,
+                mode: hintMode,
+                revealed: hintedItems.has(q.id),
+                remaining: hintsRemaining,
+                onReveal: revealHint,
+              }}
             />
           ) : q && q.format === "proof" ? (
             <ProofQuestion
               q={q}
               answer={answers[q.id]?.proof ?? ""}
               onChange={setProof}
-              showHints={rigor !== "rigorous"}
+              hint={{
+                objective: q.learningObjective,
+                mode: hintMode,
+                revealed: hintedItems.has(q.id),
+                remaining: hintsRemaining,
+                onReveal: revealHint,
+              }}
             />
           ) : null}
 
@@ -369,25 +529,47 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   );
 }
 
+function QuestionHint({ objective, mode, revealed, remaining, onReveal }: QuestionHintProps) {
+  if (!objective || mode === "none") return null;
+  if (mode === "full" || revealed) {
+    return (
+      <div className="mt-2 flex items-start gap-1.5 rounded-md border border-[#86efac]/20 bg-[#86efac]/[0.05] px-2.5 py-2 text-[12.5px] text-dim">
+        <Lightbulb size={13} className="mt-0.5 shrink-0 text-[#86efac]" />
+        <span>{mode === "full" ? "Objective hint" : "Revealed hint"} · {objective}</span>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onReveal}
+      disabled={remaining <= 0}
+      className="mt-2 flex items-center gap-1.5 rounded-md border border-edge bg-card px-2.5 py-1.5 text-[12px] text-mut transition-colors hover:bg-white/[0.06] hover:text-fg disabled:cursor-not-allowed disabled:opacity-45"
+    >
+      <Lightbulb size={12} />
+      {remaining > 0 ? `Reveal objective hint · ${remaining} remaining` : "Hint budget used"}
+    </button>
+  );
+}
+
 /* ── MCQ ── */
 
 function McqQuestion({
   q,
   selected,
   onSelect,
-  showHints,
+  hint,
 }: {
   q: Question;
   selected?: string;
   onSelect: (id: string) => void;
-  showHints: boolean;
+  hint: QuestionHintProps;
 }) {
   return (
     <div>
       <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.stem}</h2>
-      {showHints && q.learningObjective && (
-        <p className="mt-2 text-[12.5px] text-dim">Objective · {q.learningObjective}</p>
-      )}
+      <QuestionHint {...hint} />
       <div className="mt-5 space-y-2.5">
         {q.options?.length ? (
           q.options.map((opt) => {
@@ -426,19 +608,17 @@ function NumericQuestion({
   q,
   answer,
   onChange,
-  showHints,
+  hint,
 }: {
   q: Question;
   answer: string;
   onChange: (v: string) => void;
-  showHints: boolean;
+  hint: QuestionHintProps;
 }) {
   return (
     <div>
       <h2 className="text-[24px] font-semibold leading-snug text-fg">{q.stem}</h2>
-      {showHints && q.learningObjective && (
-        <p className="mt-2 text-[12.5px] text-dim">Objective · {q.learningObjective}</p>
-      )}
+      <QuestionHint {...hint} />
       <div className="mt-5 flex items-center gap-2">
         <input
           value={answer}
@@ -479,12 +659,12 @@ function ProofQuestion({
   q,
   answer,
   onChange,
-  showHints,
+  hint,
 }: {
   q: Question;
   answer: string;
   onChange: (v: string) => void;
-  showHints: boolean;
+  hint: QuestionHintProps;
 }) {
   const [fontSize, setFontSize] = useState(15);
   const [kbOpen, setKbOpen] = useState(true);
@@ -517,9 +697,7 @@ function ProofQuestion({
             <p className="text-[12.5px] text-fg/90">{q.responseRequirement}</p>
           </div>
         )}
-        {showHints && q.learningObjective && (
-          <p className="mt-2 text-[12.5px] text-dim">Objective · {q.learningObjective}</p>
-        )}
+        <QuestionHint {...hint} />
 
         <div className="mt-4 rounded-md border border-edge bg-card">
           <button

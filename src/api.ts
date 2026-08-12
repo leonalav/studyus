@@ -1,5 +1,6 @@
 import {
   getAttemptForTaking as backendGetAttemptForTaking,
+  createRetakeAttempt as backendCreateRetakeAttempt,
   autosaveDraft as backendAutosaveDraft,
   submitAttempt as backendSubmitAttempt,
   getAttemptResult as backendGetAttemptResult,
@@ -82,6 +83,10 @@ export type { AttemptForTakingDTO, AttemptResultDTO, CurriculumNodeRecord, Learn
 
 export async function getAttemptForTaking(attemptId: string): Promise<AttemptForTakingDTO | null> {
   return backendGetAttemptForTaking(attemptId);
+}
+
+export async function createRetakeAttempt(attemptId: string): Promise<string> {
+  return backendCreateRetakeAttempt(attemptId);
 }
 
 export async function autosaveDraft(

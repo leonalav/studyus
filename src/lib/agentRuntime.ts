@@ -637,7 +637,10 @@ export async function callStructuredAgent<T>({
     }).catch(() => {});
 
     if (attempt < totalAttempts) {
-      messages.push({ role: "assistant", content: raw.slice(0, 4000) });
+      // Assessment batches are intentionally bounded, so retain enough of the
+      // prior JSON for the model to repair a specific item instead of rebuilding
+      // an opaque 4,000-character truncation from scratch.
+      messages.push({ role: "assistant", content: raw.slice(0, role === "generation" ? 16_000 : 4_000) });
       const repairErrors = lastErrors
         .slice(0, 20)
         .map((error) => `- ${error.slice(0, 400)}`)
@@ -647,7 +650,9 @@ export async function callStructuredAgent<T>({
         content:
           `Your previous response failed schema validation:\n` +
           repairErrors +
-          `\n\nReturn a corrected JSON object only. No prose, no code fences. Include speech, board_ops, and evidence_refs even when either array is empty.`,
+          (role === "tutor"
+            ? `\n\nReturn a corrected JSON object only. No prose or code fences. Include speech, board_ops, and evidence_refs even when either array is empty.`
+            : `\n\nReturn a corrected JSON object only. No prose or code fences. Preserve every field required by the original request and correct every validation error above.`),
       });
     }
   }
