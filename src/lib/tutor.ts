@@ -71,8 +71,10 @@ export const MAX_BOARD_OPS_PER_TURN = 12;
 export const MAX_THREAD_INITIAL_BLOCKS = 6;
 /** Bounds on the generated onboarding interview, so a model cannot return a
  *  one-question stub or a 40-question intake form. */
-export const MIN_ONBOARDING_QUESTIONS = 3;
-export const MAX_ONBOARDING_QUESTIONS = 6;
+// The intake is intentionally a fixed five-question reception: enough signal to
+// calibrate the tutor without turning the first interaction into a survey.
+export const MIN_ONBOARDING_QUESTIONS = 5;
+export const MAX_ONBOARDING_QUESTIONS = 5;
 
 /* ─────────────────────────────────────────────────────────────
    TURN TYPES
@@ -1560,7 +1562,8 @@ export function buildTutorUserPrompt(params: {
   parts.push(`LEARNER MESSAGE:\n"""\n${params.learnerMessage}${params.attachmentsNote}\n"""`);
 
   parts.push(
-    `GLOBAL BEHAVIOR: First decide whether changing the board is pedagogically necessary for this exact turn. Greetings, thanks, acknowledgements, social chat, navigation questions, and answers that are already clear in short speech MUST return board_ops exactly [] — do not create an equation, graph, diagram, chart, text block, callout, or thread merely because a chalkboard is available. ` +
+    `GLOBAL BEHAVIOR: The chalkboard is the primary teaching surface and interactive lesson. Do not teach, explain the lesson, or ask instructional/content questions in speech. Put teaching steps, Socratic questions, checks for understanding, examples, definitions, and practice prompts onto the chalkboard using board_ops. Speech must stay to a brief acknowledgement or transition (for example, “I put that on the board”). Only use speech for a direct learner clarification when no board content is needed. ` +
+    `First decide whether changing the board is pedagogically necessary for this exact turn. Greetings, thanks, acknowledgements, social chat, navigation questions, and replies that are already clear in short speech MUST return board_ops exactly []. Do not create an equation, graph, diagram, chart, text block, callout, or thread merely because a chalkboard is available. ` +
     `Use a board operation only when the learner explicitly requests a board rendering/edit or when a specific visual/formal representation materially improves understanding and cannot be conveyed as clearly in the spoken response alone. If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
     `For every substantive explanation, layer simple plain-language intuition first, then precise terminology, assumptions, rigorous reasoning, and meaningful equations or worked steps; define jargon and connect formal details back to the intuitive idea. ` +
     `When a board representation is necessary, choose the smallest relevant set of equations, function graphs, data charts, or domain-faithful diagrams/scientific figures. Never add decorative, redundant, irrelevant, or semantically misleading visuals, and obey the enabled tool permissions. ` +
