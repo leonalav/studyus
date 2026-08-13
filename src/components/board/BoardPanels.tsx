@@ -215,6 +215,8 @@ export function SettingsPanel({
   setFontScale,
   latex,
   setLatex,
+  boardRevertsWithMessage,
+  setBoardRevertsWithMessage,
   onClose,
 }: {
   theme: BoardTheme;
@@ -225,6 +227,8 @@ export function SettingsPanel({
   setFontScale: (n: number) => void;
   latex: boolean;
   setLatex: (b: boolean) => void;
+  boardRevertsWithMessage: boolean;
+  setBoardRevertsWithMessage: (b: boolean) => void;
   onClose: () => void;
 }) {
   return (
@@ -294,6 +298,26 @@ export function SettingsPanel({
             <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${latex ? "translate-x-3" : ""}`} />
           </span>
         </button>
+
+        <div className="mt-4">
+          <Label>Reverting a message</Label>
+          <button
+            onClick={() => setBoardRevertsWithMessage(!boardRevertsWithMessage)}
+            className="flex w-full items-center gap-2.5 rounded-md border border-edge bg-raise px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07]"
+          >
+            <span className="flex-1">
+              <span className="block text-[12.5px] text-fg">Board reverts too</span>
+              <span className="block text-[10.5px] leading-snug text-dim">
+                {boardRevertsWithMessage
+                  ? "Undoing a message also undoes what the tutor drew for it"
+                  : "Undoing a message keeps everything on the board"}
+              </span>
+            </span>
+            <span className={`h-4 w-7 flex-none rounded-full p-0.5 transition-colors ${boardRevertsWithMessage ? "bg-accent" : "bg-[#3a3a38]"}`}>
+              <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${boardRevertsWithMessage ? "translate-x-3" : ""}`} />
+            </span>
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -336,6 +360,21 @@ export interface ChatMsg {
   role: "tutor" | "user" | "system";
   text: string;
   imageData?: string;
+  /** Board state as it stood immediately BEFORE this message was sent.
+   *
+   *  Reverting to a message restores this snapshot, so undoing a question also
+   *  undoes everything the tutor drew in response to it. Captured only on user
+   *  messages, which are the only revertable points. Optional because sessions
+   *  saved before board-revert existed have no snapshot — those revert the
+   *  transcript alone rather than failing. */
+  boardSnapshot?: BoardSnapshot;
+}
+
+/** The board half of a revert point. Cloned at capture time so later mutation
+ *  of the live boards cannot reach back and corrupt the history. */
+export interface BoardSnapshot {
+  boards: BoardDoc[];
+  activeId: string;
 }
 
 export type AgentActivityKind =

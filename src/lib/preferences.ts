@@ -18,6 +18,14 @@ export interface AppearancePreferences {
   highContrast: boolean;
   dyslexiaFriendly: boolean;
   captions: boolean;
+  /** Reverting a chat message also rolls the chalkboard back to how it looked
+   *  before that message was sent.
+   *
+   *  Default on, because a transcript and a board that disagree about what has
+   *  been taught is the more confusing state. Learners who treat the board as
+   *  an accumulating notebook rather than a conversation artifact can turn it
+   *  off and keep everything that was drawn. */
+  boardRevertsWithMessage: boolean;
 }
 
 export interface NotificationRule {
@@ -384,6 +392,7 @@ export const DEFAULT_PREFERENCES: StudyusPreferences = {
     highContrast: false,
     dyslexiaFriendly: false,
     captions: true,
+    boardRevertsWithMessage: true,
   },
   notifications: {
     events: {
@@ -698,6 +707,7 @@ export function sanitizePreferences(value: unknown): StudyusPreferences {
       highContrast: booleanValue(appearance.highContrast, DEFAULT_PREFERENCES.appearance.highContrast),
       dyslexiaFriendly: booleanValue(appearance.dyslexiaFriendly, DEFAULT_PREFERENCES.appearance.dyslexiaFriendly),
       captions: booleanValue(appearance.captions, DEFAULT_PREFERENCES.appearance.captions),
+      boardRevertsWithMessage: booleanValue(appearance.boardRevertsWithMessage, DEFAULT_PREFERENCES.appearance.boardRevertsWithMessage),
     },
     notifications: {
       events: {

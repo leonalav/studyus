@@ -8,6 +8,7 @@ import {
   ChatDock,
   type AgentActivity,
   type ChatAttachment,
+  type BoardSnapshot,
   type ChatMsg,
 } from "./BoardPanels";
 import { buildSubBoard, boardToMarkdown, DOMAIN_META, type BoardDoc } from "../../data/boards";
@@ -33,6 +34,7 @@ import type { OnboardingAnswers } from "../../data/tutor";
 import {
   PREFERENCES_CHANGED_EVENT,
   loadPreferences,
+  savePreferences,
   type StudyusPreferences,
 } from "../../lib/preferences";
 
@@ -62,6 +64,18 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const boardsRef = useRef(boards);
   boardsRef.current = boards;
   const [activeId, setActiveId] = useState(initialSession?.activeId ?? initialBoard.id);
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  // A behaviour preference rather than a per-session appearance choice, so it
+  // persists globally and stays consistent across every board the learner opens.
+  const [boardRevertsWithMessage, setBoardRevertsWithMessageState] = useState(
+    () => loadPreferences().appearance.boardRevertsWithMessage
+  );
+  const setBoardRevertsWithMessage = useCallback((next: boolean) => {
+    setBoardRevertsWithMessageState(next);
+    const current = loadPreferences();
+    savePreferences({ ...current, appearance: { ...current.appearance, boardRevertsWithMessage: next } });
+  }, []);
   const [written, setWritten] = useState<Set<string>>(new Set((initialSession?.boards ?? []).map((item) => item.id)));
 
   const [theme, setTheme] = useState<BoardTheme>(
@@ -109,6 +123,11 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
       const next = (event as CustomEvent<StudyusPreferences>).detail;
       if (next?.tutor) {
         setPacing({ sessionLength: next.tutor.sessionLength, breakEvery: next.tutor.breakEvery });
+      }
+      // Keep the board-settings toggle honest if the preference is changed
+      // from the main Settings modal while a board is open.
+      if (next?.appearance) {
+        setBoardRevertsWithMessageState(next.appearance.boardRevertsWithMessage);
       }
     };
     window.addEventListener(PREFERENCES_CHANGED_EVENT, onPreferencesChanged);
@@ -218,7 +237,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     boundNodes: resolvedBoundNodes,
     boards,
     activeId,
-    messages: messages.map(({ imageData: _imageData, ...message }) => message),
+    messages: pruneSnapshotsForStorage(messages),
     viewMap,
     strokeMap,
     appearance: {
@@ -378,6 +397,18 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     [activeId, sessionId]
   );
 
+  /**
+   * Board state as it stands right now, frozen for a revert point.
+   *
+   * Deep-cloned deliberately: blocks are mutated by later board ops and widget
+   * answers, and a shallow copy would let those edits reach back and rewrite
+   * history, so reverting would restore the present.
+   */
+  const captureBoardSnapshot = useCallback((): BoardSnapshot => ({
+    boards: structuredClone(boardsRef.current),
+    activeId: activeIdRef.current,
+  }), []);
+
   /* session timer */
   useEffect(() => {
     const id = window.setInterval(() => setSeconds((s) => s + 1), 1000);
@@ -434,6 +465,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const handleAsk = useCallback(
     async (selection: string, question: string) => {
       await captureActive();
+      // Taken before the branch board is added, so reverting this message
+      // removes the branch it created rather than stranding an empty thread.
+      const boardSnapshot = captureBoardSnapshot();
       const sub = buildSubBoard(selection, question, board);
       try {
         await logThread(sub);
@@ -449,18 +483,33 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
       setChatCollapsed(false);
       setMessages((m) => [
         ...m,
-        { id: ++msgId.current, role: "user", text: question ? `${question}  ("${trim(selection)}")` : `Explain: "${trim(selection)}"` },
+        {
+          id: ++msgId.current,
+          role: "user",
+          text: question ? `${question}  ("${trim(selection)}")` : `Explain: "${trim(selection)}"`,
+          boardSnapshot,
+        },
       ]);
       pushTutor(`New board opened for "${trim(selection)}". I'm writing the breakdown now — it's saved in Threads so you can come back to it.`, 800);
       notify("Branched into a new board");
     },
-    [board, captureActive, logThread, notify, pushTutor]
+    [board, captureActive, captureBoardSnapshot, logThread, notify, pushTutor]
   );
 
   const handleRevertMessage = useCallback((messageId: number) => {
     if (rewindRef.current) return;
     const index = messages.findIndex((message) => message.id === messageId && message.role === "user");
     if (index < 0) return;
+
+    const target = messages[index];
+    const previousBoards = boardsRef.current;
+    const previousActiveId = activeIdRef.current;
+    // Roll the chalkboard back with the conversation, unless the learner has
+    // chosen to keep the board as an accumulating notebook. Sessions saved
+    // before snapshots existed have none, and revert the transcript alone
+    // rather than failing or wiping the board.
+    const revertBoard =
+      loadPreferences().appearance.boardRevertsWithMessage && target.boardSnapshot !== undefined;
 
     // A rewind supersedes any active turn. Incrementing the turn token ensures
     // its cancellation cannot append an error or clear newer activity state.
@@ -481,6 +530,19 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     // Reflect the rewind immediately, while locking submission until the
     // durable transcript has reached the same state.
     setMessages(retained);
+    if (revertBoard && target.boardSnapshot) {
+      // Clone on restore too: this snapshot stays attached to the message and
+      // must survive being reverted to more than once.
+      setBoards(structuredClone(target.boardSnapshot.boards));
+      const restoredActive = target.boardSnapshot.activeId;
+      setActiveId(
+        target.boardSnapshot.boards.some((item) => item.id === restoredActive)
+          ? restoredActive
+          : target.boardSnapshot.boards[0]?.id ?? previousActiveId
+      );
+      // Widget answers on restored blocks may legitimately be re-submitted.
+      signalledWidgets.current.clear();
+    }
     void replaceSessionTranscript(
       sessionId,
       retained.map((message) => ({
@@ -488,9 +550,20 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         content: message.text,
       }))
     ).then(() => {
-      notify("Conversation returned to this message — edit it and submit again");
+      notify(
+        revertBoard
+          ? "Conversation and board returned to this message — edit it and submit again"
+          : "Conversation returned to this message — the board was left as it is"
+      );
     }).catch(() => {
+      // The durable transcript is the source of truth. If it could not be
+      // rewound, put the board back too rather than leaving chat and board
+      // describing different lessons.
       setMessages(messages);
+      if (revertBoard) {
+        setBoards(previousBoards);
+        setActiveId(previousActiveId);
+      }
       notify("The conversation could not be reverted");
     }).finally(() => {
       rewindRef.current = false;
@@ -511,13 +584,16 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
       const turnKind = options?.kind ?? "chat";
       const activityTurn = ++activityTurnRef.current;
       const targetBoardId = board.id;
+      // Freeze the board BEFORE this turn touches it, so reverting to this
+      // message undoes everything the tutor drew in response to it.
+      const boardSnapshot = captureBoardSnapshot();
       if (showUserMessage) {
-        setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
+        setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData, boardSnapshot }]);
       } else if (options?.displayText) {
         // A widget answer is the learner's turn, so it belongs in the
         // transcript — but as what they DID, never as the internal directive
         // the model receives.
-        setMessages((m) => [...m, { id: ++msgId.current, role: "user", text: options.displayText! }]);
+        setMessages((m) => [...m, { id: ++msgId.current, role: "user", text: options.displayText!, boardSnapshot }]);
       }
       // Consume the transient payload once. The request below retains this
       // callback's immutable attachment snapshot while React clears the UI.
@@ -847,6 +923,8 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           setFontScale={setFontScale}
           latex={latex}
           setLatex={setLatex}
+          boardRevertsWithMessage={boardRevertsWithMessage}
+          setBoardRevertsWithMessage={setBoardRevertsWithMessage}
           onClose={() => setPanel(null)}
         />
       )}
@@ -1062,6 +1140,33 @@ function toolCallToBlock(call: { name: string; args: Record<string, any> }, doma
 
 function appendBlock(board: BoardDoc, block: NonNullable<ReturnType<typeof toolCallToBlock>>): BoardDoc {
   return { ...board, blocks: [...board.blocks, block] };
+}
+
+/**
+ * Board snapshots are a full clone of every board, so keeping one on every
+ * message would grow the saved session quadratically and blow the ~5MB
+ * localStorage budget on a long lesson.
+ *
+ * Only the most recent revert points keep their snapshot. Older messages stay
+ * revertable, but revert the transcript alone — the same graceful path already
+ * taken by sessions saved before snapshots existed.
+ */
+const PERSISTED_BOARD_SNAPSHOTS = 12;
+
+export function pruneSnapshotsForStorage(messages: ChatMsg[]): ChatMsg[] {
+  let remaining = PERSISTED_BOARD_SNAPSHOTS;
+  const kept = new Set<number>();
+  for (let index = messages.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    if (messages[index].boardSnapshot) {
+      kept.add(messages[index].id);
+      remaining -= 1;
+    }
+  }
+  return messages.map(({ imageData: _imageData, ...message }) =>
+    message.boardSnapshot && !kept.has(message.id)
+      ? { ...message, boardSnapshot: undefined }
+      : message
+  );
 }
 
 function blockSpecToBlock(spec: Record<string, unknown>, domain: BoardDoc["domain"], existingId?: string) {

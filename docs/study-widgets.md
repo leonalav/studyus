@@ -215,6 +215,37 @@ a signal whose turn fails is released for retry.
 
 ---
 
+## Reverting a message reverts the board
+
+Every user message carries a `boardSnapshot` — the board exactly as it stood
+*before* that message was sent. Reverting to a message restores it, so undoing a
+question also undoes everything the tutor drew in response.
+
+- Snapshots are **deep-cloned** at capture and again at restore. Blocks are
+  mutated in place by later board ops and widget answers, so a shallow copy
+  would let the present rewrite history.
+- Captured at all three revert points: a typed message, a widget answer, and an
+  "Ask about this" branch. The branch snapshot is taken *before* the sub-board
+  is added, so reverting removes the thread rather than stranding it.
+- On revert, `signalledWidgets` is cleared: restored widgets may legitimately be
+  answered again.
+- If the durable transcript rewind fails, the board is put back too — chat and
+  board must never describe different lessons.
+
+**Storage bound.** A snapshot clones every board, so keeping one per message
+would grow the saved session quadratically against a ~5MB localStorage budget.
+`pruneSnapshotsForStorage` persists only the 12 most recent. Older messages stay
+revertable and simply revert the transcript alone — the same graceful path taken
+by sessions saved before snapshots existed.
+
+**Learner control.** Board settings (top bar → Settings) has a *Board reverts
+too* toggle, persisted globally as `appearance.boardRevertsWithMessage`. Default
+**on**, since a transcript and a board disagreeing about what has been taught is
+the more confusing state; learners who treat the board as an accumulating
+notebook can turn it off and keep everything drawn.
+
+---
+
 ## Tests
 
 | File | Covers |
@@ -226,3 +257,4 @@ a signal whose turn fails is released for retry.
 | `src/lib/tutor.test.ts` | Widget board ops, tool gating, stage persistence and anti-skip logic |
 | `src/lib/tutor.prompt.test.ts` | Prompt carries the directive, ladder, widget catalog and invariants |
 | `src/lib/widgets/signal.test.ts` | Which interactions wake the tutor, and the pedagogical obligation each one creates |
+| `src/components/board/boardRevert.test.ts` | Snapshot storage bound, recency, and isolation from later mutation |

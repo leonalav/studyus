@@ -13,6 +13,19 @@ afterEach(() => {
 });
 
 describe("persisted Studyus preferences", () => {
+  it("defaults board-reverts-with-message on, and round-trips the learner's choice", () => {
+    // Default on: a transcript and a board that disagree about what has been
+    // taught is the more confusing state.
+    expect(sanitizePreferences({}).appearance.boardRevertsWithMessage).toBe(true);
+    expect(
+      sanitizePreferences({ appearance: { boardRevertsWithMessage: false } }).appearance.boardRevertsWithMessage
+    ).toBe(false);
+    // Junk falls back to the default rather than throwing or disabling revert.
+    expect(
+      sanitizePreferences({ appearance: { boardRevertsWithMessage: "no" } }).appearance.boardRevertsWithMessage
+    ).toBe(true);
+  });
+
   it("applies every appearance control to global document state", () => {
     const dataset: Record<string, string> = {};
     const properties = new Map<string, string>();
@@ -32,6 +45,7 @@ describe("persisted Studyus preferences", () => {
       highContrast: true,
       dyslexiaFriendly: true,
       captions: false,
+      boardRevertsWithMessage: true,
     });
 
     expect(dataset).toMatchObject({
