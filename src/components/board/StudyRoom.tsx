@@ -141,10 +141,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   /* The in-flight tutor call is aborted when the room unmounts. */
   const abortRef = useRef<AbortController | null>(null);
   const activityTurnRef = useRef(0);
-<<<<<<< HEAD
   const greetedRef = useRef(false);
-=======
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
   const rewindRef = useRef(false);
   useEffect(() => () => abortRef.current?.abort(), []);
   const [previews, setPreviews] = useState<Record<string, string>>({});
@@ -412,7 +409,6 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   /* chat replies — routed through the tutor harness, which resolves the bound
      tutor role, validates structured output, and persists both messages */
   const handleSend = useCallback(
-<<<<<<< HEAD
     async (text: string, imageData?: string, showUserMessage = true) => {
       if (rewindRef.current) return;
       const activityTurn = ++activityTurnRef.current;
@@ -420,13 +416,6 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
       if (showUserMessage) {
         setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
       }
-=======
-    async (text: string, imageData?: string) => {
-      if (rewindRef.current) return;
-      const activityTurn = ++activityTurnRef.current;
-      const targetBoardId = board.id;
-      setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
       // Consume the transient payload once. The request below retains this
       // callback's immutable attachment snapshot while React clears the UI.
       setAttachments([]);
