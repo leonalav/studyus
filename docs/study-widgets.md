@@ -174,6 +174,47 @@ Prompt/schema versions: `tutor_v7` / `tutor_turn_v4`.
 
 ---
 
+## Responding to learner signals
+
+A widget the learner answers is a **pedagogical signal**, not a form
+submission. `src/lib/widgets/signal.ts` turns a committed answer into a tutor
+turn, routed through the same `askTutorTurn` path as a typed message so the
+full contract (stage, board ops, evidence) applies unchanged.
+
+**Which interactions wake the tutor.** Committing an answer does:
+`question`, `retrieval_check`, `mistake_check`, `challenge`, `reflection`,
+`scratchpad`. Exploration does not — dragging a slider, playing an animation,
+opening a hint level, or revealing an item is the learner thinking, and
+interrupting that is worse than useless.
+
+**What the tutor is told.** Not "the learner clicked B", but the pedagogical
+content of the act:
+
+- A **wrong** answer carries the misconception that distractor detects, plus an
+  explicit instruction to diagnose it and place a repairing widget rather than
+  restate the right answer.
+- A **right** answer carries the reminder that one right answer is not a stage
+  exit condition, and that the reasoning must be confirmed sound rather than
+  lucky.
+- A **failed retrieval check** is flagged as evidence of forgetting and routes
+  to targeted repair.
+- **Scratchpad work** must be diagnosed line by line, never completed for the
+  learner.
+- A **reflection** is named as the primary evidence of understanding — a fluent
+  procedure with an incoherent explanation is not understanding.
+
+Every signal also carries the current stage and its exit condition, so
+`stage_advance` stays evidence-bound.
+
+The learner sees only what they *did* ("Answered the question: …") — never the
+directive their tutor received, and never the verdict, which is the tutor's to
+deliver as diagnosis.
+
+One turn per commit, claimed synchronously so a double click cannot fire twice;
+a signal whose turn fails is released for retry.
+
+---
+
 ## Tests
 
 | File | Covers |
@@ -184,3 +225,4 @@ Prompt/schema versions: `tutor_v7` / `tutor_turn_v4`.
 | `src/data/boards.widgets.test.ts` | Markdown export keeps teaching content and learner answers |
 | `src/lib/tutor.test.ts` | Widget board ops, tool gating, stage persistence and anti-skip logic |
 | `src/lib/tutor.prompt.test.ts` | Prompt carries the directive, ladder, widget catalog and invariants |
+| `src/lib/widgets/signal.test.ts` | Which interactions wake the tutor, and the pedagogical obligation each one creates |

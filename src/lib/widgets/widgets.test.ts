@@ -251,6 +251,13 @@ describe("mastery directive", () => {
     }
   });
 
+  it("obliges the tutor to respond to a widget the learner answered", () => {
+    expect(directive).toMatch(/that IS their turn\. Respond to it/i);
+    expect(directive).toMatch(/never leave an answered widget without a response/i);
+    expect(directive).toMatch(/A wrong answer is a diagnosis opportunity, not a correction opportunity/i);
+    expect(directive).toMatch(/A right answer is evidence to test, not a reason to celebrate/i);
+  });
+
   it("requires the work to shift to the learner and errors to be diagnosed", () => {
     expect(directive).toMatch(/Diagnose, never correct/i);
     expect(directive).toMatch(/scratchpad/);

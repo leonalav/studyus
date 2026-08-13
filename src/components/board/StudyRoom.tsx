@@ -14,6 +14,8 @@ import { buildSubBoard, boardToMarkdown, DOMAIN_META, type BoardDoc } from "../.
 import { validateVisualizationIntent } from "../../lib/visualization/validate";
 import type { VisualizationIntent, VisualizationState } from "../../lib/visualization/types";
 import { sanitizeWidgetState, validateWidgetIntent } from "../../lib/widgets/validate";
+import { buildWidgetSignal, shouldSignalTutor } from "../../lib/widgets/signal";
+import { getSessionMasteryStage } from "../../lib/tutor";
 import { WIDGET_LABEL, type WidgetIntent, type WidgetState } from "../../lib/widgets/types";
 import {
   askTutorTurn,
@@ -34,6 +36,11 @@ import {
   type StudyusPreferences,
 } from "../../lib/preferences";
 
+/** What produced this turn. Distinguishes the opening greeting (retryable when
+ *  an unmount kills it) and a widget answer (retryable, and shown in the
+ *  transcript as the learner's action) from a typed chat message. */
+type TurnKind = "chat" | "greeting" | "widget";
+
 interface Props {
   initialBoard: BoardDoc;
   initialSession?: StoredStudySession;
@@ -50,6 +57,10 @@ interface Props {
 
 export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding, onLeave, notify }: Props) {
   const [boards, setBoards] = useState<BoardDoc[]>(initialSession?.boards ?? [initialBoard]);
+  /** Latest boards, readable from callbacks that must not re-bind whenever the
+   *  board changes (every board op would otherwise rebuild them). */
+  const boardsRef = useRef(boards);
+  boardsRef.current = boards;
   const [activeId, setActiveId] = useState(initialSession?.activeId ?? initialBoard.id);
   const [written, setWritten] = useState<Set<string>>(new Set((initialSession?.boards ?? []).map((item) => item.id)));
 
@@ -144,6 +155,23 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const abortRef = useRef<AbortController | null>(null);
   const activityTurnRef = useRef(0);
   const greetedRef = useRef(false);
+  /** Widgets that have already woken the tutor, so a re-render or a double
+   *  click on Check cannot ask the same question twice. */
+  const signalledWidgets = useRef(new Set<string>());
+  /** `saveWidgetState` is declared before `handleSend`; the ref breaks that
+   *  cycle without reordering the component. */
+  const handleSendRef = useRef<
+    ((
+      text: string,
+      imageData?: string,
+      showUserMessage?: boolean,
+      options?: { kind?: TurnKind; displayText?: string; signalKey?: string }
+    ) => Promise<void>) | null
+  >(null);
+  /** Bumped when an opening greeting is cancelled by an unmount, so the
+   *  surviving mount retries it. Bounded: a greeting is worth one retry, not an
+   *  infinite loop against a dead endpoint. */
+  const [greetAttempt, setGreetAttempt] = useState(0);
   const rewindRef = useRef(false);
   useEffect(() => () => abortRef.current?.abort(), []);
   const [previews, setPreviews] = useState<Record<string, string>>({});
@@ -292,10 +320,22 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   // hint levels) is persisted onto the owning block. It survives a reopen and
   // is summarized back into the tutor prompt, so the agent teaches against what
   // the learner actually did rather than guessing.
+  //
+  // Committing an ANSWER additionally wakes the tutor. Under the Guide to
+  // Mastery the agent owns the response to a learner's work: a wrong choice is
+  // a misconception to diagnose, a right one is evidence to test rather than
+  // celebrate. A widget the learner answers into silence would make the board a
+  // worksheet instead of a lesson.
   const saveWidgetState = useCallback(
     (blockId: string, state: WidgetState) => {
       const safe = sanitizeWidgetState(state);
       if (!safe) return;
+
+      const target = boardsRef.current
+        .find((b) => b.id === activeId)
+        ?.blocks.find((blk) => blk.id === blockId);
+      const widget = target?.kind === "widget" ? target : null;
+
       setBoards((current) =>
         current.map((b) =>
           b.id === activeId
@@ -308,8 +348,34 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
             : b
         )
       );
+
+      if (!widget) return;
+      // Only a committed answer wakes the tutor; exploration must not. Decided
+      // synchronously so a double click cannot slip two turns through the
+      // await below.
+      if (!shouldSignalTutor(widget.intent, widget.state, safe)) return;
+      if (signalledWidgets.current.has(blockId)) return;
+      signalledWidgets.current.add(blockId);
+
+      const previousState = widget.state;
+      void (async () => {
+        const { stage } = await getSessionMasteryStage(sessionId);
+        const signal = buildWidgetSignal(blockId, widget.intent, previousState, safe, stage);
+        if (!signal) {
+          signalledWidgets.current.delete(blockId);
+          return;
+        }
+        // Routed through the normal turn path so the full tutor contract
+        // applies, but shown as the learner's own board action rather than a
+        // chat message they did not type.
+        void handleSendRef.current?.(signal.message, undefined, false, {
+          kind: "widget",
+          displayText: signal.displayText,
+          signalKey: blockId,
+        });
+      })();
     },
-    [activeId]
+    [activeId, sessionId]
   );
 
   /* session timer */
@@ -435,12 +501,23 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   /* chat replies — routed through the tutor harness, which resolves the bound
      tutor role, validates structured output, and persists both messages */
   const handleSend = useCallback(
-    async (text: string, imageData?: string, showUserMessage = true) => {
+    async (
+      text: string,
+      imageData?: string,
+      showUserMessage = true,
+      options?: { kind?: TurnKind; displayText?: string; signalKey?: string }
+    ) => {
       if (rewindRef.current) return;
+      const turnKind = options?.kind ?? "chat";
       const activityTurn = ++activityTurnRef.current;
       const targetBoardId = board.id;
       if (showUserMessage) {
         setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
+      } else if (options?.displayText) {
+        // A widget answer is the learner's turn, so it belongs in the
+        // transcript — but as what they DID, never as the internal directive
+        // the model receives.
+        setMessages((m) => [...m, { id: ++msgId.current, role: "user", text: options.displayText! }]);
       }
       // Consume the transient payload once. The request below retains this
       // callback's immutable attachment snapshot while React clears the UI.
@@ -532,9 +609,30 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           if (activityTurnRef.current === activityTurn) setAgentActivity(null);
         }, 1100);
       } catch (e: any) {
-        // Reverting a user message intentionally aborts the superseded turn.
-        // Do not turn that cancellation into a visible tutor error.
-        if (controller.signal.aborted && activityTurnRef.current !== activityTurn) return;
+        // A cancellation is something WE caused: a rewind superseding this turn,
+        // or the room unmounting (including React StrictMode's dev
+        // mount/unmount/remount). It is never a tutor failure, so it must never
+        // surface as a tutor error in the learner's chat.
+        if (controller.signal.aborted || e?.failureClass === "aborted") {
+          // A greeting killed by an unmount must still happen if the room is
+          // still here (React StrictMode mounts, unmounts, then remounts). The
+          // remount's effect has already run and skipped by now, so re-arm the
+          // flag and bump a counter to actually re-run it.
+          if (turnKind === "greeting") {
+            greetedRef.current = false;
+            setGreetAttempt((attempt) => attempt + 1);
+          }
+          // A widget answer that never reached the tutor must be allowed to
+          // retry, or the learner is left staring at an answered widget.
+          if (turnKind === "widget" && options?.signalKey) {
+            signalledWidgets.current.delete(options.signalKey);
+          }
+          if (activityTurnRef.current === activityTurn) {
+            setAgentStatus("idle");
+            setAgentActivity(null);
+          }
+          return;
+        }
         setAgentStatus("error");
         setAgentActivity({
           kind: "error",
@@ -571,17 +669,20 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     [attachments, board, logThread, notify, onboarding, sessionId, resolvedBoundNodes, speakTutorText]
   );
 
+  handleSendRef.current = handleSend;
+
   // A fresh chalkboard opens with a tutor greeting and the first lesson turn;
   // restored sessions keep their existing transcript untouched.
   useEffect(() => {
-    if (initialSession || greetedRef.current) return;
+    if (initialSession || greetedRef.current || greetAttempt > 2) return;
     greetedRef.current = true;
     void handleSend(
       "Open the lesson with a brief welcome, then place the first teaching step or orientation on the chalkboard. Keep the chat response to a short greeting.",
       undefined,
-      false
+      false,
+      { kind: "greeting" }
     );
-  }, [handleSend, initialSession]);
+  }, [handleSend, initialSession, greetAttempt]);
 
   /* markdown recording + export */
   const buildDoc = useCallback(() => {
