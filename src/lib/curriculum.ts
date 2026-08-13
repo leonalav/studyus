@@ -663,12 +663,43 @@ export async function transcribeNode(nodeId: string, onProgress?: (page: number,
 
   const filePath = await getSourceFilePath(sourceId);
   if (!filePath) {
-    throw new TauriUnavailableError(
-      `transcribeNode: source ${sourceId} has no file_path; the PDF must be ingested under Tauri so pdfium can open it.`
-    );
+    // Browser imports keep the original PDF in IndexedDB. Use pdf.js text
+    // extraction as a faithful, offline fallback; desktop still prefers PDFium
+    // + vision because it preserves equations rendered as graphics. This means
+    // a selected range is usable in both builds instead of silently entering a
+    // session with no curriculum grounding.
+    const original = await getOriginalCurriculumPdf(sourceId);
+    if (!original) {
+      throw new TauriUnavailableError(
+        `transcribeNode: source ${sourceId} has no readable PDF; re-import it or use the desktop build.`
+      );
+    }
+    const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist");
+    GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+    const pdf = await getDocument({ data: new Uint8Array(await original.arrayBuffer()) }).promise;
+    const total = endPage - startPage + 1;
+    for (let offset = 0; offset < total; offset++) {
+      const pageNumber = startPage + offset;
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      // Preserve reading order while keeping the original page boundary. The
+      // complete text is stored; only prompt-time evidence is excerpted later.
+      const text = normalize(content.items
+        .map((item: any) => typeof item.str === "string" ? item.str : "")
+        .join(" ")) || "BLANK";
+      db.run(
+        `INSERT OR REPLACE INTO curriculum_chunks (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind)
+         VALUES (?, ?, ?, ?, ?, ?, 'prose');`,
+        [`chunk-${nodeId}-p${pageNumber}`, nodeId, pageNumber, offset, text, simpleHash(text)]
+      );
+      onProgress?.(pageNumber, endPage);
+    }
+    saveDbSync();
+    NODE_TRANSCRIBE_CACHE.add(nodeId);
+    return total;
   }
 
-  // Rasterize via pdfium (desktop only). Throws TauriUnavailableError in browser.
+  // Rasterize via pdfium (desktop only). Throws only if the desktop seam is unavailable.
   const pngBase64 = await renderPageRange(filePath, startPage, endPage);
   if (pngBase64.length === 0) {
     throw new Error(`transcribeNode: pdfium returned no pages for ${nodeId} (${startPage}..${endPage})`);

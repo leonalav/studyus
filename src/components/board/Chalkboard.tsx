@@ -550,6 +550,9 @@ export function Chalkboard({
       <div className="pointer-events-none absolute bottom-3 left-[138px] rounded-md bg-black/40 px-2 py-1 font-mono text-[9.5px] text-white/55 backdrop-blur-sm">
         drag empty space to pan · ⌘/ctrl + scroll to zoom
       </div>
+      <div className="pointer-events-none absolute bottom-3 right-3 max-w-[34%] truncate rounded-md bg-black/40 px-2 py-1 text-right font-mono text-[9.5px] text-white/55 backdrop-blur-sm" title={board.title}>
+        {board.title}
+      </div>
         </>
       )}
     </div>

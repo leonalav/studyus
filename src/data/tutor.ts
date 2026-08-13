@@ -74,7 +74,7 @@ export function renderOnboardingQuestions(
     agentCount > 0
       ? `\n\nYou currently have ${agentCount} agent${agentCount === 1 ? "" : "s"} bound — @ mention one in your answers to pick your tutor for this session.`
       : "";
-  return `${intro}\n\n${numbered}${agentNote}\n\nAnswer when ready — one answer per line — and we'll begin.`;
+  return `${intro}\n\n${numbered}${agentNote}\n\nFeel free to skip any or all of these questions. Answer when ready — one answer per line — and we'll begin.`;
 }
 
 /**

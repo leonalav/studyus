@@ -24,6 +24,7 @@ import {
 import { generateOnboardingQuestions, transcribeNode } from "../api";
 import { countBoundAgents } from "../lib/agentRuntime";
 import { SUBJECT_LIST, type SubjectKey } from "../data/curriculum";
+import { startLiveDictation, type LiveDictation } from "../lib/voice";
 import { useCurricula, type StoredCurriculum } from "../state/curriculumStore";
 import type { CurriculumStudySelection } from "../types/curriculumStudy";
 
@@ -115,6 +116,9 @@ export function SessionCard({
   const paletteRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
+  const dictationRef = useRef<LiveDictation | null>(null);
+
+  useEffect(() => () => dictationRef.current?.stop(), []);
 
   // Input is locked while the tutor drafts questions, while the preparation
   // pass runs, and whenever the tutor is typing — no second submit can slip in.
@@ -299,7 +303,21 @@ export function SessionCard({
     const { prompt, boundNodes, concept } = pending;
     setOnboardingStage("preparing");
     setPendingOnboarding(null);
+    // The tutor explicitly acknowledges the intake before any preparation
+    // begins. This also makes the hand-off clear when the learner skipped all
+    // five questions.
+    setMessages((m) => [...m, {
+      id: ++idRef.current,
+      role: "tutor",
+      text: "Okay, got it. Stay tuned as we'll be loading up the right environment for our study session!",
+    }]);
+    setPrep({ pct: 0, stage: "Waiting for the tutor hand-off…" });
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 450));
     setPrep({ pct: 4, stage: "Reading your answers…" });
+    // Yield once so the preparation card paints before extraction starts. This
+    // is not a simulated timer: it simply lets the user see the first real
+    // completed stage even when a cached section makes the remaining work fast.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
     try {
       // Transcribe every bound node so the tutor has real evidence to ground on.
@@ -592,8 +610,22 @@ export function SessionCard({
               </button>
               <button
                 onClick={() => {
-                  setRecording((value) => !value);
-                  notify(recording ? "Voice input stopped" : "Voice input is listening");
+                  if (recording) {
+                    dictationRef.current?.stop();
+                    dictationRef.current = null;
+                    setRecording(false);
+                    notify("Voice input stopped");
+                    return;
+                  }
+                  const live = startLiveDictation(
+                    (text) => setInput(text),
+                    (message) => { setRecording(false); notify(message); }
+                  );
+                  if (live) {
+                    dictationRef.current = live;
+                    setRecording(true);
+                    notify("Voice input is listening — words will appear live");
+                  }
                 }}
                 disabled={busy}
                 className={`grid h-7 w-7 place-items-center rounded-md transition-colors hover:bg-white/[0.07] disabled:text-faint ${
@@ -831,7 +863,7 @@ function ContextPicker({
   // The picker's title is the chosen subconcept — that is what replaces
   // "Add context" once a concept is picked from the PDF's bookmarks.
   const label = selectedNode
-    ? [selectedNode.sectionNumber, selectedNode.title].filter(Boolean).join(" ")
+    ? formatNodeLabel(selectedNode)
     : docName ?? meta?.label ?? externalSelection?.label ?? "Add context";
 
   return (
@@ -977,9 +1009,7 @@ function ContextPicker({
                       })
                     }
                     onPick={(picked) => {
-                      const pickedLabel = [picked.sectionNumber, picked.title]
-                        .filter(Boolean)
-                        .join(" ");
+                      const pickedLabel = formatNodeLabel(picked);
                       setSubsection(picked.id);
                       onSelectionChange?.({ sourceId: doc!, nodeId: picked.id, label: pickedLabel });
                       setOpen(false);
@@ -1041,7 +1071,7 @@ function ConceptRow({
           className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pr-2 text-left"
         >
           <span className={`min-w-0 flex-1 truncate text-[12.5px] ${selected ? "text-fg" : "text-mut"}`}>
-            {[node.sectionNumber, node.title].filter(Boolean).join(" ")}
+            {formatNodeLabel(node)}
           </span>
           {selected && <Check size={12} className="shrink-0 text-accent" />}
         </button>
@@ -1080,6 +1110,16 @@ function ChevronRightSmall() {
   return <ChevronDown size={12} className="-rotate-90 text-dim" />;
 }
 
+function formatNodeLabel(node: { sectionNumber: string | null; title: string }): string {
+  const number = node.sectionNumber?.trim();
+  const title = node.title.trim();
+  if (number && title === number) return number;
+  if (number && title.startsWith(number) && /^[\s.:)]+/.test(title.slice(number.length))) {
+    return title;
+  }
+  return [number, title].filter(Boolean).join(" ");
+}
+
 /** Concept shown to the learner during onboarding: the picked subsection's
  *  title when a curriculum node is selected, otherwise the free-form prompt
  *  (or a neutral default when the prompt is empty). */
@@ -1092,7 +1132,7 @@ function resolveConcept(
   if (subsectionId) {
     const doc = curricula.find((c) => c.id === docId);
     const node = doc ? findNodeDeep(doc.nodes, subsectionId) : null;
-    if (node) return [node.sectionNumber, node.title].filter(Boolean).join(" ") || node.title;
+    if (node) return formatNodeLabel(node);
   }
   if (docId) {
     const doc = curricula.find((c) => c.id === docId);

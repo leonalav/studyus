@@ -141,6 +141,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   /* The in-flight tutor call is aborted when the room unmounts. */
   const abortRef = useRef<AbortController | null>(null);
   const activityTurnRef = useRef(0);
+  const greetedRef = useRef(false);
   const rewindRef = useRef(false);
   useEffect(() => () => abortRef.current?.abort(), []);
   const [previews, setPreviews] = useState<Record<string, string>>({});
@@ -408,11 +409,13 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   /* chat replies — routed through the tutor harness, which resolves the bound
      tutor role, validates structured output, and persists both messages */
   const handleSend = useCallback(
-    async (text: string, imageData?: string) => {
+    async (text: string, imageData?: string, showUserMessage = true) => {
       if (rewindRef.current) return;
       const activityTurn = ++activityTurnRef.current;
       const targetBoardId = board.id;
-      setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
+      if (showUserMessage) {
+        setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
+      }
       // Consume the transient payload once. The request below retains this
       // callback's immutable attachment snapshot while React clears the UI.
       setAttachments([]);
@@ -541,6 +544,18 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     },
     [attachments, board, logThread, notify, onboarding, sessionId, resolvedBoundNodes, speakTutorText]
   );
+
+  // A fresh chalkboard opens with a tutor greeting and the first lesson turn;
+  // restored sessions keep their existing transcript untouched.
+  useEffect(() => {
+    if (initialSession || greetedRef.current) return;
+    greetedRef.current = true;
+    void handleSend(
+      "Open the lesson with a brief welcome, then place the first teaching step or orientation on the chalkboard. Keep the chat response to a short greeting.",
+      undefined,
+      false
+    );
+  }, [handleSend, initialSession]);
 
   /* markdown recording + export */
   const buildDoc = useCallback(() => {

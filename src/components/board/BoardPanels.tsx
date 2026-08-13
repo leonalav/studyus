@@ -18,6 +18,7 @@ import type { SessionThreadLog } from "../../lib/tutor";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
 import { THEMES, FONTS, type BoardTheme } from "./Chalkboard";
+import { startLiveDictation, type LiveDictation } from "../../lib/voice";
 
 /* ══ Threads ══ */
 
@@ -349,6 +350,19 @@ export interface AgentActivity {
 }
 
 function AgentActivityWidget({ activity }: { activity: AgentActivity }) {
+  // Planning/thinking is intentionally a tiny neutral presence. The expanded
+  // blue activity card is reserved for an actual board/tool operation.
+  if (["planning", "thinking", "responding"].includes(activity.kind)) {
+    return (
+      <div className="flex items-center gap-2 px-1 py-1 text-[9.5px] text-white/45" role="status" aria-live="polite">
+        <span className="flex items-center gap-0.5" aria-hidden="true">
+          {[0, 1, 2].map((i) => <span key={i} className="h-1.5 w-1.5 rounded-full bg-white/55 animate-bounce" style={{ animationDelay: `${i * 140}ms` }} />)}
+        </span>
+        <span>agent is thinking...</span>
+      </div>
+    );
+  }
+
   const done = activity.kind === "complete";
   const failed = activity.kind === "error";
   const active = !done && !failed;
@@ -508,6 +522,9 @@ export function ChatDock({
   const initialMessageIds = useRef(new Set(messages.map((message) => message.id)));
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dictationRef = useRef<LiveDictation | null>(null);
+
+  useEffect(() => () => dictationRef.current?.stop(), []);
 
   /* draggable position */
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
@@ -516,11 +533,18 @@ export function ChatDock({
 
   const toggleVoiceDictation = () => {
     if (isRecordingVoice) {
+      dictationRef.current?.stop();
+      dictationRef.current = null;
       setIsRecordingVoice(false);
-      onSend("I finished recording an audio note. Please use the attached recording as context.");
-    } else {
+      return;
+    }
+    const live = startLiveDictation(
+      (text) => setVal(text),
+      () => setIsRecordingVoice(false)
+    );
+    if (live) {
+      dictationRef.current = live;
       setIsRecordingVoice(true);
-      onAddAttachment("audio", `voice-${Date.now()}.m4a`);
     }
   };
 
@@ -634,7 +658,7 @@ export function ChatDock({
     setVal("");
   };
 
-  const attachmentsBar = (
+  const attachmentsBar = (attachments.length > 0 || attachmentError) ? (
     <div className="flex items-center gap-1.5 overflow-x-auto border-b border-white/[0.08] px-2.5 py-1.5">
       {attachmentError && <span className="shrink-0 font-mono text-[9.5px] text-red-300" role="alert">{attachmentError}</span>}
       {attachments.length === 0 ? (
@@ -661,7 +685,7 @@ export function ChatDock({
         </>
       )}
     </div>
-  );
+  ) : null;
 
   const multimodalRow = (
     <div className="relative flex items-center gap-0.5 px-2 py-1">
@@ -728,7 +752,7 @@ export function ChatDock({
           )}
           <textarea
             value={val}
-            rows={1}
+            rows={Math.min(5, Math.max(1, val.split(/\r?\n/).length))}
             aria-label="AI Response message"
             onChange={(e) => setVal(e.target.value)}
             onMouseDown={(e) => e.stopPropagation()}
@@ -740,7 +764,7 @@ export function ChatDock({
             }}
             disabled={rewinding}
             placeholder={rewinding ? "Returning conversation…" : busy ? "Studyus is responding…" : "Ask anything about the board…"}
-            className="max-h-12 min-w-0 flex-1 resize-none cursor-text bg-transparent text-[11px] leading-[18px] text-white outline-none placeholder:text-white/35 disabled:cursor-wait disabled:opacity-60"
+            className="max-h-[90px] min-w-0 flex-1 resize-none overflow-y-auto cursor-text bg-transparent text-[11px] leading-[18px] text-white outline-none placeholder:text-white/35 disabled:cursor-wait disabled:opacity-60"
           />
           <button
             onClick={send}
@@ -863,7 +887,7 @@ export function ChatDock({
             <AgentActivityWidget
               activity={{
                 kind: agentStatus === "writing" ? "writing" : agentStatus === "error" ? "error" : "thinking",
-                label: agentStatus === "writing" ? "Updating the board" : agentStatus === "error" ? "Could not finish" : "Planning a response",
+                label: agentStatus === "writing" ? "Updating the board" : agentStatus === "error" ? "Could not finish" : "agent is thinking...",
                 detail: agentStatus === "writing" ? "Applying validated board changes" : agentStatus === "error" ? "The operation stopped safely" : "Reading your request and board context",
               }}
             />
@@ -880,7 +904,7 @@ export function ChatDock({
           <div className="flex items-center gap-2 px-2.5 pb-2">
             <textarea
               value={val}
-              rows={1}
+              rows={Math.min(5, Math.max(1, val.split(/\r?\n/).length))}
               aria-label="AI Response message"
               onChange={(e) => setVal(e.target.value)}
               onKeyDown={(e) => {
@@ -891,7 +915,7 @@ export function ChatDock({
               }}
               disabled={rewinding}
               placeholder={rewinding ? "Returning conversation…" : "what if I want to…"}
-              className="max-h-24 min-w-0 flex-1 resize-y rounded bg-black/15 px-2 py-1.5 text-[10px] leading-relaxed text-white outline-none placeholder:text-white/30 disabled:cursor-wait disabled:opacity-60"
+              className="max-h-[90px] min-w-0 flex-1 resize-none overflow-y-auto rounded bg-black/15 px-2 py-1.5 text-[10px] leading-relaxed text-white outline-none placeholder:text-white/30 disabled:cursor-wait disabled:opacity-60"
             />
             <button
               onClick={send}
