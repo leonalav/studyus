@@ -4,7 +4,9 @@ import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
 import { Latex, ChalkStrong } from "./Visuals";
 import { VisualizationSurface } from "./VisualizationSurface";
+import { WidgetSurface } from "./WidgetSurface";
 import type { VisualizationState } from "../../lib/visualization/types";
+import type { WidgetState } from "../../lib/widgets/types";
 
 export interface BoardTheme {
   id: "classic" | "blueprint" | "carbon";
@@ -71,6 +73,10 @@ interface Props {
   /** Persist a visualization block's interactive state (e.g. dragged point
    * positions) back into the board so it survives a session reopen. */
   onBlockStateChange?: (blockId: string, state: VisualizationState) => void;
+  /** Persist a study widget's learner interaction (answers, slider position,
+   * revealed steps) back into the board so it survives a session reopen and
+   * reaches the tutor on the next turn. */
+  onWidgetStateChange?: (blockId: string, state: WidgetState) => void;
   /** Render the canonical board without mutation, pan, zoom, or selection UI. */
   readOnly?: boolean;
 }
@@ -115,6 +121,7 @@ export function Chalkboard({
   initialStrokes,
   onStrokesChange,
   onBlockStateChange,
+  onWidgetStateChange,
   readOnly = false,
 }: Props) {
   const [view, setView] = useState<BoardView>(initialView ?? { x: 48, y: 36, s: 1 });
@@ -416,7 +423,7 @@ export function Chalkboard({
               className={`${readOnly ? "" : containsVisualization(b) ? "anim-chalk-visual" : "anim-chalk"} ${readOnly ? "cursor-default" : "cursor-text select-text"}`}
               style={{ animationDelay: `${Math.min(i, 4) * 40}ms` }}
             >
-              <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} blockId={b.id} />
+              <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={b.id} readOnly={readOnly} />
             </div>
           ))}
 
@@ -566,7 +573,9 @@ const BlockView = memo(function BlockView({
   scale,
   latex,
   onBlockStateChange,
+  onWidgetStateChange,
   blockId,
+  readOnly = false,
 }: {
   block: Block;
   chalk: string;
@@ -574,11 +583,17 @@ const BlockView = memo(function BlockView({
   scale: number;
   latex: boolean;
   onBlockStateChange?: (blockId: string, state: VisualizationState) => void;
+  onWidgetStateChange?: (blockId: string, state: WidgetState) => void;
   blockId: string;
+  readOnly?: boolean;
 }) {
   const handleVisualizationState = useCallback(
     (next: VisualizationState) => onBlockStateChange?.(blockId, next),
     [blockId, onBlockStateChange]
+  );
+  const handleWidgetState = useCallback(
+    (next: WidgetState) => onWidgetStateChange?.(blockId, next),
+    [blockId, onWidgetStateChange]
   );
 
   switch (block.kind) {
@@ -638,6 +653,18 @@ const BlockView = memo(function BlockView({
           onState={onBlockStateChange ? handleVisualizationState : undefined}
         />
       );
+    case "widget":
+      return (
+        <WidgetSurface
+          intent={block.intent}
+          state={block.state}
+          chalk={chalk}
+          accent={accent}
+          scale={scale}
+          readOnly={readOnly}
+          onState={onWidgetStateChange ? handleWidgetState : undefined}
+        />
+      );
     case "callout":
       return (
         <div
@@ -652,7 +679,7 @@ const BlockView = memo(function BlockView({
         <div className="grid grid-cols-1 gap-8 md:grid-cols-2 md:items-start">
           {block.children.map((child) => (
             <div key={child.id} data-block className="min-w-0">
-              <BlockView block={child} chalk={chalk} accent={accent} scale={scale} latex={latex} onBlockStateChange={onBlockStateChange} blockId={child.id} />
+              <BlockView block={child} chalk={chalk} accent={accent} scale={scale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={child.id} readOnly={readOnly} />
             </div>
           ))}
         </div>
@@ -663,7 +690,9 @@ const BlockView = memo(function BlockView({
 });
 
 function containsVisualization(block: Block): boolean {
-  return block.kind === "visualization" || (block.kind === "row" && block.children.some(containsVisualization));
+  return block.kind === "visualization"
+    || block.kind === "widget"
+    || (block.kind === "row" && block.children.some(containsVisualization));
 }
 
 /* `**bold**` and `*em*` markers become yellow-strong text in chalk. */

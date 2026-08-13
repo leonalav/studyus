@@ -70,10 +70,12 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(noEvidencePrompt).not.toMatch(/no curriculum sections are bound/i);
   });
 
-  it("states the intent discriminant is `type`, not `kind`", () => {
+  it("states the visualization intent discriminant is `type`, not `kind`", () => {
     expect(prompt).toMatch(/discriminated union on "type"/);
-    // The stale wording must be gone.
+    // The stale wording must be gone. Widgets key on "kind", but a
+    // VisualizationIntent must never be described that way.
     expect(prompt).not.toMatch(/discriminated union on "kind"/);
+    expect(prompt).toMatch(/a widget "intent" is keyed on its "kind" field/);
   });
 
   it("shows a geometry example using the correct intent/object field names", () => {
@@ -128,6 +130,50 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(prompt).toMatch(/mastery criterion/i);
     expect(prompt).toMatch(/Do not pretend missing pages or facts were present/i);
     expect(prompt).toMatch(/OPTIONAL ENRICHMENT/i);
+  });
+
+  it("carries the Guide to Mastery loop as a binding directive", () => {
+    expect(prompt).toMatch(/GUIDE TO MASTERY — THE OPERATING LOOP \(binding\)/);
+    expect(prompt).toContain("The agent carries the structure. The student carries the thinking.");
+    for (const stage of ["ENCOUNTER", "UNDERSTAND", "CONSTRUCT", "APPLY", "TRANSFER", "MASTER"]) {
+      expect(prompt).toContain(stage);
+    }
+    expect(prompt).toMatch(/Advancement is NOT click-through/i);
+    expect(prompt).toMatch(/NEVER declare mastery from a raw score/i);
+    expect(prompt).toMatch(/Never say "You completed Section X/);
+  });
+
+  it("advertises the widget ops and the full 17-widget vocabulary", () => {
+    expect(prompt).toMatch(/place_widget/);
+    expect(prompt).toMatch(/update_widget/);
+    const kinds = [
+      "roadmap", "concept_card", "slider", "animation", "comparison", "question", "hint",
+      "scratchpad", "annotation", "reveal", "example", "mistake_check", "memory_hook",
+      "retrieval_check", "challenge", "reflection", "mastery_card",
+    ];
+    for (const kind of kinds) {
+      expect(prompt).toContain(`[${kind}]`);
+    }
+  });
+
+  it("keeps graphs, geometry, and equations on the visualize op, not widgets", () => {
+    expect(prompt).toMatch(/Graphs, geometry\/points, and equations are NOT widgets/i);
+    expect(prompt).not.toContain(`"kind":"graph"`);
+    expect(prompt).not.toContain(`"kind":"equation"`);
+  });
+
+  it("states the widget invariants that make widgets teach rather than decorate", () => {
+    expect(prompt).toMatch(/EXACTLY ONE correct/);
+    expect(prompt).toMatch(/EVERY step requires "why"/);
+    expect(prompt).toMatch(/every error line REQUIRES a "diagnosis"/);
+    expect(prompt).toMatch(/never the final answer/i);
+    expect(prompt).toMatch(/teaching vocabulary, not a set of optional features/i);
+  });
+
+  it("asks for the stage and evidence-backed stage advancement in the JSON shape", () => {
+    expect(prompt).toMatch(/"stage": "encounter"\|"understand"\|"construct"\|"apply"\|"transfer"\|"master"/);
+    expect(prompt).toMatch(/"stage_advance"/);
+    expect(prompt).toMatch(/ready:true REQUIRES evidence/i);
   });
 
   it("enumerates the 8 geometry object kinds so the LLM names real ones", () => {

@@ -47,6 +47,7 @@ export interface TutorStylePreference {
 export const TUTOR_TOOL_IDS = [
   "boardWriting",
   "boardEditing",
+  "studyWidgets",
   "threads",
   "knowledgeSearch",
   "pdfKnowledge",

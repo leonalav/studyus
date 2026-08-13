@@ -55,6 +55,11 @@ import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
 import type { MathNode, FunctionNode, OperatorNode, SymbolNode } from "mathjs";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
+import type { WidgetIntent, WidgetState } from "./widgets/types";
+import { WIDGET_LABEL } from "./widgets/types";
+import { validateWidgetIntent } from "./widgets/validate";
+import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
+import { MASTERY_STAGES, isMasteryStage, type MasteryStage } from "./mastery";
 import {
   buildTutorPreferenceReminder,
   loadPreferences,
@@ -62,8 +67,8 @@ import {
   type TutorToolPermissions,
 } from "./preferences";
 
-export const TUTOR_PROMPT_VERSION = "tutor_v6";
-export const TUTOR_SCHEMA_VERSION = "tutor_turn_v3";
+export const TUTOR_PROMPT_VERSION = "tutor_v7";
+export const TUTOR_SCHEMA_VERSION = "tutor_turn_v4";
 export const ONBOARDING_PROMPT_VERSION = "tutor_onboarding_v1";
 export const ONBOARDING_SCHEMA_VERSION = "onboarding_questions_v1";
 export const MAX_HINT_LEVEL = 3;
@@ -86,6 +91,7 @@ export type BoardBlockSpec =
   | { kind: "bullets"; items: string[] }
   | { kind: "latex"; tex: string; caption?: string }
   | { kind: "visualization"; intent: VisualizationIntent }
+  | { kind: "widget"; intent: WidgetIntent }
   | { kind: "callout"; text: string };
 
 export interface VisualizationStatePatch {
@@ -111,7 +117,7 @@ export interface BoardTargetSpec {
   targetIndex?: number;
   targetAnchor?: string;
   targetMatchText?: string;
-  targetKind?: "title" | "text" | "bullets" | "latex" | "visualization" | "callout" | "row";
+  targetKind?: "title" | "text" | "bullets" | "latex" | "visualization" | "widget" | "callout" | "row";
 }
 
 export type BoardOp =
@@ -120,11 +126,13 @@ export type BoardOp =
   | { op: "write_bullets"; items: string[] }
   | { op: "write_latex"; tex: string; caption?: string }
   | { op: "visualize"; intent: VisualizationIntent }
+  | { op: "place_widget"; intent: WidgetIntent }
   | { op: "write_callout"; text: string }
   | ({ op: "replace_block"; block: BoardBlockSpec } & BoardTargetSpec)
   | ({ op: "insert_after"; block: BoardBlockSpec } & BoardTargetSpec)
   | ({ op: "delete_block" } & BoardTargetSpec)
   | ({ op: "update_visualization"; intent?: VisualizationIntent; statePatch?: VisualizationStatePatch } & BoardTargetSpec)
+  | ({ op: "update_widget"; intent: WidgetIntent } & BoardTargetSpec)
   | ({ op: "revise_text"; find: string; replace: string; replaceAll?: boolean } & BoardTargetSpec)
   | {
       op: "spawn_thread";
@@ -146,6 +154,19 @@ export interface TutorTurn {
   diagnosis?: TutorDiagnosis;
   evidenceRefs: string[];
   requestedLevel?: number;
+  /** The mastery stage the tutor is teaching in on this turn. */
+  stage?: MasteryStage;
+  /** The tutor's judgement on whether the current stage's exit condition is
+   *  met. Advancement is a deliberate, evidenced decision — never the result of
+   *  the learner having clicked "next". */
+  stageAdvance?: TutorStageAdvance;
+}
+
+export interface TutorStageAdvance {
+  /** True only when the current stage's exit condition is genuinely satisfied. */
+  ready: boolean;
+  /** The observed evidence for that judgement, in one line. */
+  evidence: string;
 }
 
 export interface TutorEvidenceCard {
@@ -350,9 +371,9 @@ function visualizationTool(intent: VisualizationIntent): keyof TutorToolPermissi
 }
 
 function blockAllowedByTools(block: BoardBlockSpec, tools: TutorToolPermissions): boolean {
-  return block.kind === "visualization"
-    ? tools[visualizationTool(block.intent)]
-    : tools.boardWriting;
+  if (block.kind === "visualization") return tools[visualizationTool(block.intent)];
+  if (block.kind === "widget") return tools.studyWidgets;
+  return tools.boardWriting;
 }
 
 /**
@@ -423,6 +444,10 @@ export function enforceTutorToolPolicy(
         return tools.boardWriting ? [op] : [];
       case "visualize":
         return tools[visualizationTool(op.intent)] ? [op] : [];
+      case "place_widget":
+        return tools.studyWidgets ? [op] : [];
+      case "update_widget":
+        return tools.boardEditing && tools.studyWidgets ? [op] : [];
       case "replace_block":
       case "insert_after":
         return tools.boardEditing && blockAllowedByTools(op.block, tools) ? [op] : [];
@@ -608,7 +633,7 @@ const CALIBRATION = ["under", "over", "accurate"] as const;
 function validateBoardBlockSpec(value: unknown, path: string, errors: string[]): BoardBlockSpec | null {
   const rec = asRecord(value, path, errors);
   if (!rec) return null;
-  const kind = asEnum(rec.kind, ["title", "text", "bullets", "latex", "visualization", "callout"], `${path}.kind`, errors);
+  const kind = asEnum(rec.kind, ["title", "text", "bullets", "latex", "visualization", "widget", "callout"], `${path}.kind`, errors);
   if (!kind) return null;
   const textOf = (key: string): string | null => asNonEmptyString(rec[key], `${path}.${key}`, errors);
   const captionOf = (key: string): string | undefined => {
@@ -656,7 +681,32 @@ function validateBoardBlockSpec(value: unknown, path: string, errors: string[]):
       }
       return { kind, intent: intent as VisualizationIntent };
     }
+    case "widget": {
+      const intent = validateWidgetIntentField(rec.intent, path, errors);
+      if (!intent) return null;
+      return { kind, intent };
+    }
   }
+}
+
+/**
+ * Validate a study-widget intent at the protocol boundary.
+ *
+ * Widgets are the tutor's teaching vocabulary, so an invalid one is a hard
+ * schema failure the repair loop reports back — never a silently dropped or
+ * half-rendered card.
+ */
+function validateWidgetIntentField(value: unknown, path: string, errors: string[]): WidgetIntent | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(`${path}.intent must be a widget intent object`);
+    return null;
+  }
+  const result = validateWidgetIntent(value);
+  if (!result.valid) {
+    errors.push(`${path}.intent: ${result.reason}`);
+    return null;
+  }
+  return value as WidgetIntent;
 }
 
 function validateVisualizationStatePatch(value: unknown, path: string, errors: string[]): VisualizationStatePatch | null {
@@ -794,7 +844,7 @@ function validateBoardTarget(rec: Record<string, unknown>, path: string, errors:
   if (rec.targetKind !== undefined && rec.targetKind !== null) {
     const kind = asEnum(
       rec.targetKind,
-      ["title", "text", "bullets", "latex", "visualization", "callout", "row"],
+      ["title", "text", "bullets", "latex", "visualization", "widget", "callout", "row"],
       `${path}.targetKind`,
       errors
     );
@@ -820,11 +870,13 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
     "write_bullets",
     "write_latex",
     "visualize",
+    "place_widget",
     "write_callout",
     "replace_block",
     "insert_after",
     "delete_block",
     "update_visualization",
+    "update_widget",
     "revise_text",
     "spawn_thread",
   ], `${path}.op`, errors);
@@ -875,6 +927,17 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
         return null;
       }
       return { op, intent: intent as VisualizationIntent };
+    }
+    case "place_widget": {
+      const intent = validateWidgetIntentField(rec.intent, path, errors);
+      if (!intent) return null;
+      return { op, intent };
+    }
+    case "update_widget": {
+      const target = validateBoardTarget(rec, path, errors);
+      const intent = validateWidgetIntentField(rec.intent, path, errors);
+      if (!target || !intent) return null;
+      return { op, ...target, intent } as BoardOp;
     }
     case "replace_block":
     case "insert_after": {
@@ -1021,6 +1084,35 @@ export function validateTutorPayload(
     }
   }
 
+  let stage: MasteryStage | undefined;
+  if (root.stage !== undefined && root.stage !== null) {
+    if (!isMasteryStage(root.stage)) {
+      errors.push(`stage must be one of: ${MASTERY_STAGES.join(", ")} (got ${JSON.stringify(root.stage)})`);
+    } else {
+      stage = root.stage;
+    }
+  }
+
+  let stageAdvance: TutorStageAdvance | undefined;
+  const rawAdvance = root.stage_advance ?? root.stageAdvance;
+  if (rawAdvance !== undefined && rawAdvance !== null) {
+    const advance = asRecord(rawAdvance, "stage_advance", errors);
+    if (advance) {
+      if (typeof advance.ready !== "boolean") {
+        errors.push("stage_advance.ready must be a boolean");
+      } else {
+        const evidence = asNonEmptyString(advance.evidence, "stage_advance.evidence", errors);
+        // Advancing without naming the evidence is exactly the "clicked next"
+        // failure the mastery ladder exists to prevent.
+        if (advance.ready && !evidence) {
+          errors.push("stage_advance.ready=true requires stage_advance.evidence describing the observed exit condition");
+        } else if (evidence) {
+          stageAdvance = { ready: advance.ready, evidence };
+        }
+      }
+    }
+  }
+
   if (errors.length) return { ok: false, errors };
   return {
     ok: true,
@@ -1030,6 +1122,8 @@ export function validateTutorPayload(
       diagnosis,
       evidenceRefs,
       requestedLevel,
+      stage,
+      stageAdvance,
     },
   };
 }
@@ -1502,6 +1596,8 @@ export function buildTutorUserPrompt(params: {
       : `PHASE: in_flow — the learner is actively working with you. Continue from their latest message.`
   );
 
+  parts.push(formatMasteryDirective());
+
   parts.push(`LEARNER MODEL SUMMARY:\n${params.learnerSummary}`);
 
   const curriculumScope = params.curriculumScope ?? [];
@@ -1563,7 +1659,8 @@ export function buildTutorUserPrompt(params: {
 
   parts.push(
     `GLOBAL BEHAVIOR: The chalkboard is the primary teaching surface and interactive lesson. Do not teach, explain the lesson, or ask instructional/content questions in speech. Put teaching steps, Socratic questions, checks for understanding, examples, definitions, and practice prompts onto the chalkboard using board_ops. Speech must stay to a brief acknowledgement or transition (for example, “I put that on the board”). Only use speech for a direct learner clarification when no board content is needed. ` +
-    `First decide whether changing the board is pedagogically necessary for this exact turn. Greetings, thanks, acknowledgements, social chat, navigation questions, and replies that are already clear in short speech MUST return board_ops exactly []. Do not create an equation, graph, diagram, chart, text block, callout, or thread merely because a chalkboard is available. ` +
+    `First decide whether changing the board is pedagogically necessary for this exact turn. Greetings, thanks, acknowledgements, social chat, navigation questions, and replies that are already clear in short speech MUST return board_ops exactly []. Do not create an equation, graph, diagram, chart, text block, callout, widget, or thread merely because a chalkboard is available. ` +
+    `When teaching IS happening, the study widgets are your teaching vocabulary, not a set of optional features. Prefer the widget that matches your pedagogical move over plain text: a check for understanding is a question widget, not a sentence; a worked example is an example widget with a reason on every step; a learner error is a mistake_check that diagnoses it; the learner's turn to work is a scratchpad. A turn that teaches with paragraphs where a widget exists for the move is a worse turn. ` +
     `Use a board operation only when the learner explicitly requests a board rendering/edit or when a specific visual/formal representation materially improves understanding and cannot be conveyed as clearly in the spoken response alone. If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
     `For every substantive explanation, layer simple plain-language intuition first, then precise terminology, assumptions, rigorous reasoning, and meaningful equations or worked steps; define jargon and connect formal details back to the intuitive idea. ` +
     `When a board representation is necessary, choose the smallest relevant set of equations, function graphs, data charts, or domain-faithful diagrams/scientific figures. Never add decorative, redundant, irrelevant, or semantically misleading visuals, and obey the enabled tool permissions. ` +
@@ -1577,7 +1674,9 @@ export function buildTutorUserPrompt(params: {
     `Return JSON only, in this exact shape:\n` +
       `{\n` +
       `  "speech": "<your reply to the learner — one or two sentences, direct and helpful. When the learner explicitly asked for a visualization, confirm what you drew instead of asking a question>",\n` +
-      `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text" | "spawn_thread", ...fields }, ... ],\n` +
+      `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "place_widget" | "update_widget" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text" | "spawn_thread", ...fields }, ... ],\n` +
+      `  "stage": "encounter"|"understand"|"construct"|"apply"|"transfer"|"master" /* the mastery stage you are teaching in this turn */,\n` +
+      `  "stage_advance": { "ready": boolean, "evidence": "<what the learner did that satisfies this stage's exit condition>" } /* optional; ready:true REQUIRES evidence */,\n` +
       `  "diagnosis": { "misconceptions": [string], "weak_criteria": [string], "hint_dependence": "none"|"low"|"medium"|"high", "calibration": "under"|"over"|"accurate" } /* optional */,\n` +
       `  "evidence_refs": [ "<one of the supplied E-handles>" ],\n` +
       `  "requested_level": <0..${MAX_HINT_LEVEL}> /* optional: request a higher unlocked hint level when the learner is stuck */\n` +
@@ -1587,6 +1686,10 @@ export function buildTutorUserPrompt(params: {
       `- write_bullets: { "op", "items": string[] }\n` +
       `- write_latex: { "op", "tex": string, "caption"?: string }\n` +
       `- spawn_thread: { "op", "title": string, "reason": string, "initial_blocks": BoardBlockSpec[] } — creates a logged child board in Threads without leaving the current board. Use it only when a substantial, separable investigation would clutter or derail the current explanation; never spawn a thread for a routine answer. Create at most one per turn, keep title/reason learner-facing, and include at most ${MAX_THREAD_INITIAL_BLOCKS} useful starter blocks.\n` +
+      `- place_widget: { "op", "intent": WidgetIntent } — appends a new study widget. This is how you teach: every widget below is a specific pedagogical move with its own required fields.\n` +
+      `- update_widget: { "op", targetAnchor?|targetIndex?|targetMatchText?, "intent": WidgetIntent } — reconfigures an existing widget in place, keeping the learner's answers and interaction state. Use it to mark the next roadmap step current, add a deeper hint level, or reveal a mistake_check correction after the learner has responded — never append a second copy of a widget you already placed.\n` +
+      `WIDGET CATALOG — a widget "intent" is keyed on its "kind" field (visualization intents remain keyed on "type"). Graphs, geometry/points, and equations are NOT widgets: emit those through visualize as "function", "geometry", and "equation" intents.\n` +
+      `${formatWidgetCatalog()}\n` +
       `- visualize: { "op", "intent": VisualizationIntent } — appends a new visualization block. Use this immediately when the learner explicitly asks for a diagram, graph, plot, or structure. ` +
       `Describe what the figure IS, not how to draw it; the renderer handles rendering. ` +
       `Geometry figures are auto-fitted to the available board space from their actual objects. Do not emit a geometry "viewport"; this build intentionally ignores it so shapes stay tight, fully visible, and draggable without a big empty interaction rectangle. ` +
@@ -1636,7 +1739,7 @@ export function buildTutorUserPrompt(params: {
       `Function plots may also specify xLabel, yLabel, showLegend, sampling:{samples?,adaptive?}, and annotations. Omit showGrid — the chalkboard background already provides the visual grid. Function annotation kinds: point (x, y?, label?, labelLatex?), root (expressionId, nearX?, label?), extremum (expressionId, nearX?, label?), intersection (expressionIds:[id,id], nearX?, label?), tangent (expressionId, atX, label?), area (expressionId, fromX, toX, label?), asymptote (orientation:"vertical"|"horizontal", value, label?). graph3d is rendered in a dedicated zoomable 3D viewport; use surfaces of kind surface, parametric_surface, parametric_curve, point (at:[x,y,z], label?, color?), point_cloud, or vector_field. Keep 3D sampling modest (normally 20–60 steps per mesh axis); the renderer enforces one aggregate budget across all meshes and vector fields. ` +
       `Charts support names, per-series colors, axis labels, explicit ranges, legend/tooltip toggles, annotations, and zoomable local viewports. Use chartType bar/line/scatter/histogram/box/heatmap/contour/pie/donut/radar/polar_line/polar_scatter/sankey/treemap/sunburst/candlestick/ohlc. Prefer series over legacy data; legacy data is valid only for bar, line, and scatter. Every series kind MUST exactly equal chartType (including donut, contour, polar_line, polar_scatter, and ohlc). Series kinds: bar|line with non-empty values, scatter with non-empty points, histogram/box with non-empty values, heatmap/contour with exactly one of non-empty points or rectangular grid{x,y,values}, pie/donut with slices{name,value,color?}, radar with values matching a non-empty indicators array, polar_* with points, sankey with nodes/links, treemap/sunburst with tree nodes, candlestick/ohlc with candles. Keep datasets concise and let the learner's requested naming, color, and range choices flow directly into series names/colors and axis min/max when stated. ` +
       `Graph theory supports node and edge styling plus layouts. Nodes may specify label, color, shape, size, at, group, locked; edges may specify label, weight, color, width, style, directed, curvature; and the network may specify layout and directed/style defaults. ` +
-      `The chalkboard is a notebook, not a chat log: when revising or refining existing content, prefer edit operations over appending duplicates. Every top-level block has a stable anchor in CURRENT BOARD BLOCKS. Prefer targetAnchor, fall back to targetIndex, and use targetMatchText (optionally with targetKind) for selection-based editing when you need to find a block by its visible content. Edit ops: replace_block { "op", targetAnchor?|targetIndex?|targetMatchText?, targetKind?, "block": BoardBlockSpec }, insert_after { same target fields, "block": BoardBlockSpec }, delete_block { same target fields }, update_visualization { same target fields, "intent"?: VisualizationIntent, "statePatch"?: { "pointPositions"?: { id:[x,y] }, "nodePositions"?: { id:[x,y] }, "graph3dCamera"?: { "position":[x,y,z], "target":[x,y,z] }, "chartViewport"?: { "xStart"?: number, "xEnd"?: number, "yStart"?: number, "yEnd"?: number }, "hiddenSeries"?: string[], "seriesStyleOverrides"?: { seriesId: { "color"?: string, "opacity"?: number } }, "scienceLayout"?: string, "equationValue"?: string } }, revise_text { same target fields, "find": string, "replace": string, "replaceAll"?: boolean }. Use revise_text for diff-style changes inside long title/text/callout/latex blocks, and use update_visualization to move geometry points, preserve pathway/network node positions, preserve chart zoom/legend/style state, preserve 3D camera state, revise graphs, or replace a prior visualization while keeping its place on the board. BoardBlockSpec kinds are title/text/bullets/latex/visualization/callout. ` +
+      `The chalkboard is a notebook, not a chat log: when revising or refining existing content, prefer edit operations over appending duplicates. Every top-level block has a stable anchor in CURRENT BOARD BLOCKS. Prefer targetAnchor, fall back to targetIndex, and use targetMatchText (optionally with targetKind) for selection-based editing when you need to find a block by its visible content. Edit ops: replace_block { "op", targetAnchor?|targetIndex?|targetMatchText?, targetKind?, "block": BoardBlockSpec }, insert_after { same target fields, "block": BoardBlockSpec }, delete_block { same target fields }, update_visualization { same target fields, "intent"?: VisualizationIntent, "statePatch"?: { "pointPositions"?: { id:[x,y] }, "nodePositions"?: { id:[x,y] }, "graph3dCamera"?: { "position":[x,y,z], "target":[x,y,z] }, "chartViewport"?: { "xStart"?: number, "xEnd"?: number, "yStart"?: number, "yEnd"?: number }, "hiddenSeries"?: string[], "seriesStyleOverrides"?: { seriesId: { "color"?: string, "opacity"?: number } }, "scienceLayout"?: string, "equationValue"?: string } }, revise_text { same target fields, "find": string, "replace": string, "replaceAll"?: boolean }. Use revise_text for diff-style changes inside long title/text/callout/latex blocks, and use update_visualization to move geometry points, preserve pathway/network node positions, preserve chart zoom/legend/style state, preserve 3D camera state, revise graphs, or replace a prior visualization while keeping its place on the board. BoardBlockSpec kinds are title/text/bullets/latex/visualization/widget/callout (a widget spec is { "kind":"widget", "intent": WidgetIntent }). ` +
       `Use physics for force/vector/ray scenes (including mechanics decorations like ground, incline, spring, pivot, and axes), biology for cell/DNA/pathway scenes (pathways may specify layout and style), circuit for circuit diagrams, and chemistry for atoms/bonds/reaction scenes. For chemistry structures, prefer chemistry over geometry; prefer reactants/products/agents or a molecule representation, and do not add angle or bond-type prose labels unless explicitly requested. Only use "diagram" or "graph_theory" when the figure is genuinely that domain — never force geometry into another type.\n` +
       `Emit at most ${MAX_BOARD_OPS_PER_TURN} board operations.`
   );
@@ -1664,6 +1767,11 @@ function summarizeBoardBlocks(board: BoardDoc): string {
             : block.intent.type;
           return `${prefix} kind=visualization (${block.intent.type}): ${excerpt(label)}`;
         }
+        case "widget": {
+          const label = block.intent.title ?? WIDGET_LABEL[block.intent.kind];
+          const interaction = summarizeWidgetInteraction(block.state);
+          return `${prefix} kind=widget (${block.intent.kind}): ${excerpt(label)}${interaction ? ` · learner: ${interaction}` : ""}`;
+        }
         case "callout":
           return `${prefix} kind=callout: ${excerpt(block.text)}`;
         case "row":
@@ -1676,6 +1784,30 @@ function summarizeBoardBlocks(board: BoardDoc): string {
 function excerpt(text: string): string {
   const clean = text.replace(/\s+/g, " ").trim();
   return clean.length > 80 ? `${clean.slice(0, 80)}…` : clean;
+}
+
+/**
+ * What the learner actually did with a widget, folded back into the board
+ * summary. Without this the agent places interactive widgets and then teaches
+ * blind, re-asking questions the learner already answered.
+ */
+function summarizeWidgetInteraction(state?: WidgetState): string {
+  if (!state) return "";
+  const parts: string[] = [];
+  if (state.selectedOptionId) parts.push(`chose "${state.selectedOptionId}"`);
+  if (typeof state.responseText === "string" && state.responseText.trim()) {
+    parts.push(`wrote "${excerpt(state.responseText)}"`);
+  }
+  if (typeof state.sliderValue === "number") parts.push(`slider at ${state.sliderValue}`);
+  if (typeof state.hintLevelOpened === "number" && state.hintLevelOpened > 0) {
+    parts.push(`opened hint level ${state.hintLevelOpened}`);
+  }
+  if (Array.isArray(state.revealedIds) && state.revealedIds.length > 0) {
+    parts.push(`revealed ${state.revealedIds.length} item(s)`);
+  }
+  if (state.submitted) parts.push(state.correct === true ? "answered correctly" : state.correct === false ? "answered incorrectly" : "submitted");
+  else if (parts.length === 0) return "not yet answered";
+  return parts.join(", ");
 }
 
 /* ─────────────────────────────────────────────────────────────

@@ -13,6 +13,8 @@ import {
 import { buildSubBoard, boardToMarkdown, DOMAIN_META, type BoardDoc } from "../../data/boards";
 import { validateVisualizationIntent } from "../../lib/visualization/validate";
 import type { VisualizationIntent, VisualizationState } from "../../lib/visualization/types";
+import { sanitizeWidgetState, validateWidgetIntent } from "../../lib/widgets/validate";
+import { WIDGET_LABEL, type WidgetIntent, type WidgetState } from "../../lib/widgets/types";
 import {
   askTutorTurn,
   ensureChalkboardSession,
@@ -277,6 +279,30 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
                   blk.id === blockId && blk.kind === "visualization"
                     ? { ...blk, state }
                     : blk
+                ),
+              }
+            : b
+        )
+      );
+    },
+    [activeId]
+  );
+
+  // Learner interaction with a study widget (answers, slider position, opened
+  // hint levels) is persisted onto the owning block. It survives a reopen and
+  // is summarized back into the tutor prompt, so the agent teaches against what
+  // the learner actually did rather than guessing.
+  const saveWidgetState = useCallback(
+    (blockId: string, state: WidgetState) => {
+      const safe = sanitizeWidgetState(state);
+      if (!safe) return;
+      setBoards((current) =>
+        current.map((b) =>
+          b.id === activeId
+            ? {
+                ...b,
+                blocks: b.blocks.map((blk) =>
+                  blk.id === blockId && blk.kind === "widget" ? { ...blk, state: safe } : blk
                 ),
               }
             : b
@@ -625,6 +651,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           initialStrokes={strokeMap[board.id]}
           onStrokesChange={saveStrokes}
           onBlockStateChange={saveBlockState}
+          onWidgetStateChange={saveWidgetState}
         />
       </div>
 
@@ -810,6 +837,20 @@ function activityForBoardOp(op: BoardOp, index: number, total: number): AgentAct
         detail: "Applying validated visual data and interaction changes",
         progress,
       };
+    case "place_widget":
+      return {
+        kind: "visualizing",
+        label: `Placing a ${WIDGET_LABEL[op.intent.kind].toLowerCase()}`,
+        detail: "Adding an interactive study widget to the board",
+        progress,
+      };
+    case "update_widget":
+      return {
+        kind: "revising",
+        label: `Updating the ${WIDGET_LABEL[op.intent.kind].toLowerCase()}`,
+        detail: "Reconfiguring the study widget in place",
+        progress,
+      };
     case "revise_text":
       return {
         kind: "revising",
@@ -903,6 +944,13 @@ function toolCallToBlock(call: { name: string; args: Record<string, any> }, doma
         intent: intent as VisualizationIntent,
       };
     }
+    case "place_widget": {
+      // Re-validate at the placement boundary: a corrupt or drifted widget
+      // payload must never reach the chalkboard as a half-configured card.
+      const intent = args.intent;
+      if (!validateWidgetIntent(intent).valid) return null;
+      return { id, kind: "widget" as const, intent: intent as WidgetIntent };
+    }
     case "write_callout":
       return { id, kind: "callout" as const, text: text("text") };
     default:
@@ -931,6 +979,10 @@ function blockSpecToBlock(spec: Record<string, unknown>, domain: BoardDoc["domai
       const result = validateVisualizationIntent(spec.intent);
       if (!result.valid) return null;
       return { id, kind: "visualization" as const, intent: spec.intent as VisualizationIntent };
+    }
+    case "widget": {
+      if (!validateWidgetIntent(spec.intent).valid) return null;
+      return { id, kind: "widget" as const, intent: spec.intent as WidgetIntent };
     }
     case "callout":
       return { id, kind: "callout" as const, text: String(spec.text ?? "") };
@@ -981,9 +1033,69 @@ function blockSearchText(block: BoardDoc["blocks"][number]): string {
       const caption = "caption" in block.intent ? block.intent.caption ?? "" : "";
       return [block.intent.type, title, caption].join(" ");
     }
+    case "widget":
+      return widgetSearchText(block.intent);
     case "row":
       return block.children.map(blockSearchText).join(" \n ");
   }
+}
+
+/** Searchable text for a widget, so targetMatchText can find one by its visible
+ *  content the same way it finds a text block. */
+function widgetSearchText(intent: WidgetIntent): string {
+  const parts: string[] = [intent.kind, WIDGET_LABEL[intent.kind], intent.title ?? "", intent.note ?? ""];
+  switch (intent.kind) {
+    case "roadmap":
+      parts.push(intent.heading ?? "", ...intent.steps.map((step) => step.label));
+      break;
+    case "concept_card":
+      parts.push(intent.term, intent.definition);
+      break;
+    case "slider":
+      parts.push(intent.label, intent.parameter);
+      break;
+    case "animation":
+      parts.push(...intent.frames.map((frame) => frame.caption));
+      break;
+    case "comparison":
+      parts.push(...intent.columns.map((column) => column.title), intent.takeaway ?? "");
+      break;
+    case "question":
+    case "retrieval_check":
+      parts.push(intent.prompt);
+      break;
+    case "hint":
+      parts.push(...intent.steps.map((step) => step.label));
+      break;
+    case "scratchpad":
+      parts.push(intent.prompt ?? "", intent.starter ?? "");
+      break;
+    case "annotation":
+      parts.push(intent.targetLabel ?? "", ...intent.marks.map((mark) => mark.target));
+      break;
+    case "reveal":
+      parts.push(intent.prompt ?? "", ...intent.items.map((item) => item.label));
+      break;
+    case "example":
+      parts.push(intent.problem ?? "", ...intent.steps.map((step) => step.why));
+      break;
+    case "mistake_check":
+      parts.push(intent.prompt ?? "", intent.misconception ?? "");
+      break;
+    case "memory_hook":
+      parts.push(intent.hook);
+      break;
+    case "challenge":
+      parts.push(intent.prompt);
+      break;
+    case "reflection":
+      parts.push(intent.prompt);
+      break;
+    case "mastery_card":
+      parts.push(intent.concept);
+      break;
+  }
+  return parts.filter(Boolean).join(" ");
 }
 
 function resolveBoardTargetIndex(board: BoardDoc, op: Record<string, any>): number {
@@ -1065,6 +1177,18 @@ function applyBoardOp(board: BoardDoc, op: Record<string, any>, domain: BoardDoc
         intent: (op.intent as VisualizationIntent | undefined) ?? target.intent,
         state: mergeVisualizationState(target.state, op.statePatch),
       };
+      return { ...board, blocks };
+    }
+    case "update_widget": {
+      const index = resolveBoardTargetIndex(board, op);
+      if (index < 0) return board;
+      const target = board.blocks[index];
+      if (target.kind !== "widget") return board;
+      if (!validateWidgetIntent(op.intent).valid) return board;
+      const blocks = board.blocks.slice();
+      // Reconfiguring a widget keeps the learner's interaction state: a tutor
+      // rewording a question must not silently erase the answer they gave.
+      blocks[index] = { ...target, intent: op.intent as WidgetIntent, state: target.state };
       return { ...board, blocks };
     }
     case "revise_text": {

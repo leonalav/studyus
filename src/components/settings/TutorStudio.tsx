@@ -87,6 +87,7 @@ const NAV: Array<{ id: StudioSection; label: string; icon: typeof Bot }> = [
 const TOOL_META: Record<TutorToolId, { label: string; description: string; group: string }> = {
   boardWriting: { label: "Board writing", description: "Titles, notes, bullets, LaTeX and callouts", group: "Chalkboard" },
   boardEditing: { label: "Board editing", description: "Replace, insert, delete and revise existing blocks", group: "Chalkboard" },
+  studyWidgets: { label: "Study widgets", description: "Roadmaps, concept cards, questions, hints, examples, retrieval checks and mastery cards", group: "Chalkboard" },
   threads: { label: "Thread creation", description: "Create logged child boards for separable investigations", group: "Chalkboard" },
   knowledgeSearch: { label: "Knowledge search", description: "Retrieve validated excerpts from selected curriculum", group: "Sources" },
   pdfKnowledge: { label: "Imported PDF reading", description: "Use transcribed content from imported curriculum PDFs", group: "Sources" },

@@ -208,6 +208,104 @@ describe("Tutor turn schema validation", () => {
     expect(res.ok).toBe(false);
   });
 
+  it("accepts the widget board operations and validates the widget intent", () => {
+    const res = validateTutorPayload(validTurn({
+      board_ops: [
+        {
+          op: "place_widget",
+          intent: {
+            kind: "question",
+            prompt: "As h shrinks toward 0, what is the secant line becoming?",
+            format: "multiple_choice",
+            options: [
+              { id: "a", label: "The tangent line at that point", correct: true },
+              { id: "b", label: "A vertical line", misconception: "reads h → 0 as the run becoming the whole graph" },
+            ],
+          },
+        },
+        {
+          op: "update_widget",
+          targetAnchor: "agent-widget-1",
+          intent: {
+            kind: "roadmap",
+            steps: [
+              { id: "s1", label: "Encounter", state: "done" },
+              { id: "s2", label: "Understand", state: "current" },
+            ],
+          },
+        },
+      ],
+    }), EVIDENCE);
+
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value.boardOps.map((op) => op.op)).toEqual(["place_widget", "update_widget"]);
+    }
+  });
+
+  it("rejects a widget whose pedagogical contract is broken", () => {
+    // Structurally a question, but no option is marked correct, so it can never
+    // diagnose anything. It must fail at the protocol boundary.
+    const res = validateTutorPayload(validTurn({
+      board_ops: [{
+        op: "place_widget",
+        intent: {
+          kind: "question",
+          prompt: "Which is the derivative?",
+          format: "multiple_choice",
+          options: [{ id: "a", label: "2x" }, { id: "b", label: "x^2" }],
+        },
+      }],
+    }), EVIDENCE);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.errors.join(" ")).toMatch(/board_ops\[0\]\.intent/);
+  });
+
+  it("accepts a widget block inside replace_block and spawn_thread specs", () => {
+    const res = validateTutorPayload(validTurn({
+      board_ops: [{
+        op: "replace_block",
+        targetIndex: 0,
+        block: {
+          kind: "widget",
+          intent: { kind: "memory_hook", hook: "Derivative = slope of the tangent = limit of the secant." },
+        },
+      }],
+    }), EVIDENCE);
+    expect(res.ok).toBe(true);
+  });
+
+  it("records the mastery stage and requires evidence before advancing", () => {
+    const withStage = validateTutorPayload(validTurn({
+      stage: "construct",
+      stage_advance: { ready: true, evidence: "Solved the second difference quotient unaided after one level-1 hint." },
+    }), EVIDENCE);
+    expect(withStage.ok).toBe(true);
+    if (withStage.ok) {
+      expect(withStage.value.stage).toBe("construct");
+      expect(withStage.value.stageAdvance?.ready).toBe(true);
+    }
+
+    // Advancement without evidence is exactly the click-through failure mode.
+    const unevidenced = validateTutorPayload(validTurn({
+      stage: "construct",
+      stage_advance: { ready: true },
+    }), EVIDENCE);
+    expect(unevidenced.ok).toBe(false);
+    if (!unevidenced.ok) expect(unevidenced.errors.join(" ")).toMatch(/stage_advance\.ready=true requires/);
+
+    // Declining to advance needs no evidence.
+    const notReady = validateTutorPayload(validTurn({
+      stage: "apply",
+      stage_advance: { ready: false, evidence: "Still leaning on hints for the chain rule." },
+    }), EVIDENCE);
+    expect(notReady.ok).toBe(true);
+
+    const badStage = validateTutorPayload(validTurn({ stage: "graduated" }), EVIDENCE);
+    expect(badStage.ok).toBe(false);
+  });
+
   it("validates the optional diagnosis object", () => {
     const res = validateTutorPayload(
       validTurn({
@@ -415,6 +513,50 @@ describe("Tutor Studio runtime policy", () => {
       expect(result.boardOps).toHaveLength(mappings.length - 1);
       expect(result.boardOps).not.toContainEqual({ op: "visualize", intent: blockedIntent });
     }
+  });
+
+  it("gates study widgets behind their own permission", () => {
+    const widgetIntent = { kind: "scratchpad" as const, prompt: "Your turn. Expand (x+h)^2." };
+    const turn: TutorTurn = {
+      speech: "Widgets",
+      evidenceRefs: [],
+      boardOps: [
+        { op: "place_widget", intent: widgetIntent },
+        { op: "update_widget", targetIndex: 0, intent: widgetIntent },
+        { op: "write_text", text: "still allowed" },
+      ],
+    };
+
+    expect(enforceTutorToolPolicy(turn, DEFAULT_TUTOR.tools).boardOps).toHaveLength(3);
+
+    const noWidgets = enforceTutorToolPolicy(turn, { ...DEFAULT_TUTOR.tools, studyWidgets: false });
+    expect(noWidgets.boardOps).toEqual([{ op: "write_text", text: "still allowed" }]);
+
+    // Updating a widget also needs board editing, since it rewrites a block.
+    const noEditing = enforceTutorToolPolicy(turn, { ...DEFAULT_TUTOR.tools, boardEditing: false });
+    expect(noEditing.boardOps.map((op) => op.op)).toEqual(["place_widget", "write_text"]);
+  });
+
+  it("strips widget blocks from thread specs when widgets are disabled", () => {
+    const turn: TutorTurn = {
+      speech: "Thread",
+      evidenceRefs: [],
+      boardOps: [{
+        op: "spawn_thread",
+        title: "Chain rule detour",
+        reason: "Separable investigation",
+        initialBlocks: [
+          { kind: "title", text: "Chain rule detour" },
+          { kind: "widget", intent: { kind: "concept_card", term: "Chain rule", definition: "Differentiate the outside, then multiply by the derivative of the inside." } },
+        ],
+      }],
+    };
+
+    const allowed = enforceTutorToolPolicy(turn, DEFAULT_TUTOR.tools).boardOps[0];
+    expect(allowed.op === "spawn_thread" && allowed.initialBlocks).toHaveLength(2);
+
+    const blocked = enforceTutorToolPolicy(turn, { ...DEFAULT_TUTOR.tools, studyWidgets: false }).boardOps[0];
+    expect(blocked.op === "spawn_thread" && blocked.initialBlocks).toHaveLength(1);
   });
 
   it("sends at most three valid images only when tool, privacy, and vision gates all permit it", () => {
