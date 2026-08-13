@@ -17,6 +17,7 @@ import {
 import type { SessionThreadLog } from "../../lib/tutor";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
+import { WIDGET_LABEL } from "../../lib/widgets/types";
 import { THEMES, FONTS, type BoardTheme } from "./Chalkboard";
 import { startLiveDictation, type LiveDictation } from "../../lib/voice";
 
@@ -191,6 +192,12 @@ function MiniBlock({ block }: { block: Block }) {
     case "visualization": {
       const title = "title" in block.intent && block.intent.title ? block.intent.title : block.intent.type;
       return <div className="inline-block rounded-lg border border-current/50 px-3 py-2 text-[16px] opacity-80">∿ {title}</div>;
+    }
+    case "widget": {
+      // Thread previews are static thumbnails, so a widget is summarized by its
+      // label rather than rendered interactively.
+      const title = block.intent.title ?? WIDGET_LABEL[block.intent.kind];
+      return <div className="inline-block rounded-lg border border-current/50 px-3 py-2 text-[16px] opacity-80">▤ {title}</div>;
     }
     case "row":
       return <div className="grid grid-cols-2 gap-8">{block.children.map((child) => <MiniBlock key={child.id} block={child} />)}</div>;

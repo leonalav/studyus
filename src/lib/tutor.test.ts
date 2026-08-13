@@ -14,6 +14,9 @@ import {
   replaceSessionTranscript,
   setSessionHintLevel,
   getSessionHintLevel,
+  getSessionMasteryStage,
+  setSessionMasteryStage,
+  resolveNextMasteryStage,
   MAX_HINT_LEVEL,
   MAX_BOARD_OPS_PER_TURN,
   MAX_THREAD_INITIAL_BLOCKS,
@@ -939,5 +942,68 @@ describe("Tutor session hint level persistence", () => {
 
     await setSessionHintLevel("session-tutor-test", 99);
     expect(await getSessionHintLevel("session-tutor-test")).toBe(MAX_HINT_LEVEL);
+  });
+});
+
+describe("Guide to Mastery stage persistence", () => {
+  const SESSION_ID = "session-mastery-stage-test";
+
+  beforeEach(async () => {
+    const db = await getDb();
+    db.run("DELETE FROM chalkboard_sessions WHERE id = ?;", [SESSION_ID]);
+  });
+
+  it("starts every session at Encounter", async () => {
+    await ensureChalkboardSession({ id: SESSION_ID, title: "Derivatives", domain: "math" });
+    expect(await getSessionMasteryStage(SESSION_ID)).toEqual({ stage: "encounter", evidence: "" });
+  });
+
+  it("round-trips the stage and the evidence that justified it", async () => {
+    await ensureChalkboardSession({ id: SESSION_ID, title: "Derivatives", domain: "math" });
+    await setSessionMasteryStage(SESSION_ID, "construct", "Wrote the difference quotient unaided.");
+
+    const stored = await getSessionMasteryStage(SESSION_ID);
+    expect(stored.stage).toBe("construct");
+    expect(stored.evidence).toBe("Wrote the difference quotient unaided.");
+  });
+});
+
+describe("Guide to Mastery stage advancement", () => {
+  it("advances exactly one stage, and only with evidence", () => {
+    expect(resolveNextMasteryStage("encounter", {
+      stage: "encounter",
+      stageAdvance: { ready: true, evidence: "Described the tangent-line picture in their own words." },
+    })).toEqual({ stage: "understand", evidence: "Described the tangent-line picture in their own words." });
+
+    // No advancement claimed.
+    expect(resolveNextMasteryStage("encounter", { stage: "encounter" })).toBeNull();
+    expect(resolveNextMasteryStage("encounter", {
+      stage: "encounter",
+      stageAdvance: { ready: false, evidence: "Still guessing." },
+    })).toBeNull();
+  });
+
+  it("refuses to skip stages no matter what the model reports", () => {
+    // The model claims it is already at Master. It still only moves one rung.
+    expect(resolveNextMasteryStage("encounter", {
+      stage: "master",
+      stageAdvance: { ready: true, evidence: "They seem to have it." },
+    })?.stage).toBe("understand");
+  });
+
+  it("cannot advance past the final stage", () => {
+    expect(resolveNextMasteryStage("master", {
+      stage: "master",
+      stageAdvance: { ready: true, evidence: "All five dimensions are strong." },
+    })).toBeNull();
+  });
+
+  it("honours an observed regression immediately and without evidence", () => {
+    // Diagnosing that the learner is actually behind must never be harder than
+    // promoting them.
+    expect(resolveNextMasteryStage("apply", { stage: "understand" })).toEqual({
+      stage: "understand",
+      evidence: "",
+    });
   });
 });

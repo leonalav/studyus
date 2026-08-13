@@ -447,6 +447,27 @@ function runMigrations(db: Database) {
     db.run("COMMIT;");
   }
 
+  if (currentVersion < 5) {
+    db.run("BEGIN TRANSACTION;");
+
+    // The Guide to Mastery stage the session is currently teaching in, plus the
+    // evidence that justified the last advance. Persisting the stage is what
+    // makes advancement enforceable ACROSS turns: without it the tutor would
+    // re-infer its position on the ladder every turn and could silently jump
+    // stages, which is precisely the click-through failure the loop forbids.
+    db.run(`ALTER TABLE chalkboard_sessions ADD COLUMN mastery_stage TEXT NOT NULL DEFAULT 'encounter';`);
+    db.run(`ALTER TABLE chalkboard_sessions ADD COLUMN mastery_stage_evidence TEXT;`);
+
+    const v5Now = new Date().toISOString();
+    db.run(
+      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
+      [5, "Per-session Guide to Mastery stage and advancement evidence", v5Now, "Rule: chalkboard_sessions.mastery_stage records the learner's position on the six-stage ladder, and mastery_stage_evidence records the observed exit condition that justified the last advance. A stage may only advance on recorded evidence, never on a learner click."]
+    );
+
+    db.run("PRAGMA user_version = 5;");
+    db.run("COMMIT;");
+  }
+
   // No legacy assessment fixtures are seeded in production. A fresh profile
   // starts with no forms/attempts so AvailableTests shows its empty state
   // (see plan §3 / verification: "Fresh profile shows no … seeded recent

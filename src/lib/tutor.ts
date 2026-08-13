@@ -59,7 +59,7 @@ import type { WidgetIntent, WidgetState } from "./widgets/types";
 import { WIDGET_LABEL } from "./widgets/types";
 import { validateWidgetIntent } from "./widgets/validate";
 import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
-import { MASTERY_STAGES, isMasteryStage, type MasteryStage } from "./mastery";
+import { MASTERY_STAGES, MASTERY_STAGE_SPECS, isMasteryStage, nextStage, type MasteryStage } from "./mastery";
 import {
   buildTutorPreferenceReminder,
   loadPreferences,
@@ -1561,6 +1561,68 @@ export async function setSessionHintLevel(sessionId: string, level: number): Pro
   saveDbSync();
 }
 
+/**
+ * The session's position on the Guide to Mastery ladder.
+ *
+ * Persisting the stage is what makes "advancement is not click-through"
+ * enforceable across turns rather than merely requested in the prompt: the
+ * tutor is told where it already is, and may only move on by supplying the
+ * evidence that satisfied the current stage's exit condition.
+ */
+export async function getSessionMasteryStage(
+  sessionId: string
+): Promise<{ stage: MasteryStage; evidence: string }> {
+  const db = await getDb();
+  const res = db.exec(
+    "SELECT mastery_stage, mastery_stage_evidence FROM chalkboard_sessions WHERE id = ?;",
+    [sessionId]
+  );
+  const row = res[0]?.values?.[0];
+  const stage = isMasteryStage(row?.[0]) ? (row[0] as MasteryStage) : "encounter";
+  const evidence = typeof row?.[1] === "string" ? row[1] : "";
+  return { stage, evidence };
+}
+
+/**
+ * Advance (or move back) the session's stage.
+ *
+ * Forward movement REQUIRES evidence and may only ever step one stage at a
+ * time, so a model cannot leap from Encounter to Master in a single turn no
+ * matter what it claims. Backward movement is always permitted without
+ * evidence — recognizing that a learner has regressed must never be harder
+ * than promoting them.
+ */
+export async function setSessionMasteryStage(
+  sessionId: string,
+  stage: MasteryStage,
+  evidence: string
+): Promise<void> {
+  const db = await getDb();
+  db.run(
+    "UPDATE chalkboard_sessions SET mastery_stage = ?, mastery_stage_evidence = ?, updated_at = ? WHERE id = ?;",
+    [stage, evidence.slice(0, 600), new Date().toISOString(), sessionId]
+  );
+  saveDbSync();
+}
+
+/** Decide the session's next stage from a completed turn. Deterministic, and
+ *  deliberately unable to skip stages or advance without evidence. */
+export function resolveNextMasteryStage(
+  current: MasteryStage,
+  turn: Pick<TutorTurn, "stage" | "stageAdvance">
+): { stage: MasteryStage; evidence: string } | null {
+  // A reported stage BEHIND the current one is a regression the tutor
+  // observed. Honour it immediately; no evidence required to move back.
+  if (turn.stage && MASTERY_STAGES.indexOf(turn.stage) < MASTERY_STAGES.indexOf(current)) {
+    return { stage: turn.stage, evidence: turn.stageAdvance?.evidence ?? "" };
+  }
+  if (!turn.stageAdvance?.ready) return null;
+  const evidence = turn.stageAdvance.evidence.trim();
+  if (!evidence) return null;
+  const next = nextStage(current);
+  return next ? { stage: next, evidence } : null;
+}
+
 /* ─────────────────────────────────────────────────────────────
    PROMPT ASSEMBLY
    ───────────────────────────────────────────────────────────── */
@@ -1571,6 +1633,10 @@ export function buildTutorUserPrompt(params: {
   assistancePolicy: string;
   hintLevel: number;
   awaitingFirstAttempt: boolean;
+  /** Where the session already is on the mastery ladder, and the evidence that
+   *  put it there. Supplied so the tutor continues rather than re-guessing. */
+  masteryStage?: MasteryStage;
+  masteryStageEvidence?: string;
   learnerSummary: string;
   curriculumScope?: TutorCurriculumScopeItem[];
   cards: TutorEvidenceCard[];
@@ -1597,6 +1663,23 @@ export function buildTutorUserPrompt(params: {
   );
 
   parts.push(formatMasteryDirective());
+
+  const stage = params.masteryStage ?? "encounter";
+  const stageSpec = MASTERY_STAGE_SPECS[stage];
+  const advanceTarget = nextStage(stage);
+  parts.push(
+    `CURRENT STAGE: ${stageSpec.ordinal}. ${stageSpec.label} — "${stageSpec.question}"\n` +
+    `- Your role here: ${stageSpec.agentRole}. The learner's role: ${stageSpec.studentRole}.\n` +
+    `- This stage's vocabulary: ${stageSpec.widgets.join(", ")}${stageSpec.visualizations.length ? ` (plus visualize: ${stageSpec.visualizations.join(", ")})` : ""}.\n` +
+    `- Exit condition: ${stageSpec.exitCondition}\n` +
+    (params.masteryStageEvidence
+      ? `- Evidence that carried the learner into this stage: ${params.masteryStageEvidence}\n`
+      : "") +
+    (advanceTarget
+      ? `- Set stage_advance.ready=true ONLY when you have just observed that exit condition, and name the observation in stage_advance.evidence. The session then moves to ${MASTERY_STAGE_SPECS[advanceTarget].label}; you cannot skip ahead of it.`
+      : `- This is the final stage. Close with a mastery_card reporting all five evidence dimensions, and schedule the retrieval check that will detect forgetting.`) +
+    `\n- If the learner's work shows they are actually behind this stage, report the earlier "stage" instead. Moving back is correct behaviour.`
+  );
 
   parts.push(`LEARNER MODEL SUMMARY:\n${params.learnerSummary}`);
 
@@ -1930,12 +2013,13 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     studio.memory.includeInPrompt &&
     studio.privacy.allowLearnerModelInPrompts;
   const persistentSummaryAllowed = learnerContextAllowed && studio.memory.mode === "persistent";
-  const [loadedHistory, persistentSummary, hintLevel] = await Promise.all([
+  const [loadedHistory, persistentSummary, hintLevel, masteryStage] = await Promise.all([
     getSessionMessages(req.sessionId, 12),
     persistentSummaryAllowed
       ? getActiveTutorContextLearnerSummary()
       : Promise.resolve(""),
     getSessionHintLevel(req.sessionId),
+    getSessionMasteryStage(req.sessionId),
   ]);
   const history = studio.sessions.continuity === "fresh-each-time"
     ? loadedHistory.slice(-1)
@@ -1999,6 +2083,8 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     assistancePolicy: req.assistancePolicy ?? "progressive_hints",
     hintLevel,
     awaitingFirstAttempt,
+    masteryStage: masteryStage.stage,
+    masteryStageEvidence: masteryStage.evidence,
     learnerSummary,
     curriculumScope,
     cards,
@@ -2056,6 +2142,14 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
 
   if (typeof result.value.requestedLevel === "number" && result.value.requestedLevel !== hintLevel) {
     await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
+  }
+
+  // Stage movement is resolved deterministically from the turn, never taken as
+  // a bare assertion: forward motion needs evidence and advances exactly one
+  // stage, while an observed regression is honoured immediately.
+  const resolvedStage = resolveNextMasteryStage(masteryStage.stage, result.value);
+  if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
+    await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
   }
 
   return result;

@@ -143,6 +143,26 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(prompt).toMatch(/Never say "You completed Section X/);
   });
 
+  it("tells the tutor where the session already is on the ladder", () => {
+    // Default (no stage supplied) opens at Encounter.
+    expect(prompt).toMatch(/CURRENT STAGE: 1\. Encounter/);
+    expect(prompt).toMatch(/Exit condition:/);
+
+    const midway = buildTutorUserPrompt({
+      ...baseParams,
+      masteryStage: "construct",
+      masteryStageEvidence: "Wrote the difference quotient unaided.",
+    });
+    expect(midway).toMatch(/CURRENT STAGE: 3\. Construct/);
+    expect(midway).toContain("Wrote the difference quotient unaided.");
+    expect(midway).toMatch(/The session then moves to Apply; you cannot skip ahead of it/);
+    expect(midway).toMatch(/Moving back is correct behaviour/);
+
+    const final = buildTutorUserPrompt({ ...baseParams, masteryStage: "master" });
+    expect(final).toMatch(/This is the final stage/);
+    expect(final).toMatch(/mastery_card reporting all five evidence dimensions/);
+  });
+
   it("advertises the widget ops and the full 17-widget vocabulary", () => {
     expect(prompt).toMatch(/place_widget/);
     expect(prompt).toMatch(/update_widget/);
