@@ -22,24 +22,112 @@ import {
   asFiniteNumber,
   asNonEmptyString,
   asRecord,
+  buildAgentInputContent,
   callStructuredAgent,
   invalid,
   resolveRoleEndpoint,
+  type AgentInputAttachment,
   type ValidationResult,
 } from "./agentRuntime";
 import { TEST_GENERATION_AGENT_PROMPT_V1 } from "./llm";
-import { getEvidenceForSelectedNodes, simpleHash, type CurriculumChunkRecord } from "./curriculum";
+import {
+  ASSESSMENT_VISUALIZATION_AUTHORING_GUIDE,
+  stemReferencesAssessmentFigure,
+  validateAssessmentFigure,
+} from "./assessmentFigure";
+import type { VisualizationIntent } from "./visualization/types";
+import {
+  ensureTextEvidenceForSelectedNodes,
+  getEvidenceForSelectedNodes,
+  simpleHash,
+  type CurriculumChunkRecord,
+} from "./curriculum";
+import { maxQuestions, minQuestions } from "../data/curriculum";
 
-export const GENERATION_PROMPT_VERSION = "generation_v1";
-export const GENERATION_SCHEMA_VERSION = "assessment_items_v1";
-export const GENERATION_VERSION = "2.0.0";
+export const GENERATION_PROMPT_VERSION = "generation_v3_visualizations";
+export const GENERATION_SCHEMA_VERSION = "assessment_items_v3_visualizations";
+export const GENERATION_VERSION = "4.0.0";
 
 export type GeneratedItemType = "mcq" | "numeric" | "proof";
 export type QuestionFormatRequest = "mcq" | "proof" | "mixed";
 export type RigorLevel = "casual" | "challenging" | "rigorous";
+export type BloomTarget = "remember" | "understand" | "apply" | "analyze" | "evaluate" | "create";
+export type AssistancePolicy = "full_hints" | "limited_hints" | "no_hints";
 
 const ITEM_TYPES = ["mcq", "numeric", "proof"] as const;
+const QUESTION_FORMATS = ["mcq", "proof", "mixed"] as const;
+const RIGOR_LEVELS = ["casual", "challenging", "rigorous"] as const;
 const BLOOM_TARGETS = ["remember", "understand", "apply", "analyze", "evaluate", "create"] as const;
+const GENERATION_BATCH_SIZE = 6;
+
+export interface DifficultyProfile {
+  label: string;
+  description: string;
+  allowedBloomTargets: readonly BloomTarget[];
+  bloomByType: Record<GeneratedItemType, readonly BloomTarget[]>;
+  maximumMarks: Record<GeneratedItemType, number>;
+  mcqOptionCount: number;
+  proofCriterionCount: number;
+  assistancePolicy: AssistancePolicy;
+  feedbackPolicy: string;
+  temperature: number;
+}
+
+/**
+ * Difficulty is an executable contract, not prompt decoration. The same profile
+ * drives the item blueprint, semantic validator, persisted assistance policy,
+ * and the test-taking UI.
+ */
+export const DIFFICULTY_PROFILES: Record<RigorLevel, DifficultyProfile> = {
+  casual: {
+    label: "Casual",
+    description: "Direct recall and single-step application with full objective hints.",
+    allowedBloomTargets: ["remember", "understand", "apply"],
+    bloomByType: {
+      mcq: ["remember", "understand", "apply"],
+      numeric: ["apply"],
+      proof: ["understand", "apply"],
+    },
+    maximumMarks: { mcq: 1, numeric: 2, proof: 3 },
+    mcqOptionCount: 3,
+    proofCriterionCount: 2,
+    assistancePolicy: "full_hints",
+    feedbackPolicy: "immediate_criterion",
+    temperature: 0.35,
+  },
+  challenging: {
+    label: "Challenging",
+    description: "Multi-step application and analysis with a limited hint budget.",
+    allowedBloomTargets: ["apply", "analyze"],
+    bloomByType: {
+      mcq: ["apply", "analyze"],
+      numeric: ["apply", "analyze"],
+      proof: ["analyze", "apply"],
+    },
+    maximumMarks: { mcq: 2, numeric: 4, proof: 6 },
+    mcqOptionCount: 4,
+    proofCriterionCount: 3,
+    assistancePolicy: "limited_hints",
+    feedbackPolicy: "on_submission",
+    temperature: 0.25,
+  },
+  rigorous: {
+    label: "Rigorous",
+    description: "Analysis, evaluation, and synthesis with strict rubrics and no hints.",
+    allowedBloomTargets: ["analyze", "evaluate", "create"],
+    bloomByType: {
+      mcq: ["analyze", "evaluate"],
+      numeric: ["analyze", "evaluate"],
+      proof: ["evaluate", "create", "analyze"],
+    },
+    maximumMarks: { mcq: 3, numeric: 6, proof: 10 },
+    mcqOptionCount: 5,
+    proofCriterionCount: 4,
+    assistancePolicy: "no_hints",
+    feedbackPolicy: "after_completion",
+    temperature: 0.15,
+  },
+};
 
 export interface GeneratedOption {
   id: string;
@@ -68,6 +156,8 @@ export interface GeneratedItem {
   criteria?: GeneratedCriterion[];
   referenceSolution?: string | null;
   responseRequirement?: string | null;
+  /** Optional validated semantic figure rendered with the chalkboard toolset. */
+  figure?: VisualizationIntent;
   evidenceRefs: string[];
 }
 
@@ -78,6 +168,8 @@ export interface GenerationRequest {
   rigor: RigorLevel;
   nodeIds: string[];
   sourceName?: string;
+  /** Optional transient learner references. Raw payloads are never persisted. */
+  attachments?: AgentInputAttachment[];
   signal?: AbortSignal;
   /** Optional progress callback driving a dedicated progress bar in the Take a
    *  test menu. Each stage of real generation reports a 0–100 estimate and a
@@ -134,11 +226,135 @@ export function buildEvidenceCards(
   });
 }
 
+export interface ItemBlueprint {
+  ordinal: number;
+  itemType: GeneratedItemType;
+  bloomTarget: BloomTarget;
+  maximumMarks: number;
+  curriculumNode: string;
+  requiredEvidenceRef: string;
+  mcqOptionCount?: number;
+  proofCriterionCount?: number;
+}
+
+function requestError(message: string): never {
+  throw new AgentRuntimeError(message, "schema_invalid");
+}
+
+/** Validate API input without silently clamping or changing the learner's test. */
+export function normalizeGenerationRequest(req: GenerationRequest): GenerationRequest {
+  const subject = typeof req.subject === "string" ? req.subject.trim() : "";
+  if (!subject) requestError("Choose a subject before generating a test.");
+  if (!(QUESTION_FORMATS as readonly unknown[]).includes(req.format)) {
+    requestError(`Unsupported question format: ${String(req.format)}.`);
+  }
+  if (!(RIGOR_LEVELS as readonly unknown[]).includes(req.rigor)) {
+    requestError(`Unsupported difficulty mode: ${String(req.rigor)}.`);
+  }
+  if (!Number.isInteger(req.count)) {
+    requestError("Question count must be a whole number.");
+  }
+
+  const minimum = minQuestions(req.format);
+  const maximum = maxQuestions(req.format);
+  if (req.count < minimum || req.count > maximum) {
+    requestError(
+      `${req.format === "mixed" ? "Mixed" : req.format.toUpperCase()} tests require between ${minimum} and ${maximum} questions.`
+    );
+  }
+
+  const nodeIds = Array.isArray(req.nodeIds)
+    ? [...new Set(req.nodeIds.filter((id): id is string => typeof id === "string").map((id) => id.trim()).filter(Boolean))]
+    : [];
+  if (nodeIds.length === 0) {
+    requestError("Select at least one curriculum section before generating a test.");
+  }
+
+  return {
+    ...req,
+    subject,
+    count: req.count,
+    nodeIds,
+    sourceName: typeof req.sourceName === "string" && req.sourceName.trim() ? req.sourceName.trim() : undefined,
+  };
+}
+
+function plannedItemTypes(format: QuestionFormatRequest, count: number): GeneratedItemType[] {
+  if (format === "mcq") return Array.from({ length: count }, () => "mcq" as const);
+  if (format === "proof") return Array.from({ length: count }, () => "proof" as const);
+  const cycle: GeneratedItemType[] = ["mcq", "proof", "numeric"];
+  return Array.from({ length: count }, (_, i) => cycle[i % cycle.length]);
+}
+
+/**
+ * Construct a deterministic contract before asking the model to write prose.
+ * This makes format, difficulty, marks, scope coverage, and evidence coverage
+ * independently verifiable rather than relying on model interpretation.
+ */
+export function createAssessmentBlueprint(
+  req: GenerationRequest,
+  cards: EvidenceCard[]
+): ItemBlueprint[] {
+  const profile = DIFFICULTY_PROFILES[req.rigor];
+  const cardsByNode = new Map<string, EvidenceCard[]>();
+  for (const card of cards) {
+    const nodeCards = cardsByNode.get(card.nodeId) ?? [];
+    nodeCards.push(card);
+    cardsByNode.set(card.nodeId, nodeCards);
+  }
+  const nodeIds = [...cardsByNode.keys()];
+  if (nodeIds.length === 0) requestError("The selected curriculum scope has no usable evidence excerpts.");
+
+  const perTypeIndex: Record<GeneratedItemType, number> = { mcq: 0, numeric: 0, proof: 0 };
+  const perNodeIndex = new Map<string, number>();
+
+  return plannedItemTypes(req.format, req.count).map((itemType, index) => {
+    const nodeId = nodeIds[index % nodeIds.length];
+    const nodeCards = cardsByNode.get(nodeId)!;
+    const nodeUseIndex = perNodeIndex.get(nodeId) ?? 0;
+    const requiredCard = nodeCards[nodeUseIndex % nodeCards.length];
+    perNodeIndex.set(nodeId, nodeUseIndex + 1);
+
+    const bloomSequence = profile.bloomByType[itemType];
+    const typeIndex = perTypeIndex[itemType]++;
+    const bloomTarget = bloomSequence[typeIndex % bloomSequence.length];
+
+    return {
+      ordinal: index + 1,
+      itemType,
+      bloomTarget,
+      maximumMarks: profile.maximumMarks[itemType],
+      curriculumNode: nodeId,
+      requiredEvidenceRef: requiredCard.ref,
+      ...(itemType === "mcq" ? { mcqOptionCount: profile.mcqOptionCount } : {}),
+      ...(itemType === "proof" ? { proofCriterionCount: profile.proofCriterionCount } : {}),
+    };
+  });
+}
+
 /* ─────────────────────────────────────────────────────────────
    SCHEMA VALIDATION
    ───────────────────────────────────────────────────────────── */
 
 const MARK_EPSILON = 1e-6;
+
+/** Command verbs make the requested cognitive operation observable in the
+ * learner-facing stem instead of trusting a model-provided Bloom label. */
+export const BLOOM_STEM_COMMANDS: Record<BloomTarget, readonly string[]> = {
+  remember: ["define", "identify", "name", "recall", "state", "list", "recognize"],
+  understand: ["explain", "summarize", "describe", "classify", "compare", "interpret"],
+  apply: ["apply", "calculate", "compute", "determine", "solve", "use"],
+  analyze: ["analyze", "compare", "contrast", "differentiate", "examine", "infer", "derive"],
+  evaluate: ["evaluate", "justify", "assess", "critique", "defend", "judge", "verify"],
+  create: ["construct", "design", "develop", "formulate", "prove", "propose", "synthesize"],
+};
+
+function stemExpressesCognitiveDemand(stem: string, bloom: BloomTarget): boolean {
+  const normalized = stem.toLowerCase();
+  return BLOOM_STEM_COMMANDS[bloom].some((command) =>
+    new RegExp(`\\b${command}\\b`, "i").test(normalized)
+  );
+}
 
 /**
  * Validates a generated item batch. Every rule the generation prompt states is
@@ -146,7 +362,11 @@ const MARK_EPSILON = 1e-6;
  */
 export function validateGeneratedItems(
   payload: unknown,
-  opts: { evidenceRefs: Set<string>; expectedCount: number; allowedNodes: Set<string> }
+  opts: {
+    blueprint: ItemBlueprint[];
+    evidenceByRef: Map<string, EvidenceCard>;
+    existingStemKeys?: Set<string>;
+  }
 ): ValidationResult<GeneratedItem[]> {
   const errors: string[] = [];
   const root = asRecord(payload, "response", errors);
@@ -155,12 +375,12 @@ export function validateGeneratedItems(
   const rawItems = asArray(root.items, "items", errors);
   if (!rawItems) return invalid(...errors);
 
-  if (rawItems.length !== opts.expectedCount) {
-    errors.push(`items must contain exactly ${opts.expectedCount} entries (got ${rawItems.length})`);
+  if (rawItems.length !== opts.blueprint.length) {
+    errors.push(`items must contain exactly ${opts.blueprint.length} entries (got ${rawItems.length})`);
   }
 
   const out: GeneratedItem[] = [];
-  const seenStems = new Set<string>();
+  const seenStems = new Set(opts.existingStemKeys ?? []);
 
   rawItems.forEach((entry, i) => {
     const path = `items[${i}]`;
@@ -181,13 +401,14 @@ export function validateGeneratedItems(
         errors.push(`${path}.evidence_refs must cite at least one supplied evidence excerpt`);
       }
       refsRaw.forEach((r, j) => {
-        if (typeof r !== "string" || !opts.evidenceRefs.has(r.trim())) {
+        const ref = typeof r === "string" ? r.trim() : "";
+        if (!ref || !opts.evidenceByRef.has(ref)) {
           errors.push(
             `${path}.evidence_refs[${j}] must be one of the supplied evidence handles ` +
-              `(${[...opts.evidenceRefs].join(", ")}); got ${JSON.stringify(r)}`
+              `(${[...opts.evidenceByRef.keys()].join(", ")}); got ${JSON.stringify(r)}`
           );
         } else {
-          refs.push(r.trim());
+          refs.push(ref);
         }
       });
     }
@@ -198,18 +419,47 @@ export function validateGeneratedItems(
 
     if (maxMarks <= 0) errors.push(`${path}.maximum_marks must be greater than 0`);
 
-    if (!opts.allowedNodes.has(node)) {
+    const plan = opts.blueprint[i];
+    if (!plan) {
+      errors.push(`${path} has no corresponding item blueprint`);
+      return;
+    }
+    if (itemType !== plan.itemType) {
+      errors.push(`${path}.item_type must be "${plan.itemType}" for requested format (got "${itemType}")`);
+    }
+    if (bloom !== plan.bloomTarget) {
+      errors.push(`${path}.bloom_target must be "${plan.bloomTarget}" for this difficulty slot (got "${bloom}")`);
+    }
+    if (!stemExpressesCognitiveDemand(stem, plan.bloomTarget)) {
       errors.push(
-        `${path}.curriculum_node "${node}" is not one of the selected nodes: ${[...opts.allowedNodes].join(", ")}`
+        `${path}.stem must explicitly require ${plan.bloomTarget} thinking with one of these command verbs: ` +
+          BLOOM_STEM_COMMANDS[plan.bloomTarget].join(", ")
       );
     }
+    if (Math.abs(maxMarks - plan.maximumMarks) > MARK_EPSILON) {
+      errors.push(
+        `${path}.maximum_marks must be ${plan.maximumMarks} for this ${plan.itemType} difficulty slot (got ${maxMarks})`
+      );
+    }
+    if (node !== plan.curriculumNode) {
+      errors.push(`${path}.curriculum_node must be "${plan.curriculumNode}" for balanced scope coverage (got "${node}")`);
+    }
+    if (!refs.includes(plan.requiredEvidenceRef)) {
+      errors.push(`${path}.evidence_refs must include assigned evidence handle "${plan.requiredEvidenceRef}"`);
+    }
+    refs.forEach((ref) => {
+      const card = opts.evidenceByRef.get(ref);
+      if (card && card.nodeId !== node) {
+        errors.push(`${path}.evidence_refs includes ${ref} from node "${card.nodeId}", not item node "${node}"`);
+      }
+    });
 
     const stemKey = stem.toLowerCase().replace(/\s+/g, " ");
     if (seenStems.has(stemKey)) errors.push(`${path}.stem duplicates an earlier item`);
     seenStems.add(stemKey);
 
     const item: GeneratedItem = {
-      ordinal: i + 1,
+      ordinal: plan.ordinal,
       itemType,
       stem,
       maximumMarks: maxMarks,
@@ -219,11 +469,27 @@ export function validateGeneratedItems(
       evidenceRefs: refs,
     };
 
+    if (rec.figure !== undefined && rec.figure !== null) {
+      const figure = validateAssessmentFigure(rec.figure);
+      if (!figure.ok) {
+        errors.push(`${path}.figure is invalid: ${figure.error}`);
+      } else {
+        if (!stemReferencesAssessmentFigure(stem)) {
+          errors.push(
+            `${path}.stem must explicitly tell the learner to use the shown figure, graph, chart, equation, or diagram`
+          );
+        }
+        item.figure = figure.value;
+      }
+    }
+
     if (itemType === "mcq") {
       const rawOptions = asArray(rec.options, `${path}.options`, errors);
       if (!rawOptions) return;
-      if (rawOptions.length < 3 || rawOptions.length > 6) {
-        errors.push(`${path}.options must contain between 3 and 6 options`);
+      if (plan.mcqOptionCount !== undefined && rawOptions.length !== plan.mcqOptionCount) {
+        errors.push(
+          `${path}.options must contain exactly ${plan.mcqOptionCount} options for this difficulty (got ${rawOptions.length})`
+        );
       }
 
       const options: GeneratedOption[] = [];
@@ -286,16 +552,24 @@ export function validateGeneratedItems(
           errors.push(`${path}.accepted[${j}].value must be a number or an "a/b" fraction (got "${value}")`);
           return;
         }
+        const absoluteTolerance =
+          aRec.absolute_tolerance !== undefined && aRec.absolute_tolerance !== null
+            ? String(aRec.absolute_tolerance)
+            : "0";
+        const relativeTolerance =
+          aRec.relative_tolerance !== undefined && aRec.relative_tolerance !== null
+            ? String(aRec.relative_tolerance)
+            : "0";
+        if (!Number.isFinite(Number(absoluteTolerance)) || Number(absoluteTolerance) < 0) {
+          errors.push(`${path}.accepted[${j}].absolute_tolerance must be a non-negative finite number`);
+        }
+        if (!Number.isFinite(Number(relativeTolerance)) || Number(relativeTolerance) < 0) {
+          errors.push(`${path}.accepted[${j}].relative_tolerance must be a non-negative finite number`);
+        }
         accepted.push({
           value,
-          absolute_tolerance:
-            aRec.absolute_tolerance !== undefined && aRec.absolute_tolerance !== null
-              ? String(aRec.absolute_tolerance)
-              : "0",
-          relative_tolerance:
-            aRec.relative_tolerance !== undefined && aRec.relative_tolerance !== null
-              ? String(aRec.relative_tolerance)
-              : "0",
+          absolute_tolerance: absoluteTolerance,
+          relative_tolerance: relativeTolerance,
         });
       });
 
@@ -305,7 +579,11 @@ export function validateGeneratedItems(
       // Open response: rubric required, answer key forbidden.
       const rawCriteria = asArray(rec.criteria, `${path}.criteria`, errors);
       if (!rawCriteria) return;
-      if (rawCriteria.length === 0) errors.push(`${path}.criteria must contain at least one criterion`);
+      if (plan.proofCriterionCount !== undefined && rawCriteria.length !== plan.proofCriterionCount) {
+        errors.push(
+          `${path}.criteria must contain exactly ${plan.proofCriterionCount} criteria for this difficulty (got ${rawCriteria.length})`
+        );
+      }
 
       const criteria: GeneratedCriterion[] = [];
       const seenCritIds = new Set<string>();
@@ -345,14 +623,16 @@ export function validateGeneratedItems(
       }
 
       item.criteria = criteria;
-      item.referenceSolution =
-        typeof rec.reference_solution === "string" && rec.reference_solution.trim()
-          ? rec.reference_solution.trim()
-          : null;
-      item.responseRequirement =
-        typeof rec.response_requirement === "string" && rec.response_requirement.trim()
-          ? rec.response_requirement.trim()
-          : null;
+      item.referenceSolution = asNonEmptyString(
+        rec.reference_solution,
+        `${path}.reference_solution`,
+        errors
+      );
+      item.responseRequirement = asNonEmptyString(
+        rec.response_requirement,
+        `${path}.response_requirement`,
+        errors
+      );
     }
 
     out.push(item);
@@ -367,81 +647,72 @@ export function validateGeneratedItems(
    ───────────────────────────────────────────────────────────── */
 
 const RIGOR_GUIDANCE: Record<RigorLevel, string> = {
-  casual: "Target recall and single-step application. Bloom levels: remember, understand, apply.",
-  challenging: "Target multi-step application and analysis. Bloom levels: apply, analyze.",
+  casual:
+    "Use direct wording, familiar representations, and no more than one reasoning step. Avoid traps and unnecessary context.",
+  challenging:
+    "Require multi-step application or analysis. Distractors should encode plausible misconceptions, not superficial wording tricks.",
   rigorous:
-    "Target analysis, evaluation and synthesis. Multi-step reasoning with non-obvious traps. Bloom levels: analyze, evaluate, create.",
+    "Require transfer, non-obvious reasoning, evaluation, or synthesis. Use strict observable rubrics and plausible high-level distractors.",
 };
 
-function formatGuidance(format: QuestionFormatRequest, count: number): string {
-  if (format === "mcq") {
-    return `Emit ${count} items. Use "mcq" for conceptual questions and "numeric" for calculations. Do not emit "proof" items.`;
-  }
-  if (format === "proof") {
-    return `Emit ${count} items, all of item_type "proof" (derivation, explanation or design). Each carries an analytic rubric and no answer key.`;
-  }
-  const openCount = Math.floor(count / 2);
-  return `Emit ${count} items: ${count - openCount} of type "mcq" or "numeric", and ${openCount} of type "proof".`;
-}
-
-export function buildGenerationUserPrompt(req: GenerationRequest, cards: EvidenceCard[]): string {
+export function buildGenerationUserPrompt(
+  req: GenerationRequest,
+  cards: EvidenceCard[],
+  blueprint: ItemBlueprint[]
+): string {
+  const profile = DIFFICULTY_PROFILES[req.rigor];
   const parts: string[] = [];
 
   parts.push(`SUBJECT: ${req.subject}`);
   if (req.sourceName) parts.push(`SOURCE DOCUMENT: ${req.sourceName}`);
-  parts.push(`RIGOR: ${req.rigor} — ${RIGOR_GUIDANCE[req.rigor]}`);
-  parts.push(formatGuidance(req.format, req.count));
-
+  parts.push(`DIFFICULTY CONTRACT: ${profile.label} — ${profile.description}\n${RIGOR_GUIDANCE[req.rigor]}`);
   parts.push(
-    `CURRICULUM EVIDENCE — cite these handles and no others:\n` +
-      cards
-        .map(
-          (c) =>
-            `[${c.ref}] node=${c.nodeId} section=${c.sectionNumber ?? "—"} page=${c.page} title="${c.nodeTitle}"\n` +
-            `      ${c.text}`
-        )
+    `ITEM BLUEPRINT — return exactly ${blueprint.length} items in this exact order:\n` +
+      blueprint
+        .map((slot) => {
+          const structure =
+            slot.itemType === "mcq"
+              ? `options=${slot.mcqOptionCount}`
+              : slot.itemType === "proof"
+                ? `rubric_criteria=${slot.proofCriterionCount}`
+                : "typed_numeric_answer=true";
+          return (
+            `${slot.ordinal}. item_type=${slot.itemType}; bloom_target=${slot.bloomTarget}; ` +
+            `maximum_marks=${slot.maximumMarks}; curriculum_node=${slot.curriculumNode}; ` +
+            `required_evidence=${slot.requiredEvidenceRef}; ${structure}; ` +
+            `stem_command=${BLOOM_STEM_COMMANDS[slot.bloomTarget].join("/")}`
+          );
+        })
         .join("\n")
   );
 
   parts.push(
-    `ALLOWED curriculum_node values (use the node id exactly): ${[...new Set(cards.map((c) => c.nodeId))].join(", ")}`
+    `CURRICULUM EVIDENCE — use only these excerpts:\n` +
+      cards
+        .map(
+          (c) =>
+            `[${c.ref}] node=${c.nodeId} section=${c.sectionNumber ?? "—"} page=${c.page} title="${c.nodeTitle}"\n` +
+            `      ${c.text.slice(0, 6000)}`
+        )
+        .join("\n")
   );
 
-  parts.push(
-    `Return JSON only:\n` +
-      `{\n` +
-      `  "items": [\n` +
-      `    {\n` +
-      `      "item_type": "mcq" | "numeric" | "proof",\n` +
-      `      "stem": "<the question as the learner sees it>",\n` +
-      `      "maximum_marks": <number > 0>,\n` +
-      `      "bloom_target": "remember"|"understand"|"apply"|"analyze"|"evaluate"|"create",\n` +
-      `      "learning_objective": "<short objective>",\n` +
-      `      "curriculum_node": "<one of the allowed node ids>",\n` +
-      `      "evidence_refs": ["E1", ...],\n` +
-      `\n` +
-      `      // item_type "mcq" only:\n` +
-      `      "options": [{ "id": "a", "text": "<option text>", "correct": true|false,\n` +
-      `                    "misconception": "<why a learner picks this>" /* required when correct is false, null when true */ }],\n` +
-      `\n` +
-      `      // item_type "numeric" only:\n` +
-      `      "accepted": [{ "value": "<number or a/b>", "absolute_tolerance": "<number>", "relative_tolerance": "<number>" }],\n` +
-      `      "unit": "<unit or null>",\n` +
-      `\n` +
-      `      // item_type "proof" only:\n` +
-      `      "criteria": [{ "id": "c1", "description": "<observable requirement>", "max_mark": <number> }],\n` +
-      `      "reference_solution": "<full solution, never shown to the learner>",\n` +
-      `      "response_requirement": "<one line telling the learner what the response must contain>"\n` +
-      `    }\n` +
-      `  ]\n` +
-      `}\n\n` +
-      `HARD RULES:\n` +
-      `- Criterion max_mark values must sum EXACTLY to that item's maximum_marks.\n` +
-      `- Exactly one mcq option may have "correct": true.\n` +
-      `- Never write the option letter inside option text (no "... (b)" suffixes).\n` +
-      `- "proof" items must NOT contain "options", "accepted" or "answer_key".\n` +
-      `- Every item must cite at least one evidence handle from the list above.`
-  );
+  parts.push(`Return one JSON object with an "items" array. Every item may include "figure": null | VisualizationIntent as defined by your assessment visualization tool guide. Use these type-specific shapes:
+MCQ: {"item_type":"mcq","stem":"...","maximum_marks":1,"bloom_target":"remember","learning_objective":"...","curriculum_node":"node-id","evidence_refs":["E1"],"figure":null,"options":[{"id":"a","text":"...","correct":true,"misconception":null},{"id":"b","text":"...","correct":false,"misconception":"..."}]}
+NUMERIC: {"item_type":"numeric","stem":"...","maximum_marks":2,"bloom_target":"apply","learning_objective":"...","curriculum_node":"node-id","evidence_refs":["E1"],"figure":null,"accepted":[{"value":"12.5","absolute_tolerance":"0.01","relative_tolerance":"0"}],"unit":null}
+PROOF: {"item_type":"proof","stem":"...","maximum_marks":3,"bloom_target":"apply","learning_objective":"...","curriculum_node":"node-id","evidence_refs":["E1"],"figure":null,"criteria":[{"id":"c1","description":"observable requirement","max_mark":1}],"reference_solution":"full evaluator-only solution","response_requirement":"what the learner must show"}
+
+HARD RULES:
+- Match every blueprint field exactly; do not reorder, add, omit, or substitute item types.
+- Each stem must explicitly use at least one of its slot's stem_command verbs so the required cognitive operation is learner-visible.
+- Include each slot's required evidence handle, and cite evidence only from that item's curriculum node.
+- Criterion max_mark values must sum exactly to maximum_marks and criterion IDs must be unique.
+- MCQ option IDs must be unique; exactly one option is correct; every distractor has a specific misconception.
+- Do not put option letters inside option text.
+- Proof items contain no options, accepted values, or answer key.
+- Use a figure when it materially tests a visual, spatial, structural, graphical, or data relationship supported by the evidence; otherwise use null. A figure-bearing stem must explicitly reference the visual.
+- Cross-check every figure against the stem, every option/accepted value, the rubric, response requirement, and reference solution. Learner-visible figure text or styling must never identify or disclose the answer.
+- Questions must be distinct and answerable using the cited evidence. Return JSON only.`);
 
   return parts.join("\n\n");
 }
@@ -501,21 +772,52 @@ export function persistGeneratedForm({
   const formId = `form-gen-${stamp}`;
   const attemptId = `attempt-gen-${stamp}`;
   const cardByRef = new Map(cards.map((c) => [c.ref, c]));
+  const profile = DIFFICULTY_PROFILES[req.rigor];
+  const figureJsonByOrdinal = new Map<number, string>();
   let evidenceCitations = 0;
+
+  // Callers normally pass the output of validateGeneratedItems, but persistence
+  // is a separate trust boundary: never write an unchecked figure even if this
+  // function is called directly from another workflow.
+  for (const item of items) {
+    if (!item.figure) continue;
+    const figure = validateAssessmentFigure(item.figure);
+    if (!figure.ok) {
+      throw new AgentRuntimeError(
+        `Assessment item ${item.ordinal} has an invalid figure: ${figure.error}`,
+        "schema_invalid"
+      );
+    }
+    if (!stemReferencesAssessmentFigure(item.stem)) {
+      throw new AgentRuntimeError(
+        `Assessment item ${item.ordinal} has a figure but its stem does not reference it.`,
+        "schema_invalid"
+      );
+    }
+    figureJsonByOrdinal.set(item.ordinal, JSON.stringify(figure.value));
+  }
 
   db.run("BEGIN TRANSACTION;");
   try {
     db.run(
       `INSERT INTO assessment_forms (id, title, subject, format, config_json, mode, curriculum_scope, generation_version, validation_status, feedback_policy, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'FORMATIVE', ?, ?, 'validated', 'immediate_criterion', ?, ?);`,
+       VALUES (?, ?, ?, ?, ?, 'FORMATIVE', ?, ?, 'validated', ?, ?, ?);`,
       [
         formId,
         title,
         req.subject,
         req.format,
-        JSON.stringify({ count: req.count, rigor: req.rigor, nodeIds: req.nodeIds, sourceName: req.sourceName ?? null }),
+        JSON.stringify({
+          count: req.count,
+          rigor: req.rigor,
+          nodeIds: req.nodeIds,
+          sourceName: req.sourceName ?? null,
+          assistancePolicy: profile.assistancePolicy,
+          difficultyContractVersion: GENERATION_VERSION,
+        }),
         req.nodeIds.join(","),
         GENERATION_VERSION,
+        profile.feedbackPolicy,
         now,
         now,
       ]
@@ -525,8 +827,8 @@ export function persistGeneratedForm({
       const itemId = `item-${stamp}-${item.ordinal}`;
 
       db.run(
-        `INSERT INTO assessment_items (id, form_id, stable_ordinal, stem, item_type, maximum_marks, bloom_target, learning_objective, curriculum_node, answer_spec_json, provenance, generation_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'agent_generated', ?);`,
+        `INSERT INTO assessment_items (id, form_id, stable_ordinal, stem, item_type, maximum_marks, bloom_target, learning_objective, curriculum_node, answer_spec_json, figure_spec_json, provenance, generation_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'agent_generated', ?);`,
         [
           itemId,
           formId,
@@ -538,6 +840,7 @@ export function persistGeneratedForm({
           item.learningObjective,
           item.curriculumNode,
           JSON.stringify(toAnswerSpec(item)),
+          figureJsonByOrdinal.get(item.ordinal) ?? null,
           GENERATION_VERSION,
         ]
       );
@@ -562,10 +865,12 @@ export function persistGeneratedForm({
       });
     }
 
+    // Generation creates an available test, not an already-started attempt. The
+    // attempt becomes active only when the learner explicitly presses Start.
     db.run(
       `INSERT INTO assessment_attempts (id, form_id, learner_id, status, mode, assistance_policy, started_at, deadline_at, submitted_at, completed_at, current_ordinal, aggregate_score, grading_status, audit_created_at, audit_updated_at)
-       VALUES (?, ?, 'default_learner', 'active', 'FORMATIVE', 'progressive_hints', ?, NULL, NULL, NULL, 1, 0, 'unseen', ?, ?);`,
-      [attemptId, formId, now, now, now]
+       VALUES (?, ?, 'default_learner', 'created', 'FORMATIVE', ?, ?, NULL, NULL, NULL, 1, 0, 'unseen', ?, ?);`,
+      [attemptId, formId, profile.assistancePolicy, now, now, now]
     );
 
     db.run("COMMIT;");
@@ -583,64 +888,127 @@ export function persistGeneratedForm({
    ───────────────────────────────────────────────────────────── */
 
 export async function generateAssessment(req: GenerationRequest): Promise<GenerationResult> {
-  const report = (pct: number, stage: string) => req.onProgress?.(pct, stage);
-  if (req.nodeIds.length === 0) {
-    throw new AgentRuntimeError(
-      "Select at least one curriculum section before generating a test.",
-      "schema_invalid"
-    );
-  }
-  const count = Math.max(1, Math.min(30, Math.round(req.count)));
+  const normalized = normalizeGenerationRequest(req);
+  const report = (pct: number, stage: string) => normalized.onProgress?.(pct, stage);
 
   report(5, "Fetching curriculum evidence…");
-  const { nodes, chunks } = await getEvidenceForSelectedNodes(req.nodeIds);
+  let { nodes, chunks } = await getEvidenceForSelectedNodes(normalized.nodeIds);
+  report(7, "Indexing selected curriculum text…");
+  const extractedChunks = await ensureTextEvidenceForSelectedNodes(normalized.nodeIds);
+  if (extractedChunks > 0) {
+    ({ nodes, chunks } = await getEvidenceForSelectedNodes(normalized.nodeIds));
+  }
   if (chunks.length === 0) {
     throw new AgentRuntimeError(
-      "The selected sections contain no extracted text, so no evidence-grounded items can be generated. Re-import the source document.",
+      "The selected sections contain no extracted text, so no evidence-grounded items can be generated. Open the selected curriculum section once to extract it, then try again.",
       "schema_invalid"
     );
   }
 
   const cards = buildEvidenceCards(nodes, chunks);
+  const blueprint = createAssessmentBlueprint(normalized, cards);
   const endpoint = await resolveRoleEndpoint("generation");
+  const profile = DIFFICULTY_PROFILES[normalized.rigor];
+  const evidenceByRef = new Map(cards.map((card) => [card.ref, card]));
+  const existingStemKeys = new Set<string>();
+  const generatedItems: GeneratedItem[] = [];
+  let totalLatencyMs = 0;
+  let repaired = false;
 
-  // The structured agent call is the long pole — it owns the widest band
-  // (10%→90%). Validation + persistence fill the final 90%→100%.
-  report(10, "Generating grounded questions…");
-  const result = await callStructuredAgent({
-    role: "generation",
-    endpoint,
-    system: TEST_GENERATION_AGENT_PROMPT_V1,
-    user: buildGenerationUserPrompt({ ...req, count }, cards),
-    promptVersion: GENERATION_PROMPT_VERSION,
-    schemaVersion: GENERATION_SCHEMA_VERSION,
-    temperature: 0.4,
-    signal: req.signal,
-    validate: (payload) =>
-      validateGeneratedItems(payload, {
-        evidenceRefs: new Set(cards.map((c) => c.ref)),
-        expectedCount: count,
-        allowedNodes: new Set(cards.map((c) => c.nodeId)),
-      }),
-  });
+  const batches: ItemBlueprint[][] = [];
+  for (let i = 0; i < blueprint.length; i += GENERATION_BATCH_SIZE) {
+    batches.push(blueprint.slice(i, i + GENERATION_BATCH_SIZE));
+  }
 
-  report(90, "Validating against evidence…");
-  const scopeLabel = nodes.length === 1 ? nodes[0].title : `${nodes.length} sections`;
-  const title = `${req.subject} · ${scopeLabel}`;
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+    const batch = batches[batchIndex];
+    const requiredRefs = new Set(batch.map((slot) => slot.requiredEvidenceRef));
+    const batchCards = cards.filter((card) => requiredRefs.has(card.ref));
+    const batchEvidenceByRef = new Map(batchCards.map((card) => [card.ref, card]));
+    const startPct = 10 + Math.floor((batchIndex / batches.length) * 75);
+    report(
+      startPct,
+      batches.length === 1
+        ? `Generating ${profile.label.toLowerCase()} questions…`
+        : `Generating question batch ${batchIndex + 1} of ${batches.length}…`
+    );
+
+    const result = await callStructuredAgent({
+      role: "generation",
+      endpoint,
+      system: `${TEST_GENERATION_AGENT_PROMPT_V1}\n\n${ASSESSMENT_VISUALIZATION_AUTHORING_GUIDE}`,
+      user: buildAgentInputContent(
+        buildGenerationUserPrompt(normalized, batchCards, batch),
+        normalized.attachments,
+        endpoint
+      ),
+      promptVersion: GENERATION_PROMPT_VERSION,
+      schemaVersion: GENERATION_SCHEMA_VERSION,
+      temperature: profile.temperature,
+      maxTokens: Math.min(16_000, Math.max(4_096, batch.length * 2_500)),
+      signal: normalized.signal,
+      validate: (payload) =>
+        validateGeneratedItems(payload, {
+          blueprint: batch,
+          evidenceByRef: batchEvidenceByRef,
+          existingStemKeys,
+        }),
+    });
+
+    for (const item of result.value) {
+      existingStemKeys.add(item.stem.toLowerCase().replace(/\s+/g, " "));
+      generatedItems.push(item);
+    }
+    totalLatencyMs += result.latencyMs;
+    repaired ||= result.repaired;
+  }
+
+  // Defensive aggregate checks before the transaction. Batch validation already
+  // enforces each slot, but this catches accidental orchestration regressions.
+  report(88, "Validating difficulty and scope contracts…");
+  if (generatedItems.length !== normalized.count) {
+    throw new AgentRuntimeError(
+      `Generation produced ${generatedItems.length} items instead of the requested ${normalized.count}; nothing was saved.`,
+      "schema_invalid"
+    );
+  }
+  generatedItems.sort((a, b) => a.ordinal - b.ordinal);
+  for (let i = 0; i < blueprint.length; i++) {
+    const item = generatedItems[i];
+    const slot = blueprint[i];
+    if (!item || item.ordinal !== slot.ordinal || item.itemType !== slot.itemType || item.bloomTarget !== slot.bloomTarget) {
+      throw new AgentRuntimeError(
+        `Generated item ${i + 1} no longer matches its validated difficulty blueprint; nothing was saved.`,
+        "schema_invalid"
+      );
+    }
+    for (const ref of item.evidenceRefs) {
+      if (!evidenceByRef.has(ref)) {
+        throw new AgentRuntimeError(`Generated item ${i + 1} cites unknown evidence ${ref}; nothing was saved.`, "schema_invalid");
+      }
+    }
+  }
+
+  const requestedNodes = nodes.filter((node) => normalized.nodeIds.includes(node.id));
+  const scopeLabel =
+    requestedNodes.length === 1
+      ? requestedNodes[0].title
+      : `${normalized.nodeIds.length} selected section${normalized.nodeIds.length === 1 ? "" : "s"}`;
+  const title = `${normalized.subject} · ${scopeLabel}`;
 
   const db = await getDb();
-  report(95, "Saving the test…");
-  const persisted = persistGeneratedForm({ db, req: { ...req, count }, items: result.value, cards, title });
+  report(95, "Saving the validated test…");
+  const persisted = persistGeneratedForm({ db, req: normalized, items: generatedItems, cards, title });
   report(100, "Ready");
 
   return {
     formId: persisted.formId,
     attemptId: persisted.attemptId,
     title,
-    itemCount: result.value.length,
-    modelId: result.modelId,
-    latencyMs: result.latencyMs,
-    repaired: result.repaired,
+    itemCount: generatedItems.length,
+    modelId: endpoint.modelId,
+    latencyMs: totalLatencyMs,
+    repaired,
     evidenceCitations: persisted.evidenceCitations,
   };
 }

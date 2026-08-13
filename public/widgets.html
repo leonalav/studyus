@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Studyus · Chalkboard widgets</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+:root{--bg:#090909;--chalk:#e7e7e5;--muted:#9b9b99;--line:rgba(231,231,229,.14);--blue:#2383e2;--yellow:#d9bd58;--green:#4fb477;--pink:#c97996}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--chalk);font-family:"Space Grotesk",ui-sans-serif,system-ui,sans-serif}
+.board{position:relative;width:100vw;height:100vh;overflow:hidden;background-color:#0b0b0b;background-image:linear-gradient(rgba(231,231,229,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(231,231,229,.045) 1px,transparent 1px),radial-gradient(ellipse at 50% 0%,rgba(255,255,255,.045),transparent 58%);background-size:32px 32px,32px 32px,100% 100%;cursor:grab}.board:active{cursor:grabbing}.board:before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.22;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.16'/%3E%3C/svg%3E")}
+.header{position:fixed;z-index:20;left:22px;top:18px;display:flex;align-items:center;gap:12px;user-select:none}.mark{width:10px;height:10px;border-radius:50%;background:var(--yellow);box-shadow:0 0 16px #f5d77988}.header h1{margin:0;font-size:13px;letter-spacing:.16em;text-transform:uppercase;font-weight:600}.header span{font:10px ui-monospace,monospace;color:var(--muted)}
+.toolbar{position:fixed;z-index:20;right:20px;top:16px;display:flex;gap:6px}.toolbar button{border:1px solid var(--line);background:#18231eaa;color:var(--muted);border-radius:6px;padding:7px 10px;font:10px ui-monospace,monospace;cursor:pointer}.toolbar button:hover{color:var(--chalk);border-color:#9dccad66;background:#24342b}
+.widget{position:absolute;width:214px;min-height:126px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,rgba(34,34,33,.96),rgba(25,25,24,.95));box-shadow:0 14px 35px rgba(0,0,0,.22),inset 0 1px rgba(255,255,255,.045);overflow:hidden;backdrop-filter:blur(5px);user-select:none}.widget.min{min-height:0;height:32px}.widget.min .body{display:none}.widget:hover{border-color:#b8d7c255}.bar{height:32px;display:flex;align-items:center;gap:8px;padding:0 9px;border-bottom:1px solid rgba(220,236,226,.09);cursor:grab}.bar:active{cursor:grabbing}.dot{width:7px;height:7px;border-radius:50%;background:var(--accent,var(--blue));box-shadow:0 0 9px var(--accent,var(--blue))}.name{font-size:10.5px;font-weight:600;flex:1;letter-spacing:.02em}.index{font:9px ui-monospace,monospace;color:#82938a}.toggle{border:0;background:none;color:#73857a;cursor:pointer;font-size:14px;line-height:1}.body{padding:11px 12px 13px;color:#becbc1;font-size:11px;line-height:1.55}.body strong{color:var(--chalk);font-weight:600}.eyebrow{font:9px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.13em;color:var(--accent,var(--blue));margin-bottom:7px}.rule{height:1px;background:var(--line);margin:8px 0}.pill{display:inline-block;border:1px solid color-mix(in srgb,var(--accent) 38%,transparent);color:var(--accent);border-radius:99px;padding:2px 7px;font-size:9px;margin:2px 3px 0 0}.meter{height:5px;border-radius:9px;background:#0d110f;margin-top:7px;overflow:hidden}.meter i{display:block;height:100%;width:62%;background:var(--accent);border-radius:9px}.quote{border-left:2px solid var(--accent);padding-left:8px;color:#d7e0d8}.big{font-size:19px;color:var(--chalk);font-weight:650;letter-spacing:-.03em}.rows{display:grid;gap:5px}.row{display:flex;justify-content:space-between;gap:10px}.row span:last-child{color:var(--chalk)}
+.footer{position:fixed;z-index:20;right:22px;bottom:17px;font:10px ui-monospace,monospace;color:#75877b}.hint{position:fixed;z-index:20;left:22px;bottom:17px;font:10px ui-monospace,monospace;color:#75877b}.answer{display:flex;gap:5px;margin-top:9px}.answer input{min-width:0;flex:1;border:1px solid var(--line);border-radius:5px;background:#111;color:var(--chalk);padding:6px 7px;font:10px "Space Grotesk",sans-serif;outline:none}.answer input:focus{border-color:var(--accent)}.answer button{border:0;border-radius:5px;background:var(--accent);color:#090909;padding:0 8px;font:600 10px "Space Grotesk",sans-serif;cursor:pointer}.answer button:hover{filter:brightness(1.12)}.answer .sent{color:var(--green);font-size:10px;align-self:center}.empty{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font:11px ui-monospace,monospace;letter-spacing:.12em;color:#587063;text-transform:uppercase;pointer-events:none}
+@media(max-width:700px){.widget{width:188px}.toolbar{top:52px}.header{top:14px}.hint{display:none}}
+</style>
+</head>
+<body>
+<div class="board" id="board">
+  <div class="header"><i class="mark"></i><h1>Studyus · widgets</h1><span>infinite chalkboard / 17 tools</span></div>
+  <div class="toolbar"><button id="arrange">Arrange</button><button id="reset">Reset positions</button></div>
+  <div class="empty">drag the empty board to pan · drag a widget by its header</div>
+  <div class="hint">17 widgets · 3 graph / geometry / equation intentionally omitted</div><div class="footer">chalkboard study environment</div>
+</div>
+<script>
+const definitions=[
+ ['Roadmap','Shows where the lesson is going','A visual route from orientation to mastery.','blue'],
+ ['Concept Card','Introduces a concept or definition','One crisp idea, prerequisite, and why it matters.','yellow'],
+ ['Slider','Lets the learner manipulate a variable','Use it to make a relationship tangible.','green'],
+ ['Animation','Shows mathematical change over time','A controlled reveal for process, motion, or iteration.','pink'],
+ ['Comparison','Puts two ideas side-by-side','Contrast assumptions, methods, or outcomes.','blue'],
+ ['Question','Forces active recall and thinking','A small prompt placed directly beside the work.','yellow'],
+ ['Hint','Progressive help without revealing the answer','Reveal only the next useful nudge.','green'],
+ ['Scratchpad',"Student's own working area",'A private space for rough work and experiments.','pink'],
+ ['Annotation','Agent points at, circles, or highlights something','Anchors attention to the exact board object.','blue'],
+ ['Reveal','Hides or reveals a step, answer, or explanation','Keep the next step just out of sight.','yellow'],
+ ['Example','Worked example constructed gradually','Build it in the same order a learner should reason.','green'],
+ ['Mistake Check','Detects and discusses an error','Turn a wrong step into useful feedback.','pink'],
+ ['Memory Hook','Compresses something into a memorable rule','A short phrase, image, or connection worth keeping.','blue'],
+ ['Retrieval Check','Tests something learned earlier','Bring back an older idea at the right moment.','yellow'],
+ ['Challenge','Independent application','A clean hand-off from guided work to autonomy.','green'],
+ ['Reflection','Student explains the idea in their own words','Make understanding visible before moving on.','pink'],
+ ['Mastery Card','Summarizes what is actually understood','Record the evidence, not just a completion tick.','blue']
+];
+const samples=[
+ '<div class="eyebrow">lesson flow</div><div class="rows"><div class="row"><span>Now</span><span>Orient</span></div><div class="row"><span>Next</span><span>Explain</span></div><div class="row"><span>Then</span><span>Practice</span></div></div><div class="meter"><i style="width:28%"></i></div>',
+ '<div class="eyebrow">core idea</div><div class="big">Vectors have direction</div><div class="rule"></div><div>Prerequisite · coordinates</div>',
+ '<div class="eyebrow">control</div><div class="big">t = 0.65</div><div class="meter"><i style="width:65%"></i></div><div class="pill">drag to change</div>',
+ '<div class="eyebrow">time step 04</div><div class="big">→ → →</div><div class="rule"></div><div>Watch the transformation unfold.</div>',
+ '<div class="eyebrow">side by side</div><div class="rows"><div class="row"><span>Scalar</span><span>magnitude</span></div><div class="row"><span>Vector</span><span>magnitude + direction</span></div></div>',
+ '<div class="eyebrow">check yourself</div><div class="quote">What changes if the direction reverses?</div><div class="pill">answer on board</div>',
+ '<div class="eyebrow">hint 1 of 3</div><div class="quote">Start by naming the known quantity.</div><div class="pill">reveal next</div>',
+ '<div class="eyebrow">your working</div><div class="quote">Try a rough sketch here…</div><div class="rule"></div><div class="pill">private</div>',
+ '<div class="eyebrow">focus</div><div class="quote">This arrow is the direction cue.</div><div class="pill">highlighted</div>',
+ '<div class="eyebrow">next step hidden</div><div class="big">▸ reveal</div><div class="rule"></div><div>Think before opening.</div>',
+ '<div class="eyebrow">worked example</div><div class="big">Given → Plan → Solve</div><div class="rule"></div><div>One step at a time.</div>',
+ '<div class="eyebrow">diagnosis</div><div class="quote">The sign changed here. What does that tell us?</div><div class="pill">inspect step 2</div>',
+ '<div class="eyebrow">remember</div><div class="big">direction matters</div><div class="rule"></div><div>Connect the rule to the picture.</div>',
+ '<div class="eyebrow">earlier idea</div><div class="quote">Where did we use coordinates before?</div><div class="pill">retrieve</div>',
+ '<div class="eyebrow">your turn</div><div class="big">Apply it</div><div class="rule"></div><div>No scaffold this time.</div>',
+ '<div class="eyebrow">say it back</div><div class="quote">A vector is…</div><div class="rule"></div><div class="pill">in your words</div>',
+ '<div class="eyebrow">evidence of mastery</div><div class="rows"><div class="row"><span>Explain</span><span>✓</span></div><div class="row"><span>Apply</span><span>○ next</span></div></div>'
+];
+const board=document.querySelector('#board'), cards=[]; const saved=JSON.parse(localStorage.getItem('studyus-widget-positions')||'null');
+const answerWidgets=new Set(['Question','Hint','Scratchpad','Mistake Check','Retrieval Check','Challenge','Reflection']);
+function pos(i){return saved?.[i]||{x:24+(i%5)*232,y:92+Math.floor(i/5)*170}}
+function make(def,i){const el=document.createElement('article');el.className='widget';el.style.setProperty('--accent',{blue:'#74b8ff',yellow:'#f5d779',green:'#81d3a4',pink:'#ef9db6'}[def[3]]);const p=pos(i);el.style.left=p.x+'px';el.style.top=p.y+'px';const answer=answerWidgets.has(def[0])?`<div class="answer"><input aria-label="Answer for ${def[0]}" placeholder="Type your answer…"><button>Check</button></div>`:'';el.innerHTML=`<div class="bar"><span class="dot"></span><span class="name">${def[0]}</span><span class="index">${String(i+1).padStart(2,'0')}</span><button class="toggle">−</button></div><div class="body">${samples[i]}<div class="rule"></div><span style="color:#718277;font-size:10px">${def[1]}</span>${answer}</div>`;const answerButton=el.querySelector('.answer button'); if(answerButton) answerButton.onclick=()=>{const input=el.querySelector('.answer input'); if(input.value.trim()){answerButton.textContent='Saved'; setTimeout(()=>answerButton.textContent='Check',900)}};const toggle=el.querySelector('.toggle');toggle.onclick=e=>{e.stopPropagation();el.classList.toggle('min');toggle.textContent=el.classList.contains('min')?'+':'−'};let drag=null;el.querySelector('.bar').onpointerdown=e=>{e.preventDefault();e.stopPropagation();drag={x:e.clientX-el.offsetLeft,y:e.clientY-el.offsetTop};el.setPointerCapture(e.pointerId)};el.onpointermove=e=>{if(!drag)return;el.style.left=Math.max(8,e.clientX-drag.x)+'px';el.style.top=Math.max(54,e.clientY-drag.y)+'px'};el.onpointerup=()=>{if(drag){drag=null;save()}};board.append(el);cards.push(el)}
+function save(){localStorage.setItem('studyus-widget-positions',JSON.stringify(cards.map(c=>({x:parseInt(c.style.left),y:parseInt(c.style.top)}))))}
+definitions.forEach(make);
+document.querySelector('#reset').onclick=()=>{localStorage.removeItem('studyus-widget-positions');location.reload()};document.querySelector('#arrange').onclick=()=>{cards.forEach((c,i)=>{const p={x:24+(i%5)*232,y:92+Math.floor(i/5)*170};c.style.left=p.x+'px';c.style.top=p.y+'px'});save()};
+let pan=null;board.onpointerdown=e=>{if(e.target!==board)return;pan={x:e.clientX,y:e.clientY,sx:board.scrollLeft,sy:board.scrollTop};board.setPointerCapture(e.pointerId)};board.onpointermove=e=>{if(pan){board.scrollLeft=pan.sx-(e.clientX-pan.x);board.scrollTop=pan.sy-(e.clientY-pan.y)}};board.onpointerup=()=>pan=null;
+</script>
+</body></html>

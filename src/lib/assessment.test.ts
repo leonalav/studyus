@@ -4,6 +4,8 @@ import {
   parseRationalNumber,
   gradeNumericResponse,
   getAttemptForTaking,
+  beginAttempt,
+  createRetakeAttempt,
   autosaveDraft,
   submitAttempt,
   applyScoreOverride,
@@ -94,6 +96,34 @@ describe("Assessment & Numeric Grader Engine", () => {
       const res2 = await submitAttempt("attempt-legacy-1");
       expect(res2.status).toBe("completed");
       expect(res2.aggregateScore).toBe(res1.aggregateScore);
+    });
+
+    it("creates retakes as clean attempts against the same immutable form", async () => {
+      await submitAttempt("attempt-legacy-1");
+      const original = await getAttemptForTaking("attempt-legacy-1");
+      const retakeId = await createRetakeAttempt("attempt-legacy-1");
+      const retake = await getAttemptForTaking(retakeId);
+
+      expect(retake).toMatchObject({
+        attemptId: retakeId,
+        formId: original?.formId,
+        status: "created",
+      });
+      expect(retake?.questions.every((question) => question.draftResponse === "")).toBe(true);
+
+      const firstStart = await beginAttempt(retakeId);
+      const repeatedStart = await beginAttempt(retakeId);
+      expect(firstStart).toEqual({ status: "active", startedNow: true });
+      expect(repeatedStart).toEqual({ status: "active", startedNow: false });
+      expect(await getAttemptForTaking(retakeId)).toMatchObject({ status: "active" });
+
+      const db = await getDb();
+      const events = db.exec(
+        "SELECT COUNT(*) FROM assessment_events WHERE attempt_id = ? AND event_type = 'attempt_started';",
+        [retakeId]
+      );
+      expect(events[0].values[0][0]).toBe(1);
+      db.run("DELETE FROM assessment_attempts WHERE id = ?;", [retakeId]);
     });
 
     it("applies score override transactionally and recomputes total", async () => {

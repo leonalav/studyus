@@ -1,0 +1,777 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Studyus — Widget Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Gloria+Hallelujah&family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    /* Source-faithful chalkboard tokens (leonalav/studyus classic theme) */
+    --chalk: #eef6f1;
+    --chalk-dim: rgba(238, 246, 241, 0.72);
+    --chalk-faint: rgba(238, 246, 241, 0.46);
+    --cyan: #7dd3fc;
+    --amber: #fde68a;
+    --accent-blue: #2383e2;
+    --ok: #86efac;
+    --err: #fca5a5;
+    /* Studyus brand accents, used sparingly */
+    --ember: #ff7a33;
+    --violet: #9b96e6;
+    /* Glass panel material (from AI Response window) */
+    --panel: rgba(52, 52, 54, 0.58);
+    --panel-edge: rgba(255, 255, 255, 0.08);
+    --panel-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: #1b332a;
+    color: var(--chalk);
+    font-family: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+
+  /* ---------- Top chrome ---------- */
+  .board-chrome {
+    position: fixed; z-index: 40; top: 0; left: 0; right: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    height: 46px; padding: 0 18px;
+    background: rgba(24, 24, 24, 0.72);
+    border-bottom: 1px solid var(--panel-edge);
+    backdrop-filter: blur(12px);
+  }
+  .chrome-left { display: flex; align-items: center; gap: 12px; }
+  .chrome-dots { display: flex; gap: 6px; }
+  .chrome-dots i { width: 9px; height: 9px; border-radius: 50%; }
+  .chrome-dots i:nth-child(1) { background: #dd6945; }
+  .chrome-dots i:nth-child(2) { background: #d7ac4d; }
+  .chrome-dots i:nth-child(3) { background: #5d9a70; }
+  .chrome-title { color: rgba(231,231,229,0.82); font-size: 12px; font-weight: 600; }
+  .chrome-title b { color: var(--cyan); font-weight: 600; }
+  .chrome-sub {
+    padding: 4px 9px; border-radius: 4px;
+    background: rgba(255,255,255,0.07);
+    color: rgba(231,231,229,0.55);
+    font-family: 'Space Mono', monospace; font-size: 9px;
+  }
+  .chrome-right { display: flex; align-items: center; gap: 9px; }
+  .chrome-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 30px; padding: 0 11px; border: 1px solid var(--panel-edge);
+    border-radius: 6px; background: rgba(255,255,255,0.04);
+    color: rgba(231,231,229,0.7); font: inherit; font-size: 10.5px; font-weight: 500;
+    cursor: pointer; transition: background .18s ease, color .18s ease, border-color .18s ease;
+  }
+  .chrome-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
+  .chrome-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .chrome-btn svg { width: 13px; height: 13px; }
+
+  /* ---------- Infinite board viewport ---------- */
+  .viewport {
+    position: fixed; inset: 46px 0 0 0;
+    overflow: hidden;
+    cursor: grab;
+    /* Classic green radial + 22px grid */
+    background-color: #1b332a;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px),
+      radial-gradient(120% 90% at 30% 10%, #2f5646 0%, #244136 45%, #1b332a 100%);
+    background-size: 22px 22px, 22px 22px, cover;
+    background-attachment: local, local, fixed;
+  }
+  .viewport.is-panning { cursor: grabbing; }
+  .viewport::after {
+    content: ''; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+    background: linear-gradient(180deg, rgba(255,255,255,0.035), transparent 16%, transparent 76%, rgba(0,0,0,0.2));
+  }
+
+  .canvas { position: absolute; top: 0; left: 0; width: 1px; height: 1px; transform-origin: 0 0; }
+
+  /* ---------- Widget shell (glass material) ---------- */
+  .widget {
+    position: absolute; width: 250px;
+    display: flex; flex-direction: column;
+    border: 1px solid var(--panel-edge); border-radius: 8px;
+    background: var(--panel);
+    box-shadow: var(--panel-shadow);
+    backdrop-filter: blur(12px);
+    color: #e7e7e5;
+    overflow: hidden;
+    transition: box-shadow .2s ease, border-color .2s ease;
+    animation: chalk-in .6s both;
+  }
+  .widget.is-dragging { box-shadow: 0 22px 48px rgba(0,0,0,0.42); border-color: rgba(125,211,252,0.4); z-index: 999 !important; }
+  .widget:focus-within { border-color: rgba(125,211,252,0.28); }
+  .w-head {
+    display: flex; align-items: center; gap: 9px;
+    height: 34px; padding: 0 11px; cursor: grab;
+    border-bottom: 1px solid var(--panel-edge);
+  }
+  .w-head.grabbing { cursor: grabbing; }
+  .w-mark { flex: none; width: 20px; height: 20px; display: grid; place-items: center; color: var(--cyan); }
+  .w-mark svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .w-title { flex: 1; font-size: 11px; font-weight: 600; color: rgba(231,231,229,0.9); letter-spacing: .01em; }
+  .w-tag {
+    padding: 3px 7px; border-radius: 999px;
+    font-family: 'Space Mono', monospace; font-size: 7.5px; letter-spacing: .06em; text-transform: uppercase;
+    background: rgba(255,255,255,0.06); color: rgba(231,231,229,0.5);
+  }
+  .w-body { padding: 12px 13px 14px; }
+  .w-body p { margin: 0; font-size: 10.5px; line-height: 1.6; color: rgba(231,231,229,0.78); text-wrap: pretty; }
+  .w-body p + p { margin-top: 8px; }
+  .w-chalk { font-family: 'Gloria Hallelujah', cursive; text-shadow: 0 0 1px currentColor; }
+
+  /* Shared small pieces */
+  .lead { color: rgba(231,231,229,0.92); font-weight: 500; }
+  .cyan { color: var(--cyan); }
+  .amber { color: var(--amber); }
+  .muted { color: rgba(231,231,229,0.5); }
+  .mono { font-family: 'Space Mono', monospace; font-size: 8.5px; letter-spacing: .04em; color: rgba(231,231,229,0.5); }
+
+  /* Roadmap steps */
+  .road { display: grid; gap: 0; }
+  .road li { display: grid; grid-template-columns: 16px 1fr; gap: 9px; align-items: start; list-style: none; padding: 5px 0; font-size: 10px; color: rgba(231,231,229,0.72); }
+  .road { margin: 0; padding: 0; }
+  .road .node { position: relative; display: grid; place-items: center; height: 15px; }
+  .road .node i { width: 7px; height: 7px; border-radius: 50%; border: 1.4px solid var(--chalk-faint); }
+  .road li.done .node i { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 8px rgba(125,211,252,0.6); }
+  .road li.now .node i { border-color: var(--cyan); }
+  .road li.now { color: rgba(231,231,229,0.95); }
+  .road .node::after { content: ''; position: absolute; top: 15px; width: 1.4px; height: 12px; background: rgba(238,246,241,0.18); }
+  .road li:last-child .node::after { display: none; }
+
+  /* Concept card */
+  .concept-term { font-family: 'Gloria Hallelujah', cursive; font-size: 20px; color: var(--chalk); text-shadow: 0 0 1px currentColor; }
+  .concept-pron { font-size: 9px; color: rgba(231,231,229,0.45); margin-top: 2px; }
+  .concept-line { margin-top: 9px; }
+
+  /* Slider */
+  .slider-val { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 9px; }
+  .slider-val b { font-family: 'Gloria Hallelujah', cursive; font-size: 22px; color: var(--amber); text-shadow: 0 0 1px currentColor; }
+  .slider-track { position: relative; height: 4px; border-radius: 999px; background: rgba(255,255,255,0.1); cursor: pointer; }
+  .slider-fill { position: absolute; left: 0; top: 0; height: 100%; border-radius: inherit; background: var(--cyan); }
+  .slider-knob { position: absolute; top: 50%; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.4); transform: translateY(-50%); }
+  .slider-scale { display: flex; justify-content: space-between; margin-top: 7px; }
+
+  /* Animation timeline */
+  .anim-stage { position: relative; height: 62px; margin-bottom: 9px; border-radius: 6px; overflow: hidden; background: rgba(0,0,0,0.16); }
+  .anim-dot { position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--ember); box-shadow: 0 0 12px rgba(255,122,51,0.6); }
+  .anim-path { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .anim-ctrl { display: flex; align-items: center; gap: 9px; }
+  .play-btn { flex: none; width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 50%; background: rgba(255,255,255,0.1); color: #fff; cursor: pointer; }
+  .play-btn svg { width: 11px; height: 11px; }
+  .play-btn:hover { background: rgba(255,255,255,0.18); }
+  .anim-progress { flex: 1; height: 3px; border-radius: 999px; background: rgba(255,255,255,0.1); overflow: hidden; }
+  .anim-progress i { display: block; height: 100%; width: 0; background: var(--cyan); }
+
+  /* Comparison */
+  .cmp { display: grid; grid-template-columns: 1fr 1px 1fr; gap: 10px; }
+  .cmp .rule { background: rgba(255,255,255,0.1); }
+  .cmp h5 { margin: 0 0 6px; font-family: 'Gloria Hallelujah', cursive; font-size: 12px; font-weight: 400; }
+  .cmp .a h5 { color: var(--cyan); } .cmp .b h5 { color: var(--amber); }
+  .cmp ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; }
+  .cmp li { font-size: 9px; line-height: 1.4; color: rgba(231,231,229,0.72); }
+
+  /* Question / retrieval / mistake -- option rows */
+  .opts { display: grid; gap: 6px; margin-top: 4px; }
+  .opt {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 8px 9px; border: 1px solid var(--panel-edge); border-radius: 6px;
+    background: rgba(255,255,255,0.03); color: rgba(231,231,229,0.82);
+    font: inherit; font-size: 10px; text-align: left; cursor: pointer;
+    transition: background .16s ease, border-color .16s ease;
+  }
+  .opt:hover { background: rgba(255,255,255,0.07); }
+  .opt:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+  .opt .key { flex: none; width: 17px; height: 17px; display: grid; place-items: center; border-radius: 4px; background: rgba(255,255,255,0.08); font-family: 'Space Mono', monospace; font-size: 8.5px; color: rgba(231,231,229,0.6); }
+  .opt.correct { border-color: rgba(79,180,119,0.4); background: rgba(79,180,119,0.12); color: var(--ok); }
+  .opt.wrong { border-color: rgba(248,113,113,0.35); background: rgba(248,113,113,0.1); color: var(--err); }
+
+  /* Hint accordion */
+  .hint-step { border-top: 1px solid var(--panel-edge); }
+  .hint-step:first-child { border-top: 0; }
+  .hint-trigger {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    width: 100%; padding: 9px 0; border: 0; background: none; cursor: pointer;
+    color: rgba(231,231,229,0.82); font: inherit; font-size: 10px; font-weight: 500; text-align: left;
+  }
+  .hint-trigger .lvl { font-family: 'Space Mono', monospace; font-size: 8px; color: rgba(231,231,229,0.4); }
+  .hint-trigger .chev { color: var(--cyan); transition: transform .2s ease; }
+  .hint-step.open .chev { transform: rotate(90deg); }
+  .hint-panel { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .28s ease; }
+  .hint-panel > div { overflow: hidden; }
+  .hint-step.open .hint-panel { grid-template-rows: 1fr; }
+  .hint-panel p { padding-bottom: 10px; font-size: 9.5px !important; }
+
+  /* Scratchpad */
+  .scratch {
+    min-height: 74px; padding: 10px; border-radius: 6px;
+    background: rgba(0,0,0,0.18);
+    background-image: repeating-linear-gradient(rgba(255,255,255,0.05) 0 1px, transparent 1px 21px);
+    font-family: 'Gloria Hallelujah', cursive; font-size: 12px; line-height: 21px; color: var(--chalk);
+    text-shadow: 0 0 1px currentColor;
+  }
+  .scratch .cursor { display: inline-block; width: 1px; height: 13px; background: var(--cyan); vertical-align: -2px; animation: blink 1s steps(2) infinite; }
+
+  /* Annotation */
+  .annot-stage { position: relative; height: 92px; border-radius: 6px; background: rgba(0,0,0,0.16); overflow: hidden; }
+  .annot-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .annot-callout { position: absolute; padding: 4px 7px; border-radius: 5px; background: rgba(35,131,226,0.16); border: 1px solid rgba(125,211,252,0.3); font-family: 'Gloria Hallelujah', cursive; font-size: 10px; color: var(--cyan); text-shadow: 0 0 1px currentColor; }
+
+  /* Reveal */
+  .reveal-row { display: grid; gap: 7px; }
+  .reveal-cell { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 6px; background: rgba(255,255,255,0.03); font-size: 10px; }
+  .reveal-cell .val { font-family: 'Gloria Hallelujah', cursive; color: var(--amber); text-shadow: 0 0 1px currentColor; }
+  .reveal-cell .val.hidden { filter: blur(6px); color: rgba(231,231,229,0.5); }
+  .reveal-toggle { border: 0; background: rgba(255,255,255,0.08); color: rgba(231,231,229,0.7); font: inherit; font-size: 8.5px; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+  .reveal-toggle:hover { background: rgba(255,255,255,0.14); color: #fff; }
+
+  /* Example -- worked steps */
+  .steps { display: grid; gap: 0; counter-reset: step; }
+  .steps .step { display: grid; grid-template-columns: 18px 1fr; gap: 9px; padding: 7px 0; border-top: 1px dashed rgba(255,255,255,0.1); }
+  .steps .step:first-child { border-top: 0; }
+  .steps .n { width: 18px; height: 18px; display: grid; place-items: center; border-radius: 5px; background: rgba(125,211,252,0.14); color: var(--cyan); font-family: 'Space Mono', monospace; font-size: 8.5px; }
+  .steps .eq { font-family: 'Gloria Hallelujah', cursive; font-size: 12px; color: var(--chalk); text-shadow: 0 0 1px currentColor; }
+  .steps .why { font-size: 8.5px; color: rgba(231,231,229,0.5); margin-top: 2px; }
+
+  /* Memory hook */
+  .hook { position: relative; padding: 13px 14px; border-radius: 7px; background: rgba(155,150,230,0.1); border: 1px solid rgba(155,150,230,0.25); }
+  .hook p { font-family: 'Gloria Hallelujah', cursive; font-size: 14px; line-height: 1.5; color: #d9d6ff; text-shadow: 0 0 1px currentColor; }
+  .hook .quote { position: absolute; top: 4px; right: 10px; font-family: 'Gloria Hallelujah', cursive; font-size: 30px; color: rgba(155,150,230,0.4); }
+
+  /* Mastery card -- checklist */
+  .mastery { display: grid; gap: 8px; }
+  .mastery-row { display: grid; grid-template-columns: 16px 1fr; gap: 9px; align-items: center; font-size: 10px; color: rgba(231,231,229,0.82); }
+  .mastery-check { width: 16px; height: 16px; display: grid; place-items: center; border-radius: 5px; background: rgba(79,180,119,0.16); color: var(--ok); }
+  .mastery-check svg { width: 10px; height: 10px; stroke-width: 2.2; }
+  .mastery-meter { margin-top: 4px; height: 4px; border-radius: 999px; background: rgba(255,255,255,0.1); overflow: hidden; }
+  .mastery-meter i { display: block; height: 100%; width: 85%; background: var(--ok); }
+
+  /* Reflection prompt */
+  .reflect-field {
+    min-height: 58px; padding: 9px 10px; border-radius: 6px;
+    background: rgba(0,0,0,0.16); border: 1px solid var(--panel-edge);
+    font-family: 'Gloria Hallelujah', cursive; font-size: 11px; line-height: 1.6; color: var(--chalk-dim);
+  }
+  .reflect-field .cursor { display: inline-block; width: 1px; height: 12px; background: var(--cyan); vertical-align: -2px; animation: blink 1s steps(2) infinite; }
+
+  /* Challenge */
+  .challenge-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 999px; background: rgba(255,122,51,0.14); border: 1px solid rgba(255,122,51,0.3); color: var(--ember); font-family: 'Space Mono', monospace; font-size: 8px; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 10px; }
+  .challenge-prompt { font-family: 'Gloria Hallelujah', cursive; font-size: 13px; line-height: 1.5; color: var(--chalk); text-shadow: 0 0 1px currentColor; }
+
+  /* Mistake check */
+  .flaw-line { padding: 9px 10px; border-radius: 6px; background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.22); font-family: 'Gloria Hallelujah', cursive; font-size: 12px; color: var(--chalk); text-shadow: 0 0 1px currentColor; margin-bottom: 9px; }
+  .flaw-line s { text-decoration-color: var(--err); text-decoration-thickness: 2px; }
+  .flaw-fix { display: flex; align-items: center; gap: 7px; font-size: 9.5px; color: var(--ok); }
+  .flaw-fix .mark { flex: none; }
+
+  /* Minimap */
+  .minimap {
+    position: fixed; z-index: 40; right: 16px; bottom: 16px;
+    width: 168px; height: 108px; border-radius: 8px;
+    background: rgba(24,24,24,0.72); border: 1px solid var(--panel-edge);
+    box-shadow: var(--panel-shadow); backdrop-filter: blur(12px); overflow: hidden;
+  }
+  .minimap-head { display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; border-bottom: 1px solid var(--panel-edge); }
+  .minimap-head span { font-family: 'Space Mono', monospace; font-size: 7.5px; color: rgba(231,231,229,0.5); letter-spacing: .06em; }
+  .minimap-canvas { position: relative; height: calc(100% - 22px); }
+  .mini-node { position: absolute; border-radius: 1.5px; background: rgba(125,211,252,0.45); }
+  .mini-view { position: absolute; border: 1px solid var(--cyan); background: rgba(125,211,252,0.08); border-radius: 2px; }
+
+  /* Zoom pill */
+  .zoombar {
+    position: fixed; z-index: 40; left: 50%; bottom: 16px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 3px; padding: 4px;
+    background: rgba(24,24,24,0.72); border: 1px solid var(--panel-edge);
+    border-radius: 999px; box-shadow: var(--panel-shadow); backdrop-filter: blur(12px);
+  }
+  .zoombar button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 999px; background: transparent; color: rgba(231,231,229,0.7); font: inherit; font-size: 15px; cursor: pointer; }
+  .zoombar button:hover { background: rgba(255,255,255,0.1); color: #fff; }
+  .zoombar .level { min-width: 46px; text-align: center; font-family: 'Space Mono', monospace; font-size: 10px; color: rgba(231,231,229,0.7); }
+
+  /* Hint on first load */
+  .hint-toast {
+    position: fixed; z-index: 39; left: 50%; top: 62px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 8px; padding: 7px 13px;
+    background: rgba(24,24,24,0.82); border: 1px solid var(--panel-edge); border-radius: 999px;
+    box-shadow: var(--panel-shadow); backdrop-filter: blur(12px);
+    font-size: 10.5px; color: rgba(231,231,229,0.72);
+    transition: opacity .5s ease, transform .5s ease;
+  }
+  .hint-toast.gone { opacity: 0; transform: translateX(-50%) translateY(-8px); pointer-events: none; }
+  .hint-toast kbd { font-family: 'Space Mono', monospace; font-size: 9px; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.1); color: var(--cyan); }
+
+  :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+  @keyframes chalk-in {
+    from { opacity: 0; filter: blur(3px); transform: translateY(6px) rotate(-0.35deg); }
+    to   { opacity: 1; filter: blur(0);   transform: translateY(0)   rotate(-0.15deg); }
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+  }
+</style>
+</head>
+<body>
+  <div class="board-chrome">
+    <div class="chrome-left">
+      <span class="chrome-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="chrome-title">Studyus · <b>Kinematics board</b></span>
+      <span class="chrome-sub">17 widgets · infinite canvas</span>
+    </div>
+    <div class="chrome-right">
+      <button class="chrome-btn" id="fit" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+        Fit board
+      </button>
+      <button class="chrome-btn" id="tidy" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        Tidy up
+      </button>
+    </div>
+  </div>
+
+  <div class="viewport" id="viewport">
+    <div class="canvas" id="canvas"></div>
+  </div>
+
+  <div class="hint-toast" id="hintToast">
+    <span>Drag a widget by its header · <kbd>drag</kbd> the board to pan · scroll to zoom</span>
+  </div>
+
+  <div class="minimap" aria-hidden="true">
+    <div class="minimap-head"><span>OVERVIEW</span><span id="miniCount">17</span></div>
+    <div class="minimap-canvas" id="miniCanvas"></div>
+  </div>
+
+  <div class="zoombar" role="group" aria-label="Zoom controls">
+    <button type="button" id="zoomOut" aria-label="Zoom out">−</button>
+    <span class="level" id="zoomLevel">100%</span>
+    <button type="button" id="zoomIn" aria-label="Zoom in">+</button>
+  </div>
+
+<script>
+/* ============================================================
+   Widget content — 17 learning widgets (from the 20-list,
+   excluding #3 Graph, #4 Point/Geometry, #5 Equation).
+   Each renders inside the glass shell copied from the app's
+   AI Response window, on the classic chalkboard.
+   ============================================================ */
+
+// Hand-drawn chalk marks (no generic UI-kit icons).
+const M = {
+  roadmap: '<svg viewBox="0 0 24 24"><path d="M4 18c0-3 4-3 4-6s-4-3-4-6"/><path d="M20 6c0 3-4 3-4 6s4 3 4 6"/><circle cx="4" cy="6" r="1.4"/><circle cx="20" cy="18" r="1.4"/></svg>',
+  concept: '<svg viewBox="0 0 24 24"><path d="M6 4h9l4 4v12H6z"/><path d="M14 4v5h5"/><path d="M9 13h6M9 16h4"/></svg>',
+  slider: '<svg viewBox="0 0 24 24"><path d="M3 12h18"/><circle cx="15" cy="12" r="3"/></svg>',
+  animation: '<svg viewBox="0 0 24 24"><path d="M4 16c4-9 12-9 16 0"/><circle cx="8" cy="12.6" r="1.5"/></svg>',
+  comparison: '<svg viewBox="0 0 24 24"><path d="M12 4v16"/><path d="M6 8H4M8 8H6M6 12H4M8 12H6"/><path d="M18 9l3 3-3 3"/></svg>',
+  question: '<svg viewBox="0 0 24 24"><path d="M9 9a3 3 0 1 1 4 2.8c-.9.5-1 1-1 2.2"/><circle cx="12" cy="18" r="0.9" fill="currentColor" stroke="none"/></svg>',
+  hint: '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-3 11v2h6v-2a6 6 0 0 0-3-11z"/><path d="M10 20h4"/></svg>',
+  scratchpad: '<svg viewBox="0 0 24 24"><path d="M4 20l2-5 10-10 3 3-10 10z"/><path d="M14 6l3 3"/></svg>',
+  annotation: '<svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="5"/><path d="M14 14l6 6"/></svg>',
+  reveal: '<svg viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6"/><circle cx="12" cy="12" r="2.3"/></svg>',
+  example: '<svg viewBox="0 0 24 24"><path d="M5 4h10l4 4v12H5z"/><path d="M8 12l2 2 4-4"/></svg>',
+  mistake: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M9 9l6 6M15 9l-6 6"/></svg>',
+  memory: '<svg viewBox="0 0 24 24"><path d="M12 3c-3 0-5 2-5 5 0 2 1 3 1 5v2a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2c0-2 1-3 1-5 0-3-2-5-5-5z"/><path d="M10 19h4"/></svg>',
+  retrieval: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-3-6.2"/><path d="M20 4v4h-4"/></svg>',
+  challenge: '<svg viewBox="0 0 24 24"><path d="M6 4h12v3a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4z"/><path d="M9 15h6M8 20h8M12 11v4"/></svg>',
+  reflection: '<svg viewBox="0 0 24 24"><path d="M4 5h16v9H8l-4 4z"/><path d="M8 9h8M8 12h5"/></svg>',
+  mastery: '<svg viewBox="0 0 24 24"><path d="M12 3l2.4 5 5.4.6-4 3.7 1.1 5.3L12 20l-4.9 2.6L8.2 12l-4-3.7 5.4-.6z"/></svg>',
+};
+
+const WIDGETS = [
+  { id:'roadmap', n:1, mark:M.roadmap, title:'Roadmap', tag:'Path', x:80, y:70, body:`
+    <p class="muted mono" style="margin-bottom:9px">WHERE THIS LESSON GOES</p>
+    <ul class="road">
+      <li class="done"><span class="node"><i></i></span><span>Position &amp; displacement</span></li>
+      <li class="done"><span class="node"><i></i></span><span>Average velocity</span></li>
+      <li class="now"><span class="node"><i></i></span><span>Velocity vs. speed</span></li>
+      <li><span class="node"><i></i></span><span>Acceleration</span></li>
+      <li><span class="node"><i></i></span><span>Motion under gravity</span></li>
+    </ul>` },
+
+  { id:'concept', n:2, mark:M.concept, title:'Concept Card', tag:'Idea', x:390, y:70, body:`
+    <div class="concept-term w-chalk">Velocity</div>
+    <div class="concept-pron mono">/vəˈlɒsɪti/ · vector</div>
+    <p class="concept-line">The rate of change of position <span class="cyan">with a direction</span>. Two objects can share a speed and still have different velocities.</p>` },
+
+  { id:'slider', n:6, mark:M.slider, title:'Slider', tag:'Manipulate', x:700, y:70, body:`
+    <p class="muted mono" style="margin-bottom:9px">LAUNCH ANGLE θ</p>
+    <div class="slider-val"><span class="muted">range</span><b data-slider-val>42°</b></div>
+    <div class="slider-track" data-slider>
+      <div class="slider-fill" style="width:47%"></div>
+      <div class="slider-knob" style="left:47%"></div>
+    </div>
+    <div class="slider-scale mono"><span>0°</span><span>45°</span><span>90°</span></div>` },
+
+  { id:'animation', n:7, mark:M.animation, title:'Animation', tag:'Over time', x:1010, y:70, body:`
+    <div class="anim-stage">
+      <svg class="anim-path" viewBox="0 0 220 62" preserveAspectRatio="none"><path d="M8 54 C60 -6 160 -6 212 54" fill="none" stroke="rgba(238,246,241,0.28)" stroke-width="1.4" stroke-dasharray="3 5"/></svg>
+      <span class="anim-dot" data-anim-dot></span>
+    </div>
+    <div class="anim-ctrl">
+      <button class="play-btn" type="button" data-anim-play aria-label="Play animation"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M7 5v14l11-7z"/></svg></button>
+      <div class="anim-progress"><i data-anim-fill></i></div>
+    </div>` },
+
+  { id:'comparison', n:8, mark:M.comparison, title:'Comparison', tag:'Side by side', x:80, y:340, body:`
+    <div class="cmp">
+      <div class="a"><h5 class="w-chalk">Speed</h5><ul><li>Scalar</li><li>Always ≥ 0</li><li>Distance ÷ time</li></ul></div>
+      <div class="rule"></div>
+      <div class="b"><h5 class="w-chalk">Velocity</h5><ul><li>Vector</li><li>Has sign</li><li>Displacement ÷ time</li></ul></div>
+    </div>` },
+
+  { id:'question', n:9, mark:M.question, title:'Question', tag:'Recall', x:390, y:340, body:`
+    <p class="lead" style="margin-bottom:9px">A ball is thrown straight up. At the very top of its path, its velocity is…</p>
+    <div class="opts" data-quiz>
+      <button class="opt" type="button" data-correct="false"><span class="key">A</span>maximum</button>
+      <button class="opt" type="button" data-correct="true"><span class="key">B</span>zero</button>
+      <button class="opt" type="button" data-correct="false"><span class="key">C</span>equal to g</button>
+    </div>` },
+
+  { id:'hint', n:10, mark:M.hint, title:'Hint', tag:'Progressive', x:700, y:340, body:`
+    <div class="hint-step" data-hint>
+      <button class="hint-trigger" type="button"><span>Where do I start?</span><span class="lvl">1 · nudge</span><span class="chev">›</span></button>
+      <div class="hint-panel"><div><p>Name what is constant. On the way up, what never changes?</p></div></div>
+    </div>
+    <div class="hint-step" data-hint>
+      <button class="hint-trigger" type="button"><span>Still stuck</span><span class="lvl">2 · lead</span><span class="chev">›</span></button>
+      <div class="hint-panel"><div><p>Gravity acts downward the whole time — even at the top.</p></div></div>
+    </div>
+    <div class="hint-step" data-hint>
+      <button class="hint-trigger" type="button"><span>Show the idea</span><span class="lvl">3 · reveal</span><span class="chev">›</span></button>
+      <div class="hint-panel"><div><p>Velocity passes through zero; acceleration stays −g.</p></div></div>
+    </div>` },
+
+  { id:'scratchpad', n:11, mark:M.scratchpad, title:'Scratchpad', tag:'Your work', x:1010, y:340, body:`
+    <p class="muted mono" style="margin-bottom:9px">WORKING AREA</p>
+    <div class="scratch">v = v₀ − g·t<br>0 = 4 − 9.8·t<br>t = 0.41 s<span class="cursor"></span></div>` },
+
+  { id:'annotation', n:12, mark:M.annotation, title:'Annotation', tag:'Agent points', x:80, y:610, body:`
+    <div class="annot-stage">
+      <svg viewBox="0 0 220 92"><path d="M12 78 C60 8 160 8 208 78" fill="none" stroke="rgba(238,246,241,0.7)" stroke-width="2.4" stroke-linecap="round"/><circle cx="110" cy="20" r="4.5" fill="none" stroke="#7dd3fc" stroke-width="1.8"/><path d="M110 25 L96 44" stroke="#7dd3fc" stroke-width="1.4"/></svg>
+      <span class="annot-callout" style="left:12px;bottom:8px">turning point ↑</span>
+    </div>` },
+
+  { id:'reveal', n:13, mark:M.reveal, title:'Reveal', tag:'Hide / show', x:390, y:610, body:`
+    <p class="lead" style="margin-bottom:9px">Time to reach the top:</p>
+    <div class="reveal-row">
+      <div class="reveal-cell"><span>Answer</span><span class="val hidden" data-reveal-val>t = 0.41 s</span></div>
+      <button class="reveal-toggle" type="button" data-reveal-btn>Reveal step</button>
+    </div>` },
+
+  { id:'example', n:14, mark:M.example, title:'Example', tag:'Worked', x:700, y:610, body:`
+    <div class="steps">
+      <div class="step"><span class="n">1</span><div><div class="eq w-chalk">v = v₀ − gt</div><div class="why">Start from the velocity rule</div></div></div>
+      <div class="step"><span class="n">2</span><div><div class="eq w-chalk">0 = 4 − 9.8t</div><div class="why">Set v = 0 at the top</div></div></div>
+      <div class="step"><span class="n">3</span><div><div class="eq w-chalk">t = 0.41 s</div><div class="why">Solve for the time</div></div></div>
+    </div>` },
+
+  { id:'mistake', n:15, mark:M.mistake, title:'Mistake Check', tag:'Find the error', x:1010, y:610, body:`
+    <p class="muted mono" style="margin-bottom:9px">SPOT THE FLAW</p>
+    <div class="flaw-line w-chalk">a = <s>0</s> at the top</div>
+    <div class="flaw-fix"><span class="mark">↳</span>Velocity is 0, but acceleration stays −9.8 m/s².</div>` },
+
+  { id:'memory', n:16, mark:M.memory, title:'Memory Hook', tag:'Remember', x:80, y:900, body:`
+    <div class="hook"><span class="quote">”</span><p>Speed forgets direction.<br>Velocity remembers it.</p></div>` },
+
+  { id:'retrieval', n:17, mark:M.retrieval, title:'Retrieval Check', tag:'From earlier', x:390, y:900, body:`
+    <p class="lead" style="margin-bottom:4px">From last session — displacement is…</p>
+    <p class="muted mono" style="margin-bottom:9px">NO PEEKING</p>
+    <div class="opts" data-quiz>
+      <button class="opt" type="button" data-correct="true"><span class="key">A</span>change in position</button>
+      <button class="opt" type="button" data-correct="false"><span class="key">B</span>total path length</button>
+    </div>` },
+
+  { id:'challenge', n:18, mark:M.challenge, title:'Challenge', tag:'On your own', x:700, y:900, body:`
+    <span class="challenge-badge">Apply it</span>
+    <p class="challenge-prompt">A drone rises at 6 m/s then cuts power. How long until it starts falling?</p>` },
+
+  { id:'reflection', n:19, mark:M.reflection, title:'Reflection', tag:'In your words', x:1010, y:900, body:`
+    <p class="lead" style="margin-bottom:9px">Explain why velocity is zero at the top — to a friend.</p>
+    <div class="reflect-field">Because it stops going up before it comes back down, so for one instant it isn't moving<span class="cursor"></span></div>` },
+
+  { id:'mastery', n:20, mark:M.mastery, title:'Mastery Card', tag:'Understood', x:245, y:1170, body:`
+    <p class="muted mono" style="margin-bottom:10px">WHAT YOU CAN NOW DO</p>
+    <div class="mastery">
+      <div class="mastery-row"><span class="mastery-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6"/></svg></span>Tell speed from velocity</div>
+      <div class="mastery-row"><span class="mastery-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6"/></svg></span>Read a sign as direction</div>
+      <div class="mastery-row"><span class="mastery-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6"/></svg></span>Find velocity = 0 at the peak</div>
+    </div>
+    <div class="mastery-meter" aria-hidden="true"><i></i></div>` },
+];
+
+/* ---------- Render widgets ---------- */
+const canvas = document.getElementById('canvas');
+const viewport = document.getElementById('viewport');
+
+WIDGETS.forEach((w, i) => {
+  const el = document.createElement('section');
+  el.className = 'widget';
+  el.dataset.id = w.id;
+  el.style.left = w.x + 'px';
+  el.style.top = w.y + 'px';
+  el.style.zIndex = 10 + i;
+  el.style.animationDelay = (i * 0.035) + 's';
+  el.innerHTML = `
+    <header class="w-head" tabindex="0" aria-label="Drag ${w.title}">
+      <span class="w-mark" aria-hidden="true">${w.mark}</span>
+      <span class="w-title">${w.title}</span>
+      <span class="w-tag">${w.tag}</span>
+    </header>
+    <div class="w-body">${w.body}</div>`;
+  canvas.appendChild(el);
+});
+
+/* ---------- Pan + zoom (infinite canvas) ---------- */
+let tx = 0, ty = 0, scale = 1;
+const MIN = 0.4, MAX = 1.8;
+const zoomLevel = document.getElementById('zoomLevel');
+
+function applyTransform() {
+  canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+  zoomLevel.textContent = Math.round(scale * 100) + '%';
+  updateMinimap();
+}
+
+function centerOn(cx, cy) {
+  const r = viewport.getBoundingClientRect();
+  tx = r.width / 2 - cx * scale;
+  ty = r.height / 2 - cy * scale;
+  applyTransform();
+}
+
+/* Board panning */
+let panning = false, panStart = null;
+viewport.addEventListener('pointerdown', (e) => {
+  if (e.target.closest('.widget')) return;
+  panning = true; panStart = { x: e.clientX - tx, y: e.clientY - ty };
+  viewport.classList.add('is-panning');
+  viewport.setPointerCapture(e.pointerId);
+  dismissToast();
+});
+viewport.addEventListener('pointermove', (e) => {
+  if (!panning) return;
+  tx = e.clientX - panStart.x; ty = e.clientY - panStart.y;
+  applyTransform();
+});
+viewport.addEventListener('pointerup', (e) => {
+  panning = false; viewport.classList.remove('is-panning');
+  try { viewport.releasePointerCapture(e.pointerId); } catch {}
+});
+
+/* Wheel zoom toward cursor */
+viewport.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const r = viewport.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const prev = scale;
+  const next = Math.min(MAX, Math.max(MIN, scale * (e.deltaY < 0 ? 1.1 : 0.9)));
+  if (next === prev) return;
+  // keep point under cursor stable
+  tx = mx - (mx - tx) * (next / prev);
+  ty = my - (my - ty) * (next / prev);
+  scale = next;
+  applyTransform();
+}, { passive: false });
+
+document.getElementById('zoomIn').onclick = () => zoomStep(1.15);
+document.getElementById('zoomOut').onclick = () => zoomStep(0.87);
+function zoomStep(f) {
+  const r = viewport.getBoundingClientRect();
+  const mx = r.width / 2, my = r.height / 2, prev = scale;
+  scale = Math.min(MAX, Math.max(MIN, scale * f));
+  tx = mx - (mx - tx) * (scale / prev);
+  ty = my - (my - ty) * (scale / prev);
+  applyTransform();
+}
+
+/* ---------- Widget dragging ---------- */
+let drag = null;
+canvas.addEventListener('pointerdown', (e) => {
+  const head = e.target.closest('.w-head');
+  if (!head) return;
+  const el = head.closest('.widget');
+  const left = parseFloat(el.style.left), top = parseFloat(el.style.top);
+  drag = { el, offX: e.clientX / scale - left, offY: e.clientY / scale - top };
+  el.classList.add('is-dragging'); head.classList.add('grabbing');
+  bringToFront(el);
+  el.setPointerCapture(e.pointerId);
+  dismissToast();
+  e.stopPropagation();
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  drag.el.style.left = (e.clientX / scale - drag.offX) + 'px';
+  drag.el.style.top = (e.clientY / scale - drag.offY) + 'px';
+  updateMinimap();
+});
+canvas.addEventListener('pointerup', (e) => {
+  if (!drag) return;
+  drag.el.classList.remove('is-dragging');
+  drag.el.querySelector('.w-head').classList.remove('grabbing');
+  try { drag.el.releasePointerCapture(e.pointerId); } catch {}
+  drag = null;
+});
+
+let zTop = 10 + WIDGETS.length;
+function bringToFront(el) { el.style.zIndex = ++zTop; }
+
+/* Keyboard nudge for accessibility */
+canvas.addEventListener('keydown', (e) => {
+  const head = e.target.closest('.w-head');
+  if (!head) return;
+  const el = head.closest('.widget');
+  const step = e.shiftKey ? 40 : 12;
+  const map = { ArrowLeft:[-step,0], ArrowRight:[step,0], ArrowUp:[0,-step], ArrowDown:[0,step] };
+  if (!map[e.key]) return;
+  e.preventDefault();
+  el.style.left = (parseFloat(el.style.left) + map[e.key][0]) + 'px';
+  el.style.top = (parseFloat(el.style.top) + map[e.key][1]) + 'px';
+  bringToFront(el); updateMinimap();
+});
+
+/* ---------- Fit / tidy ---------- */
+function boardBounds() {
+  let minX=1e9, minY=1e9, maxX=-1e9, maxY=-1e9;
+  document.querySelectorAll('.widget').forEach(el => {
+    const x = parseFloat(el.style.left), y = parseFloat(el.style.top);
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + el.offsetWidth); maxY = Math.max(maxY, y + el.offsetHeight);
+  });
+  return { minX, minY, maxX, maxY, w: maxX-minX, h: maxY-minY, cx:(minX+maxX)/2, cy:(minY+maxY)/2 };
+}
+document.getElementById('fit').onclick = () => {
+  const b = boardBounds(), r = viewport.getBoundingClientRect();
+  scale = Math.min(MAX, Math.max(MIN, Math.min((r.width-120)/b.w, (r.height-120)/b.h)));
+  centerOn(b.cx, b.cy);
+};
+document.getElementById('tidy').onclick = () => {
+  const cols = 6, gapX = 310, gapY = 300, ox = 80, oy = 70;
+  document.querySelectorAll('.widget').forEach((el, i) => {
+    el.style.left = (ox + (i % cols) * gapX) + 'px';
+    el.style.top = (oy + Math.floor(i / cols) * gapY) + 'px';
+  });
+  document.getElementById('fit').click();
+};
+
+/* ---------- Minimap ---------- */
+const miniCanvas = document.getElementById('miniCanvas');
+document.querySelectorAll('.widget').forEach(() => {
+  const n = document.createElement('span'); n.className = 'mini-node'; miniCanvas.appendChild(n);
+});
+const miniView = document.createElement('span'); miniView.className = 'mini-view'; miniCanvas.appendChild(miniView);
+function updateMinimap() {
+  const b = boardBounds();
+  const pad = 200;
+  const spanW = (b.w + pad*2), spanH = (b.h + pad*2);
+  const mw = miniCanvas.clientWidth, mh = miniCanvas.clientHeight;
+  const k = Math.min(mw / spanW, mh / spanH);
+  const offX = (mw - spanW*k)/2, offY = (mh - spanH*k)/2;
+  const nodes = miniCanvas.querySelectorAll('.mini-node');
+  document.querySelectorAll('.widget').forEach((el, i) => {
+    const nx = (parseFloat(el.style.left) - b.minX + pad) * k + offX;
+    const ny = (parseFloat(el.style.top) - b.minY + pad) * k + offY;
+    const n = nodes[i];
+    n.style.left = nx + 'px'; n.style.top = ny + 'px';
+    n.style.width = Math.max(3, el.offsetWidth * k) + 'px';
+    n.style.height = Math.max(2, el.offsetHeight * k) + 'px';
+  });
+  const r = viewport.getBoundingClientRect();
+  const vx = (-tx/scale - b.minX + pad) * k + offX;
+  const vy = (-ty/scale - b.minY + pad) * k + offY;
+  miniView.style.left = vx + 'px'; miniView.style.top = vy + 'px';
+  miniView.style.width = (r.width/scale) * k + 'px';
+  miniView.style.height = (r.height/scale) * k + 'px';
+}
+
+/* ---------- Interactive widget behaviours ---------- */
+// Quiz options
+document.querySelectorAll('[data-quiz]').forEach(group => {
+  group.addEventListener('click', (e) => {
+    const btn = e.target.closest('.opt'); if (!btn) return;
+    group.querySelectorAll('.opt').forEach(o => o.classList.remove('correct','wrong'));
+    btn.classList.add(btn.dataset.correct === 'true' ? 'correct' : 'wrong');
+  });
+});
+// Hints
+document.querySelectorAll('[data-hint] .hint-trigger').forEach(t => {
+  t.addEventListener('click', () => t.closest('.hint-step').classList.toggle('open'));
+});
+// Reveal
+document.querySelectorAll('[data-reveal-btn]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const val = btn.closest('.w-body').querySelector('[data-reveal-val]');
+    const hidden = val.classList.toggle('hidden');
+    btn.textContent = hidden ? 'Reveal step' : 'Hide step';
+  });
+});
+// Slider
+document.querySelectorAll('[data-slider]').forEach(track => {
+  const set = (clientX) => {
+    const r = track.getBoundingClientRect();
+    let p = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    track.querySelector('.slider-fill').style.width = (p*100) + '%';
+    track.querySelector('.slider-knob').style.left = (p*100) + '%';
+    track.closest('.w-body').querySelector('[data-slider-val]').textContent = Math.round(p*90) + '°';
+  };
+  let active = false;
+  track.addEventListener('pointerdown', (e) => { active = true; track.setPointerCapture(e.pointerId); set(e.clientX); e.stopPropagation(); });
+  track.addEventListener('pointermove', (e) => { if (active) set(e.clientX); });
+  track.addEventListener('pointerup', (e) => { active = false; try{track.releasePointerCapture(e.pointerId);}catch{} });
+});
+// Animation
+document.querySelectorAll('[data-anim-play]').forEach(btn => {
+  const body = btn.closest('.w-body');
+  const dot = body.querySelector('[data-anim-dot]');
+  const fill = body.querySelector('[data-anim-fill]');
+  const stage = body.querySelector('.anim-stage');
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let raf = null, t0 = null;
+  const path = (u) => {
+    // sample the same C-curve as the dashed path (0..1)
+    const W = stage.clientWidth, H = stage.clientHeight;
+    const x = 8 + u * (W - 16);
+    const y = 54 + (H/62) * ( (-48) * Math.sin(Math.PI * u) ); // arch up
+    return { x, y };
+  };
+  const place = (u) => { const p = path(u); dot.style.left = p.x + 'px'; dot.style.top = p.y + 'px'; fill.style.width = (u*100) + '%'; };
+  place(0);
+  btn.addEventListener('click', () => {
+    if (raf) { cancelAnimationFrame(raf); raf = null; t0 = null; return; }
+    if (reduced) { place(1); return; }
+    const dur = 2000;
+    const tick = (ts) => {
+      if (t0 === null) t0 = ts;
+      const u = Math.min(1, (ts - t0) / dur);
+      place(u);
+      if (u < 1) raf = requestAnimationFrame(tick); else { raf = null; t0 = null; }
+    };
+    raf = requestAnimationFrame(tick);
+  });
+});
+
+/* ---------- Toast dismiss ---------- */
+const toast = document.getElementById('hintToast');
+let toastGone = false;
+function dismissToast() { if (toastGone) return; toastGone = true; toast.classList.add('gone'); }
+setTimeout(dismissToast, 6500);
+
+/* ---------- Init: fit board on load ---------- */
+document.getElementById('miniCount').textContent = WIDGETS.length;
+requestAnimationFrame(() => { document.getElementById('fit').click(); });
+window.addEventListener('resize', updateMinimap);
+</script>
+</body>
+</html>

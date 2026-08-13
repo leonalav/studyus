@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronRight, Check, Play, Square, RotateCcw, GraduationCap } from "lucide-react";
 import {
   SUBJECT_LIST,
   maxQuestions,
+  minQuestions,
   type ExamMode,
   type QuestionFormat,
   type Rigor,
@@ -14,16 +15,7 @@ import { getCurriculumTree, CurriculumNodeRecord } from "../../lib/curriculum";
 
 interface Props {
   onNotify: (t: string) => void;
-  onStart: (params: {
-    attemptId: string;
-    title: string;
-    subject: SubjectKey;
-    format: QuestionFormat;
-    count: number;
-    rigor: Rigor;
-    docId: string | null;
-    picked: string[];
-  }) => void;
+  onGenerated: () => void;
 }
 
 export interface RealPdfSource {
@@ -39,18 +31,22 @@ const MODES: { id: ExamMode; label: string; desc: string }[] = [
 ];
 
 const RIGORS: { id: Rigor; label: string; desc: string; color: string }[] = [
-  { id: "casual", label: "Casual", desc: "Hints on, no penalty", color: "#86efac" },
-  { id: "challenging", label: "Challenging", desc: "Limited hints, graded", color: "#fcd34d" },
-  { id: "rigorous", label: "Rigorous", desc: "No hints, strict marking", color: "#fca5a5" },
+  { id: "casual", label: "Casual", desc: "Recall + single-step · full hints", color: "#86efac" },
+  { id: "challenging", label: "Challenging", desc: "Application + analysis · limited hints", color: "#fcd34d" },
+  { id: "rigorous", label: "Rigorous", desc: "Evaluate + synthesize · no hints", color: "#fca5a5" },
 ];
 
 const FORMATS: { id: QuestionFormat; label: string; desc: string }[] = [
   { id: "mcq", label: "MCQ", desc: "Multiple choice only · max 50" },
-  { id: "proof", label: "Proof-based", desc: "Typed answers only · max 15" },
-  { id: "mixed", label: "Mixed", desc: "Both formats · max 32" },
+  { id: "proof", label: "Proof-based", desc: "Typed rubric answers · max 15" },
+  { id: "mixed", label: "Mixed", desc: "MCQ + constructed response · max 32" },
 ];
 
-export function TestCenter({ onNotify, onStart }: Props) {
+function flattenNodeIds(nodes: CurriculumNodeRecord[]): string[] {
+  return nodes.flatMap((node) => [node.id, ...flattenNodeIds(node.children ?? [])]);
+}
+
+export function TestCenter({ onNotify, onGenerated }: Props) {
   const [subject, setSubject] = useState<SubjectKey>("physics");
   const [sources, setSources] = useState<RealPdfSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string>("");
@@ -107,10 +103,11 @@ export function TestCenter({ onNotify, onStart }: Props) {
     setPicked(new Set());
   }, [selectedSourceId, mode]);
 
+  const floor = minQuestions(format);
   const ceiling = maxQuestions(format);
   useEffect(() => {
-    setCount((c) => Math.min(c, ceiling));
-  }, [ceiling]);
+    setCount((c) => Math.max(floor, Math.min(c, ceiling)));
+  }, [floor, ceiling]);
 
   useEffect(() => {
     if (!running) {
@@ -127,14 +124,7 @@ export function TestCenter({ onNotify, onStart }: Props) {
   const mm = String(Math.floor((elapsed % 3600) / 60)).padStart(2, "0");
   const ss = String(elapsed % 60).padStart(2, "0");
 
-  const allConceptIds = useMemo(() => {
-    const list: string[] = [];
-    nodes.forEach((n) => {
-      list.push(n.id);
-      if (n.children) n.children.forEach((c) => list.push(c.id));
-    });
-    return list;
-  }, [nodes]);
+  const allConceptIds = useMemo(() => flattenNodeIds(nodes), [nodes]);
 
   const effectivePicked = mode === "final" ? new Set(allConceptIds) : picked;
 
@@ -153,7 +143,7 @@ export function TestCenter({ onNotify, onStart }: Props) {
 
   const toggleSectionAll = (section: CurriculumNodeRecord) => {
     if (mode !== "custom") return;
-    const ids = [section.id, ...(section.children || []).map((c) => c.id)];
+    const ids = flattenNodeIds([section]);
     const allOn = ids.every((id) => picked.has(id));
     setPicked((current) => {
       const next = new Set(current);
@@ -198,17 +188,10 @@ export function TestCenter({ onNotify, onStart }: Props) {
         sourceName: selectedSource?.name,
         onProgress: (pct, stage) => setGenProgress({ pct, stage }),
       });
-      onNotify(`Generated ${result.itemCount} grounded questions`);
-      onStart({
-        attemptId: result.attemptId,
-        title: result.title,
-        subject,
-        format,
-        count: result.itemCount,
-        rigor,
-        docId: selectedSourceId,
-        picked: Array.from(effectivePicked),
-      });
+      onGenerated();
+      onNotify(
+        `Generated ${result.itemCount} grounded questions. Open Available tests when you are ready to start.`
+      );
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "Test generation failed");
     } finally {
@@ -218,6 +201,31 @@ export function TestCenter({ onNotify, onStart }: Props) {
   };
 
   const selectedSource = sources.find((s) => s.id === selectedSourceId);
+
+  const renderConceptRows = (children: CurriculumNodeRecord[], depth = 1): ReactNode =>
+    children.map((sub) => {
+      const on = effectivePicked.has(sub.id);
+      return (
+        <div key={sub.id}>
+          <button
+            onClick={() => toggleConcept(sub.id)}
+            disabled={mode === "final"}
+            className="flex w-full items-center gap-2.5 border-t border-edge-soft px-3 py-2 text-left transition-colors hover:bg-white/[0.03] disabled:cursor-default"
+            style={{ paddingLeft: `${Math.min(6, depth) * 18 + 22}px` }}
+          >
+            <span
+              className={`grid h-[15px] w-[15px] shrink-0 place-items-center border transition-colors ${
+                mode === "module" ? "rounded-full" : "rounded-[3px]"
+              } ${on ? "border-accent bg-accent text-white" : "border-white/20"}`}
+            >
+              {on && <Check size={10} strokeWidth={3} />}
+            </span>
+            <span className={`truncate text-[12.5px] ${on ? "text-fg" : "text-mut"}`}>{sub.title}</span>
+          </button>
+          {sub.children?.length ? renderConceptRows(sub.children, depth + 1) : null}
+        </div>
+      );
+    });
 
   return (
     <div className="mx-auto w-full max-w-[860px] px-5 pt-10 pb-20 select-none">
@@ -359,8 +367,7 @@ export function TestCenter({ onNotify, onStart }: Props) {
           </p>
         ) : nodes.map((section, i) => {
           const open = expanded.has(section.id);
-          const childIds = (section.children || []).map((c) => c.id);
-          const allSecIds = [section.id, ...childIds];
+          const allSecIds = flattenNodeIds([section]);
           const allOn = allSecIds.every((id) => effectivePicked.has(id));
 
           return (
@@ -402,30 +409,7 @@ export function TestCenter({ onNotify, onStart }: Props) {
                 )}
               </div>
 
-              {open && section.children && (
-                <div>
-                  {section.children.map((sub) => {
-                    const on = effectivePicked.has(sub.id);
-                    return (
-                      <button
-                        key={sub.id}
-                        onClick={() => toggleConcept(sub.id)}
-                        disabled={mode === "final"}
-                        className="flex w-full items-center gap-2.5 border-t border-edge-soft px-3 py-2 pl-10 text-left transition-colors hover:bg-white/[0.03] disabled:cursor-default"
-                      >
-                        <span
-                          className={`grid h-[15px] w-[15px] shrink-0 place-items-center border transition-colors ${
-                            mode === "module" ? "rounded-full" : "rounded-[3px]"
-                          } ${on ? "border-accent bg-accent text-white" : "border-white/20"}`}
-                        >
-                          {on && <Check size={10} strokeWidth={3} />}
-                        </span>
-                        <span className={`truncate text-[12.5px] ${on ? "text-fg" : "text-mut"}`}>{sub.title}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
+              {open && section.children?.length ? <div>{renderConceptRows(section.children)}</div> : null}
             </div>
           );
         })}
@@ -480,7 +464,7 @@ export function TestCenter({ onNotify, onStart }: Props) {
         </div>
         <input
           type="range"
-          min={1}
+          min={floor}
           max={ceiling}
           value={count}
           onChange={(e) => setCount(parseInt(e.target.value, 10))}
@@ -488,7 +472,7 @@ export function TestCenter({ onNotify, onStart }: Props) {
         />
         <div className="flex items-center gap-1">
           <button
-            onClick={() => setCount((c) => Math.max(1, c - 1))}
+            onClick={() => setCount((c) => Math.max(floor, c - 1))}
             className="grid h-7 w-7 place-items-center rounded-md border border-edge text-mut transition-colors hover:bg-white/[0.08] hover:text-fg"
           >
             −
@@ -522,7 +506,7 @@ export function TestCenter({ onNotify, onStart }: Props) {
           }`}
         >
           <Play size={13} fill="currentColor" />
-          {generating ? "Generating…" : "Generate & start"}
+          {generating ? "Generating…" : "Generate test"}
         </button>
       </div>
 

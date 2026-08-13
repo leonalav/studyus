@@ -53,12 +53,70 @@ import type {
 } from "../../lib/visualization/types";
 import { routeVisualization } from "../../lib/visualization/router";
 
+const loadECharts = (() => {
+  let pending: Promise<typeof import("echarts")> | undefined;
+  return () => {
+    if (!pending) {
+      pending = import("echarts").catch((error) => {
+        pending = undefined;
+        throw error;
+      });
+    }
+    return pending;
+  };
+})();
+
+type CytoscapeFactory = typeof import("cytoscape");
+
+const loadCytoscape = (() => {
+  let pending: Promise<CytoscapeFactory> | undefined;
+  return () => {
+    if (!pending) {
+      pending = import("cytoscape").then((module) => {
+        // Cytoscape's CommonJS-style declarations differ from the namespace Vite
+        // returns for a dynamic import. Normalize that boundary once for all users.
+        const namespace = module as unknown as { default?: CytoscapeFactory };
+        return namespace.default ?? (module as unknown as CytoscapeFactory);
+      }).catch((error) => {
+        pending = undefined;
+        throw error;
+      });
+    }
+    return pending;
+  };
+})();
+
+export type VisualizationAdapterPrewarmTarget = "chart" | "network";
+
+/** Return only the heavy adapters plausibly needed by an explicit request. */
+export function getVisualizationPrewarmTargets(request: string): VisualizationAdapterPrewarmTarget[] {
+  const targets: VisualizationAdapterPrewarmTarget[] = [];
+  if (/\b(chart|plot|histogram|scatter(?:plot)?|heatmap|contour|radar|candlestick|ohlc|treemap|sunburst|sankey)\b/i.test(request)) {
+    targets.push("chart");
+  }
+  if (/\b(network|graph theory|node[- ]link|pathway)\b/i.test(request)) {
+    targets.push("network");
+  }
+  return targets;
+}
+
+/**
+ * Begin loading selected visualization engines while the tutor is thinking.
+ * Mounted adapters reuse these cached imports; this does not create a renderer.
+ */
+export function prewarmVisualizationAdapters(targets: readonly VisualizationAdapterPrewarmTarget[]) {
+  if (targets.includes("chart")) void loadECharts().catch(() => undefined);
+  if (targets.includes("network")) void loadCytoscape().catch(() => undefined);
+}
+
 export interface VisualizationSurfaceProps {
   intent: VisualizationIntent;
   state?: VisualizationState;
   chalk: string;
   accent: string;
   scale?: number;
+  /** Allow navigation/tooltips while preventing authored objects from being moved. */
+  readOnly?: boolean;
   onState?: (next: VisualizationState) => void;
 }
 
@@ -232,6 +290,7 @@ export function VisualizationSurface({
   chalk,
   accent,
   scale = 1,
+  readOnly = false,
   onState,
 }: VisualizationSurfaceProps) {
   const model = useMemo(() => routeVisualization(intent), [intent]);
@@ -255,17 +314,17 @@ export function VisualizationSurface({
 
   switch (model.adapterId) {
     case "jsxgraph":
-      return <JsxGraphSurface intent={intent} state={state} chalk={chalk} accent={accent} scale={scale} onState={onState} />;
+      return <JsxGraphSurface intent={intent} state={state} chalk={chalk} accent={accent} scale={scale} readOnly={readOnly} onState={onState} />;
     case "graph3d-r3f":
       return <Graph3DSurface intent={intent as Graph3DIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
     case "chart-echarts":
       return <ChartSurface intent={intent as ChartIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
     case "graph-theory-cytoscape":
-      return <GraphTheorySurface intent={intent as GraphTheoryIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
+      return <GraphTheorySurface intent={intent as GraphTheoryIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} readOnly={readOnly} onState={onState} />;
     case "physics-svg":
       return <PhysicsSurface intent={intent as PhysicsIntent | CircuitIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
     case "biology-svg":
-      return <BiologySurface intent={intent as BiologyIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
+      return <BiologySurface intent={intent as BiologyIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} readOnly={readOnly} onState={onState} />;
     case "chemistry-rdkit":
       return <ChemistrySurface intent={intent as ChemistryIntent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
     case "katex":
@@ -726,25 +785,35 @@ function ChartSurface({
   onState?: (next: VisualizationState) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const stateRef = useRef(state);
+  const onStateRef = useRef(onState);
   const [error, setError] = useState<string | null>(null);
+  stateRef.current = state;
+  onStateRef.current = onState;
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    let cancelled = false;
     let chart: any = null;
+    let resizeObserver: ResizeObserver | null = null;
     setError(null);
 
-    import('echarts').then((echarts) => {
+    void loadECharts().then((echarts) => {
+      if (cancelled) return;
+      // Compile first so malformed options fail before ECharts allocates a
+      // canvas or registers an instance against the host element.
+      const option = buildChartOption(intent, stateRef.current, chalk, accent);
       chart = echarts.init(host, undefined, { renderer: 'canvas' });
-      const option = buildChartOption(intent, state, chalk, accent);
       chart.setOption(option, true);
       const emitState = () => {
-        if (!onState || !chart) return;
-        const option = chart.getOption();
-        const next: VisualizationState = { ...(state ?? {}) };
-        if (option.dataZoom?.length) {
-          const dzx = option.dataZoom[0] ?? {};
-          const dzy = option.dataZoom[1] ?? {};
+        const emit = onStateRef.current;
+        if (!emit || !chart) return;
+        const currentOption = chart.getOption();
+        const next: VisualizationState = { ...(stateRef.current ?? {}) };
+        if (currentOption.dataZoom?.length) {
+          const dzx = currentOption.dataZoom[0] ?? {};
+          const dzy = currentOption.dataZoom[1] ?? {};
           next.chartViewport = {
             xStart: typeof dzx.start === 'number' ? dzx.start : undefined,
             xEnd: typeof dzx.end === 'number' ? dzx.end : undefined,
@@ -752,26 +821,30 @@ function ChartSurface({
             yEnd: typeof dzy.end === 'number' ? dzy.end : undefined,
           };
         }
-        if (option.legend?.[0]?.selected) {
-          const hidden = Object.entries(option.legend[0].selected).filter(([, selected]) => selected === false).map(([name]) => name);
-          next.hiddenSeries = hidden;
+        if (currentOption.legend?.[0]?.selected) {
+          next.hiddenSeries = Object.entries(currentOption.legend[0].selected)
+            .filter(([, selected]) => selected === false)
+            .map(([name]) => name);
         }
-        onState(next);
+        emit(next);
       };
       chart.on('datazoom', emitState);
       chart.on('legendselectchanged', emitState);
-      const ro = new ResizeObserver(() => chart?.resize());
-      ro.observe(host);
-      return () => {
-        ro.disconnect();
-        chart?.dispose();
-      };
-    }).catch(() => setError('Chart rendering failed to initialize.'));
+      resizeObserver = new ResizeObserver(() => chart?.resize());
+      resizeObserver.observe(host);
+    }).catch(() => {
+      if (!cancelled) setError('Chart rendering failed to initialize.');
+      chart?.dispose();
+      chart = null;
+    });
 
     return () => {
+      cancelled = true;
+      resizeObserver?.disconnect();
       chart?.dispose();
+      chart = null;
     };
-  }, [intent, state, chalk, accent, onState]);
+  }, [intent, chalk, accent]);
 
   const heightPx = Math.round(320 * Math.max(0.8, Math.min(scale, 1.2)));
   if (error) return <UnsupportedCard reason={error} chalk={chalk} accent={accent} caption={caption} />;
@@ -790,6 +863,7 @@ function GraphTheorySurface({
   accent,
   scale,
   caption,
+  readOnly,
   onState,
 }: {
   intent: GraphTheoryIntent;
@@ -798,21 +872,28 @@ function GraphTheorySurface({
   accent: string;
   scale: number;
   caption?: string;
+  readOnly: boolean;
   onState?: (next: VisualizationState) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const stateRef = useRef(state);
+  const onStateRef = useRef(onState);
   const [error, setError] = useState<string | null>(null);
+  stateRef.current = state;
+  onStateRef.current = onState;
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    let cancelled = false;
     let cy: CytoscapeCore | null = null;
     setError(null);
 
-    import('cytoscape').then((mod) => {
-      const cytoscapeFactory = mod.default;
-      const nodePositions = state?.nodePositions ?? {};
-      cy = cytoscapeFactory({
+    void loadCytoscape().then((cytoscapeFactory) => {
+      if (cancelled) return;
+      const initialState = stateRef.current;
+      const nodePositions = initialState?.nodePositions ?? {};
+      const instance = cytoscapeFactory({
         container: host,
         elements: [
           ...intent.nodes.map((n) => ({
@@ -824,7 +905,7 @@ function GraphTheorySurface({
           })),
           ...intent.edges.map((e, i) => ({ data: { id: `e-${i}`, source: e.from, target: e.to, label: e.label ?? '', directed: e.directed ?? intent.directed ?? true, color: e.color, width: e.width, style: e.style } })),
         ],
-        layout: { name: state?.scienceLayout || intent.layout || (intent.nodes.every((n) => n.at) ? 'preset' : 'cose'), fit: true, padding: intent.style?.compact ? 12 : 28 },
+        layout: { name: initialState?.scienceLayout || intent.layout || (intent.nodes.every((n) => n.at) ? 'preset' : 'cose'), fit: true, padding: intent.style?.compact ? 12 : 28 } as any,
         wheelSensitivity: 0.2,
         style: [
           {
@@ -861,26 +942,36 @@ function GraphTheorySurface({
         ],
         userZoomingEnabled: true,
         userPanningEnabled: true,
+        autoungrabify: readOnly,
         boxSelectionEnabled: false,
       });
+      cy = instance;
       const emit = () => {
-        if (!onState || !cy) return;
+        const onChange = onStateRef.current;
+        if (!onChange) return;
         const next: Record<string, [number, number]> = {};
-        cy.nodes().forEach((node) => {
+        instance.nodes().forEach((node) => {
           const pos = node.position();
           next[String(node.id())] = [pos.x, pos.y];
         });
-        onState({ ...(state ?? {}), nodePositions: next, scienceLayout: state?.scienceLayout || intent.layout || 'preset' });
+        const latestState = stateRef.current;
+        onChange({ ...(latestState ?? {}), nodePositions: next, scienceLayout: latestState?.scienceLayout || intent.layout || 'preset' });
       };
-      cy.on('dragfree', 'node', emit);
-      cy.on('layoutstop', emit);
-      cy.fit(undefined, intent.style?.compact ? 12 : 28);
-    }).catch(() => setError('Graph theory rendering failed to initialize.'));
+      instance.on('dragfree', 'node', emit);
+      instance.on('layoutstop', emit);
+      instance.fit(undefined, intent.style?.compact ? 12 : 28);
+    }).catch(() => {
+      if (!cancelled) setError('Graph theory rendering failed to initialize.');
+      cy?.destroy();
+      cy = null;
+    });
 
     return () => {
+      cancelled = true;
       cy?.destroy();
+      cy = null;
     };
-  }, [intent, state, accent, chalk, onState]);
+  }, [intent, accent, chalk, readOnly]);
 
   const heightPx = Math.round(280 * Math.max(0.8, Math.min(scale, 1.2)));
   if (error) return <UnsupportedCard reason={error} chalk={chalk} accent={accent} caption={caption} />;
@@ -892,8 +983,11 @@ function GraphTheorySurface({
   );
 }
 
-function buildChartOption(intent: ChartIntent, state: VisualizationState | undefined, chalk: string, accent: string) {
+export function buildChartOption(intent: ChartIntent, state: VisualizationState | undefined, chalk: string, accent: string) {
   const series = normalizeChartSeries(intent);
+  if (series.length === 0 || series.some((item) => item.kind !== intent.chartType)) {
+    throw new Error(`Chart ${intent.chartType} received incompatible series data`);
+  }
   const palette = intent.palette && intent.palette.length > 0 ? intent.palette : [accent, ...SERIES_PALETTE];
   const legendNames = series.map((s: any) => s.name).filter(Boolean);
   const selected = Object.fromEntries(legendNames.map((name: string) => [name, !(state?.hiddenSeries ?? []).includes(name)]));
@@ -932,13 +1026,14 @@ function buildChartOption(intent: ChartIntent, state: VisualizationState | undef
       option.xAxis = xAxis;
       option.yAxis = yAxis;
       option.dataZoom = dataZoom;
-      option.series = series.map((s: any, i: number) => buildCartesianSeries(intent.chartType, s, i, palette, state));
+      const chartType = intent.chartType as 'bar' | 'line' | 'scatter';
+      option.series = series.map((s: any, i: number) => buildCartesianSeries(chartType, s, i, palette, state));
       break;
     }
     case 'histogram': {
       option.grid = { left: 48, right: 20, top: 48, bottom: 42, containLabel: true };
-      option.xAxis = buildEChartAxis({ ...(intent.xAxis ?? {}), scaleType: 'value' }, intent.xLabel);
-      option.yAxis = buildEChartAxis({ ...(intent.yAxis ?? {}), scaleType: 'value' }, intent.yLabel);
+      option.xAxis = buildEChartAxis({ ...(intent.xAxis ?? {}), scaleType: 'linear' }, intent.xLabel);
+      option.yAxis = buildEChartAxis({ ...(intent.yAxis ?? {}), scaleType: 'linear' }, intent.yLabel);
       option.dataZoom = dataZoom;
       option.series = buildHistogramSeries(series as any[], palette, state);
       break;
@@ -946,7 +1041,7 @@ function buildChartOption(intent: ChartIntent, state: VisualizationState | undef
     case 'box': {
       option.grid = { left: 48, right: 20, top: 48, bottom: 42, containLabel: true };
       option.xAxis = { type: 'category', data: series.map((s: any) => s.name), axisLabel: { color: chalk } };
-      option.yAxis = buildEChartAxis({ ...(intent.yAxis ?? {}), scaleType: 'value' }, intent.yLabel);
+      option.yAxis = buildEChartAxis({ ...(intent.yAxis ?? {}), scaleType: 'linear' }, intent.yLabel);
       option.dataZoom = dataZoom;
       option.series = [{ type: 'boxplot', data: series.map((s: any) => summarizeBoxValues(s.values)), itemStyle: { color: 'transparent', borderColor: accent }, emphasis: { disabled: true } }];
       break;
@@ -955,13 +1050,25 @@ function buildChartOption(intent: ChartIntent, state: VisualizationState | undef
     case 'contour': {
       option.grid = { left: 52, right: 22, top: 48, bottom: 46, containLabel: true };
       const field = normalizeHeatmapField(series[0]);
-      option.xAxis = { type: 'value', min: field.xs[0], max: field.xs[field.xs.length - 1], name: intent.xAxis?.label ?? intent.xLabel, nameTextStyle: { color: chalk }, axisLabel: { color: chalk }, splitLine: { show: intent.xAxis?.showGrid === true, lineStyle: { color: 'rgba(255,255,255,0.08)' } } };
-      option.yAxis = { type: 'value', min: field.ys[0], max: field.ys[field.ys.length - 1], name: intent.yAxis?.label ?? intent.yLabel, nameTextStyle: { color: chalk }, axisLabel: { color: chalk }, splitLine: { show: intent.yAxis?.showGrid === true, lineStyle: { color: 'rgba(255,255,255,0.08)' } } };
+      const axisStyle = { color: chalk };
+      const splitLine = { show: intent.xAxis?.showGrid === true, lineStyle: { color: 'rgba(255,255,255,0.08)' } };
+      if (intent.chartType === 'heatmap') {
+        // ECharts 6 requires two category axes for a Cartesian heatmap. Convert
+        // schema coordinates to stable category indexes while preserving their
+        // numeric values as the visible axis labels.
+        const xIndexes = new Map(field.xs.map((value: number, index: number) => [value, index]));
+        const yIndexes = new Map(field.ys.map((value: number, index: number) => [value, index]));
+        const indexedCells = field.cells.map(([x, y, value]) => [xIndexes.get(x), yIndexes.get(y), value]);
+        option.xAxis = { type: 'category', data: field.xs, name: intent.xAxis?.label ?? intent.xLabel, nameTextStyle: axisStyle, axisLabel: axisStyle, splitLine };
+        option.yAxis = { type: 'category', data: field.ys, name: intent.yAxis?.label ?? intent.yLabel, nameTextStyle: axisStyle, axisLabel: axisStyle, splitLine: { ...splitLine, show: intent.yAxis?.showGrid === true } };
+        option.series = [{ type: 'heatmap', data: indexedCells, progressive: 0 }];
+      } else {
+        option.xAxis = { type: 'value', min: field.xs[0], max: field.xs[field.xs.length - 1], name: intent.xAxis?.label ?? intent.xLabel, nameTextStyle: axisStyle, axisLabel: axisStyle, splitLine };
+        option.yAxis = { type: 'value', min: field.ys[0], max: field.ys[field.ys.length - 1], name: intent.yAxis?.label ?? intent.yLabel, nameTextStyle: axisStyle, axisLabel: axisStyle, splitLine: { ...splitLine, show: intent.yAxis?.showGrid === true } };
+        option.series = buildContourSeries(field, accent);
+      }
       option.visualMap = { min: field.min, max: field.max, calculable: false, orient: 'horizontal', left: 'center', bottom: 6, textStyle: { color: chalk } };
       option.dataZoom = dataZoom;
-      option.series = intent.chartType === 'heatmap'
-        ? [{ type: 'heatmap', data: field.cells, progressive: 0 }]
-        : buildContourSeries(field, accent);
       break;
     }
     case 'pie':
@@ -984,7 +1091,17 @@ function buildChartOption(intent: ChartIntent, state: VisualizationState | undef
     }
     case 'sankey': {
       const s = series[0] as any;
-      option.series = [{ type: 'sankey', data: s.nodes.map((n: any) => ({ name: n.name ?? n.id, itemStyle: n.color ? { color: n.color } : undefined })), links: s.links.map((l: any) => ({ source: l.source, target: l.target, value: l.value, lineStyle: l.color ? { color: l.color } : undefined })) }];
+      // ECharts uses node `name` as the link identity. Keep the schema's unique
+      // id there and render the optional friendly name through the node label.
+      option.series = [{
+        type: 'sankey',
+        data: s.nodes.map((n: any) => ({
+          name: n.id,
+          label: n.name ? { formatter: n.name } : undefined,
+          itemStyle: n.color ? { color: n.color } : undefined,
+        })),
+        links: s.links.map((l: any) => ({ source: l.source, target: l.target, value: l.value, lineStyle: l.color ? { color: l.color } : undefined })),
+      }];
       break;
     }
     case 'treemap': {
@@ -999,7 +1116,7 @@ function buildChartOption(intent: ChartIntent, state: VisualizationState | undef
     case 'ohlc': {
       option.grid = { left: 48, right: 20, top: 48, bottom: 42, containLabel: true };
       option.xAxis = { type: 'category', data: intent.xAxis?.categories ?? (series[0] as any).candles.map((_: any, i: number) => String(i + 1)), axisLabel: { color: chalk } };
-      option.yAxis = buildEChartAxis({ ...(intent.yAxis ?? {}), scaleType: 'value' }, intent.yLabel);
+      option.yAxis = buildEChartAxis({ ...(intent.yAxis ?? {}), scaleType: 'linear' }, intent.yLabel);
       option.dataZoom = dataZoom;
       option.series = [{ type: 'candlestick', data: (series[0] as any).candles, itemStyle: { color: (series[0] as any).upColor ?? accent, color0: (series[0] as any).downColor ?? '#f87171', borderColor: (series[0] as any).upColor ?? accent, borderColor0: (series[0] as any).downColor ?? '#f87171' } }];
       break;
@@ -1139,7 +1256,7 @@ function normalizeHeatmapField(series: any) {
 }
 
 function buildContourSeries(field: ReturnType<typeof normalizeHeatmapField>, accent: string) {
-  const flat = field.matrix.flat().map((v) => Number.isFinite(v) ? v : field.min);
+  const flat = field.matrix.flat().map((v: number) => Number.isFinite(v) ? v : field.min);
   const contourGen = d3Contours().size([field.xs.length, field.ys.length]).thresholds(8);
   const lines: any[] = [];
   for (const feature of contourGen(flat)) {
@@ -1442,9 +1559,9 @@ function ChemistrySurface({
       <figure className="m-0 w-full" data-nopan style={{ width: '100%', maxWidth: '100%' }}>
         <div className="rounded border bg-black/10 p-3" style={{ borderColor: `${accent}44` }}>
           <div className="flex flex-wrap items-center gap-3">
-            {reactants.map((item, i) => <ChemistrySpeciesCard key={item.key} item={item} chalk={chalk} />).flatMap((node, i, arr) => i < arr.length - 1 ? [node, <span key={`plus-r-${i}`} className="font-mono text-lg opacity-75">+</span>] : [node])}
+            {reactants.map((item) => <ChemistrySpeciesCard key={item.key} item={item} chalk={chalk} />).flatMap((node, i, arr) => i < arr.length - 1 ? [node, <span key={`plus-r-${i}`} className="font-mono text-lg opacity-75">+</span>] : [node])}
             <span className="font-mono text-lg opacity-75">→</span>
-            {products.map((item, i) => <ChemistrySpeciesCard key={item.key} item={item} chalk={chalk} />).flatMap((node, i, arr) => i < arr.length - 1 ? [node, <span key={`plus-p-${i}`} className="font-mono text-lg opacity-75">+</span>] : [node])}
+            {products.map((item) => <ChemistrySpeciesCard key={item.key} item={item} chalk={chalk} />).flatMap((node, i, arr) => i < arr.length - 1 ? [node, <span key={`plus-p-${i}`} className="font-mono text-lg opacity-75">+</span>] : [node])}
           </div>
           {agents.length > 0 ? <div className="mt-2 font-mono text-[12px] opacity-80">reagents/conditions: {agents.map((a) => a.text).join(', ')}</div> : null}
           {intent.reaction ? <div className="mt-2 font-mono text-[12px] opacity-80">{intent.reaction}</div> : null}
@@ -1513,6 +1630,7 @@ function BiologySurface({
   accent,
   scale,
   caption,
+  readOnly,
   onState,
 }: {
   intent: BiologyIntent;
@@ -1521,10 +1639,11 @@ function BiologySurface({
   accent: string;
   scale: number;
   caption?: string;
+  readOnly: boolean;
   onState?: (next: VisualizationState) => void;
 }) {
   if (intent.variant === "pathway") {
-    return <BiologyNetworkSurface intent={intent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} onState={onState} />;
+    return <BiologyNetworkSurface intent={intent} state={state} chalk={chalk} accent={accent} scale={scale} caption={caption} readOnly={readOnly} onState={onState} />;
   }
   const points = (intent.structures ?? []).map((s) => s.at);
   const box = fitScienceBox(points.length ? points : [[0, 0], [6, 4]]);
@@ -1560,6 +1679,7 @@ function BiologyNetworkSurface({
   accent,
   scale,
   caption,
+  readOnly,
   onState,
 }: {
   intent: BiologyIntent;
@@ -1568,21 +1688,28 @@ function BiologyNetworkSurface({
   accent: string;
   scale: number;
   caption?: string;
+  readOnly: boolean;
   onState?: (next: VisualizationState) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const stateRef = useRef(state);
+  const onStateRef = useRef(onState);
   const [error, setError] = useState<string | null>(null);
+  stateRef.current = state;
+  onStateRef.current = onState;
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    let cancelled = false;
     let cy: CytoscapeCore | null = null;
     setError(null);
 
-    import('cytoscape').then((mod) => {
-      const cytoscapeFactory = mod.default;
+    void loadCytoscape().then((cytoscapeFactory) => {
+      if (cancelled) return;
       const structures = intent.structures ?? [];
-      const nodePositions = state?.nodePositions ?? {};
+      const initialState = stateRef.current;
+      const nodePositions = initialState?.nodePositions ?? {};
       const elements = [
         ...structures.map((s) => ({
           data: { id: s.id, label: s.label, kind: s.kind ?? 'node' },
@@ -1592,8 +1719,8 @@ function BiologyNetworkSurface({
         })),
         ...(intent.connections ?? []).map((c, i) => ({ data: { id: `e-${i}`, source: c.from, target: c.to, label: c.label ?? '' } })),
       ];
-      const layoutName = state?.scienceLayout || intent.layout || (structures.every((s) => Array.isArray(s.at)) ? 'preset' : 'breadthfirst');
-      cy = cytoscapeFactory({
+      const layoutName = initialState?.scienceLayout || intent.layout || (structures.every((s) => Array.isArray(s.at)) ? 'preset' : 'breadthfirst');
+      const instance = cytoscapeFactory({
         container: host,
         elements,
         layout: { name: layoutName as any, fit: true, padding: intent.style?.compact ? 12 : 30 },
@@ -1632,11 +1759,13 @@ function BiologyNetworkSurface({
         ],
         userZoomingEnabled: true,
         userPanningEnabled: true,
+        autoungrabify: readOnly,
         boxSelectionEnabled: false,
       });
+      cy = instance;
 
       if (intent.style?.nodeColorByKind) {
-        cy.nodes().forEach((node) => {
+        instance.nodes().forEach((node) => {
           const kind = node.data('kind');
           const color = kind === 'gene' ? '#86efac' : kind === 'protein' ? '#fcd34d' : kind === 'nucleus' ? '#a5b4fc' : accent;
           node.style('background-color', color);
@@ -1644,24 +1773,31 @@ function BiologyNetworkSurface({
       }
 
       const emitPositions = () => {
-        if (!onState || !cy) return;
+        const onChange = onStateRef.current;
+        if (!onChange) return;
         const next: Record<string, [number, number]> = {};
-        cy.nodes().forEach((node) => {
+        instance.nodes().forEach((node) => {
           const pos = node.position();
           next[String(node.id())] = [pos.x, pos.y];
         });
-        onState({ ...(state ?? {}), nodePositions: next, scienceLayout: layoutName });
+        onChange({ ...(stateRef.current ?? {}), nodePositions: next, scienceLayout: layoutName });
       };
 
-      cy.on('dragfree', 'node', emitPositions);
-      cy.on('layoutstop', emitPositions);
-      if (layoutName === 'preset') cy.fit(undefined, intent.style?.compact ? 12 : 30);
-    }).catch(() => setError('Biology network rendering failed to initialize.'));
+      instance.on('dragfree', 'node', emitPositions);
+      instance.on('layoutstop', emitPositions);
+      if (layoutName === 'preset') instance.fit(undefined, intent.style?.compact ? 12 : 30);
+    }).catch(() => {
+      if (!cancelled) setError('Biology network rendering failed to initialize.');
+      cy?.destroy();
+      cy = null;
+    });
 
     return () => {
+      cancelled = true;
       cy?.destroy();
+      cy = null;
     };
-  }, [intent, state, chalk, accent, onState]);
+  }, [intent, chalk, accent, readOnly]);
 
   const heightPx = Math.round(280 * Math.max(0.8, Math.min(scale, 1.2)));
   if (error) return <UnsupportedCard reason={error} chalk={chalk} accent={accent} caption={caption} />;
@@ -1694,7 +1830,11 @@ function Graph3DSurface({
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const stateRef = useRef(state);
+  const onStateRef = useRef(onState);
   const [error, setError] = useState<string | null>(null);
+  stateRef.current = state;
+  onStateRef.current = onState;
 
   useEffect(() => {
     const host = wrapRef.current;
@@ -1707,6 +1847,7 @@ function Graph3DSurface({
     let ro: ResizeObserver | null = null;
     let scene: THREE.Scene | null = null;
     let raf = 0;
+    let requestRender = () => {};
     let emitCameraState = () => {};
 
     try {
@@ -1722,13 +1863,17 @@ function Graph3DSurface({
         alpha: true,
         context: webgl as WebGLRenderingContext,
       });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      // A lower DPR ceiling avoids multiplying fill work on dense surfaces while
+      // retaining sharp output on common HiDPI displays.
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
       renderer.outputColorSpace = THREE.SRGBColorSpace;
 
       scene = new THREE.Scene();
       const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 2000);
       controls = new OrbitControls(camera, canvas);
-      controls.enableDamping = true;
+      // Damping requires a permanent animation loop. Static scenes instead
+      // render only when controls or layout dimensions change.
+      controls.enableDamping = false;
       controls.enablePan = true;
       controls.enableZoom = true;
       controls.enableRotate = true;
@@ -1757,7 +1902,9 @@ function Graph3DSurface({
         y: intent.domain?.y ?? [-5, 5],
       } as const;
 
-      for (const item of intent.surfaces) {
+      const samplingPlan = getGraph3DSamplingPlan(intent);
+      for (const [surfaceIndex, item] of intent.surfaces.entries()) {
+        const itemSampling = samplingPlan[surfaceIndex];
         const color = new THREE.Color(item.color ?? accent);
         try {
           switch (item.kind) {
@@ -1766,8 +1913,8 @@ function Graph3DSurface({
               const mesh = buildSurfaceMesh(
                 inputDomain.x,
                 inputDomain.y,
-                getSamplingCount(intent.sampling?.xSteps, 40),
-                getSamplingCount(intent.sampling?.ySteps, 40),
+                itemSampling[0],
+                itemSampling[1],
                 (x, y) => zOf({ x, y }),
                 color,
                 item.opacity ?? 0.82,
@@ -1783,8 +1930,8 @@ function Graph3DSurface({
               const mesh = buildParametricSurfaceMesh(
                 item.uDomain,
                 item.vDomain,
-                getSamplingCount(intent.sampling?.uSteps, 28),
-                getSamplingCount(intent.sampling?.vSteps, 28),
+                itemSampling[0],
+                itemSampling[1],
                 (u, v) => [xOf({ u, v }), yOf({ u, v }), zOf({ u, v })],
                 color,
                 item.opacity ?? 0.82,
@@ -1799,7 +1946,7 @@ function Graph3DSurface({
               const zOf = compileScopedExpression(item.z, ['t']);
               const line = buildCurve3D(
                 item.tDomain,
-                getSamplingCount(intent.sampling?.tSteps, 160),
+                itemSampling[0],
                 (t) => [xOf({ t }), yOf({ t }), zOf({ t })],
                 color
               );
@@ -1827,9 +1974,9 @@ function Graph3DSurface({
                 item.xDomain,
                 item.yDomain,
                 item.zDomain,
-                getSamplingCount(intent.sampling?.xSteps, 5),
-                getSamplingCount(intent.sampling?.ySteps, 5),
-                getSamplingCount(intent.sampling?.tSteps, 5),
+                itemSampling[0],
+                itemSampling[1],
+                itemSampling[2],
                 (x, y, z) => [fx({ x, y, z }), fy({ x, y, z }), fz({ x, y, z })],
                 color
               );
@@ -1883,9 +2030,10 @@ function Graph3DSurface({
       const center = bounds.getCenter(new THREE.Vector3());
       const size = bounds.getSize(new THREE.Vector3());
       const radius = Math.max(size.length() * 0.45, 4);
-      if (state?.graph3dCamera) {
-        camera.position.set(...state.graph3dCamera.position);
-        controls.target.set(...state.graph3dCamera.target);
+      const initialState = stateRef.current;
+      if (initialState?.graph3dCamera) {
+        camera.position.set(...initialState.graph3dCamera.position);
+        controls.target.set(...initialState.graph3dCamera.target);
       } else {
         const azimuth = ((intent.camera?.azimuth ?? 40) * Math.PI) / 180;
         const elevation = ((intent.camera?.elevation ?? 28) * Math.PI) / 180;
@@ -1897,25 +2045,31 @@ function Graph3DSurface({
         );
         controls.target.copy(center);
       }
-      controls.update();
-
       emitCameraState = () => {
-        if (!onState) return;
-        onState({
-          ...(state ?? {}),
+        const onChange = onStateRef.current;
+        const activeControls = controls;
+        if (!onChange || !activeControls) return;
+        onChange({
+          ...(stateRef.current ?? {}),
           graph3dCamera: {
             position: [camera.position.x, camera.position.y, camera.position.z],
-            target: [controls.target.x, controls.target.y, controls.target.z],
+            target: [activeControls.target.x, activeControls.target.y, activeControls.target.z],
           },
         });
       };
-      controls.addEventListener('end', emitCameraState);
 
-      const render = () => {
-        controls?.update();
-        renderer?.render(scene!, camera);
-        raf = window.requestAnimationFrame(render);
+      // Coalesce bursts of control/resize events into one frame. There is no
+      // recursive RAF, so an idle chalkboard consumes no continuous GPU time.
+      requestRender = () => {
+        if (raf) return;
+        raf = window.requestAnimationFrame(() => {
+          raf = 0;
+          if (renderer && scene) renderer.render(scene, camera);
+        });
       };
+      controls.addEventListener('change', requestRender);
+      controls.addEventListener('end', emitCameraState);
+      controls.update();
 
       const resize = () => {
         const width = host.clientWidth;
@@ -1924,11 +2078,11 @@ function Graph3DSurface({
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
         renderer.setSize(width, height, false);
+        requestRender();
       };
       resize();
       ro = new ResizeObserver(resize);
       ro.observe(host);
-      render();
     } catch {
       setError('3D graphing failed to initialize in this environment.');
       renderer?.dispose();
@@ -1937,6 +2091,7 @@ function Graph3DSurface({
     return () => {
       window.cancelAnimationFrame(raf);
       ro?.disconnect();
+      controls?.removeEventListener('change', requestRender as any);
       controls?.removeEventListener('end', emitCameraState as any);
       controls?.dispose();
       scene?.traverse((obj) => {
@@ -1989,6 +2144,7 @@ function JsxGraphSurface({
   chalk,
   accent,
   scale,
+  readOnly,
   onState,
 }: {
   intent: VisualizationIntent;
@@ -1996,6 +2152,7 @@ function JsxGraphSurface({
   chalk: string;
   accent: string;
   scale: number;
+  readOnly: boolean;
   onState?: (next: VisualizationState) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -2047,7 +2204,6 @@ function JsxGraphSurface({
       showNavigation: false,
       pan: { enabled: isFunction, needShift: false, needTwoFingers: false },
       zoom: {
-        enabled: isFunction,
         wheel: isFunction,
         needShift: false,
         factorX: 1.18,
@@ -2055,7 +2211,7 @@ function JsxGraphSurface({
         pinch: isFunction,
         pinchHorizontal: isFunction,
         pinchVertical: isFunction,
-      },
+      } as any,
       axis: false,
       grid: false,
       defaultAxes: {},
@@ -2106,7 +2262,7 @@ function JsxGraphSurface({
 
     try {
       if (isGeometry) {
-        renderGeometry(board, intent, created, positions, chalk, accent);
+        renderGeometry(board, intent, created, positions, chalk, accent, readOnly);
       } else if (isFunction) {
         renderFunction(board, intent as FunctionIntent, chalk, accent);
       }
@@ -2190,7 +2346,7 @@ function JsxGraphSurface({
     // depend on `state.pointPositions`: `saveBlockState` echoes our own drag
     // back down as a new `state` prop, which would re-init the board mid-drag.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [intent, chalk, accent, scale]);
+  }, [intent, chalk, accent, scale, readOnly]);
 
   const isGeometry = intent.type === "geometry";
   const isFunction = intent.type === "function";
@@ -2211,7 +2367,8 @@ function renderGeometry(
   created: Record<string, GeometryElement>,
   positions: Record<string, [number, number]>,
   chalk: string,
-  accent: string
+  accent: string,
+  readOnly: boolean
 ) {
   const ref = (id: string): GeometryElement | undefined => created[id];
   const lineStyle = (o: { style?: { color?: string; strokeWidth?: number; dash?: boolean } }) => ({
@@ -2233,7 +2390,7 @@ function renderGeometry(
         fillColor: accent,
         strokeColor: chalk,
         strokeWidth: 1.2,
-        fixed: obj.draggable === false,
+        fixed: readOnly || obj.draggable === false,
         showInfobox: false,
         snapToGrid: false,
         label: {
@@ -2862,7 +3019,7 @@ function renderFunctionAnnotations(
       case "point": {
         const fn = ann.y === undefined ? compiled.values().next().value as ((x: number) => number) | undefined : undefined;
         const y = ann.y ?? fn?.(ann.x);
-        if (!isFinite(y)) break;
+        if (y === undefined || !Number.isFinite(y)) break;
         createFunctionMarker(board, ann.x, y, ann.label ?? ann.labelLatex, chalk, accent);
         break;
       }
@@ -3090,6 +3247,79 @@ function compileScopedExpression(expr: string, variables: string[]): (scope: Rec
 
 function getSamplingCount(value: number | undefined, fallback: number): number {
   return Math.max(4, Math.min(200, Math.round(value ?? fallback)));
+}
+
+export const GRAPH3D_MESH_VERTEX_BUDGET = 36_000;
+export const GRAPH3D_VECTOR_BUDGET = 512;
+
+/**
+ * Allocate one aggregate sampling budget across a 3D intent. Large model-
+ * generated requests are scaled in both dimensions, preserving aspect ratio,
+ * rather than allowing every mesh to consume the per-mesh ceiling.
+ */
+export function getGraph3DSamplingPlan(intent: Graph3DIntent): [number, number, number][] {
+  const plan: [number, number, number][] = intent.surfaces.map((item) => {
+    switch (item.kind) {
+      case 'surface':
+        return [getSamplingCount(intent.sampling?.xSteps, 40), getSamplingCount(intent.sampling?.ySteps, 40), 1];
+      case 'parametric_surface':
+        return [getSamplingCount(intent.sampling?.uSteps, 28), getSamplingCount(intent.sampling?.vSteps, 28), 1];
+      case 'parametric_curve':
+        return [getSamplingCount(intent.sampling?.tSteps, 160), 1, 1];
+      case 'vector_field':
+        return [
+          Math.min(8, getSamplingCount(intent.sampling?.xSteps, 5)),
+          Math.min(8, getSamplingCount(intent.sampling?.ySteps, 5)),
+          Math.min(8, getSamplingCount(intent.sampling?.tSteps, 5)),
+        ];
+      default:
+        return [1, 1, 1];
+    }
+  });
+
+  const meshIndexes = intent.surfaces
+    .map((item, index) => item.kind === 'surface' || item.kind === 'parametric_surface' ? index : -1)
+    .filter((index) => index >= 0);
+  // Mesh builders include both endpoints, so N steps allocate N + 1 vertices.
+  const countMeshVertices = () => meshIndexes.reduce(
+    (sum, index) => sum + (plan[index][0] + 1) * (plan[index][1] + 1),
+    0
+  );
+  let requestedMeshVertices = countMeshVertices();
+  while (requestedMeshVertices > GRAPH3D_MESH_VERTEX_BUDGET) {
+    const scale = Math.sqrt(GRAPH3D_MESH_VERTEX_BUDGET / requestedMeshVertices);
+    for (const index of meshIndexes) {
+      plan[index] = [Math.max(4, Math.floor(plan[index][0] * scale)), Math.max(4, Math.floor(plan[index][1] * scale)), 1];
+    }
+    const nextCount = countMeshVertices();
+    // The minimum plan is far below the budget, but guard against a rounding
+    // fixed point so this defensive planner can never loop indefinitely.
+    if (nextCount >= requestedMeshVertices) {
+      const index = meshIndexes.reduce((largest, candidate) =>
+        plan[candidate][0] * plan[candidate][1] > plan[largest][0] * plan[largest][1] ? candidate : largest
+      );
+      if (plan[index][0] >= plan[index][1] && plan[index][0] > 4) plan[index][0] -= 1;
+      else if (plan[index][1] > 4) plan[index][1] -= 1;
+    }
+    requestedMeshVertices = countMeshVertices();
+  }
+
+  const vectorIndexes = intent.surfaces
+    .map((item, index) => item.kind === 'vector_field' ? index : -1)
+    .filter((index) => index >= 0);
+  const requestedVectors = vectorIndexes.reduce((sum, index) => sum + plan[index][0] * plan[index][1] * plan[index][2], 0);
+  if (requestedVectors > GRAPH3D_VECTOR_BUDGET) {
+    const scale = Math.cbrt(GRAPH3D_VECTOR_BUDGET / requestedVectors);
+    for (const index of vectorIndexes) {
+      plan[index] = [
+        Math.max(2, Math.floor(plan[index][0] * scale)),
+        Math.max(2, Math.floor(plan[index][1] * scale)),
+        Math.max(2, Math.floor(plan[index][2] * scale)),
+      ];
+    }
+  }
+
+  return plan;
 }
 
 async function loadRDKitModule() {

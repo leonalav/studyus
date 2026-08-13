@@ -1,5 +1,7 @@
 import { getDb, saveDbSync } from "../db/database";
 import { AgentRuntimeError } from "./agentRuntime";
+import { parseAssessmentFigureJson } from "./assessmentFigure";
+import type { VisualizationIntent } from "./visualization/types";
 import {
   evaluateRubricResponse,
   isBlankResponse,
@@ -54,11 +56,24 @@ export interface TypedRubricAnswerSpec {
   criteria: RubricCriterion[];
 }
 
+function validatedStoredFigure(raw: unknown, itemId: string): VisualizationIntent | undefined {
+  const parsed = parseAssessmentFigureJson(raw);
+  if (parsed === null) return undefined;
+  if (!parsed.ok) {
+    throw new AgentRuntimeError(
+      `Assessment item ${itemId} has an invalid stored visualization: ${parsed.error}`,
+      "schema_invalid"
+    );
+  }
+  return parsed.value;
+}
+
 export interface AttemptForTakingDTO {
   attemptId: string;
   formId: string;
   title: string;
   mode: string;
+  assistancePolicy: string;
   status: AttemptStatus;
   startedAt: string;
   deadlineAt: string | null;
@@ -73,6 +88,8 @@ export interface AttemptForTakingDTO {
     bloomTarget: string;
     learningObjective: string;
     curriculumNode: string;
+    /** Validated semantic figure; absent when the question is text-only. */
+    figure?: VisualizationIntent;
     draftResponse: string;
     flags: string[];
     /** Learner-facing MCQ options — never includes the answer key. */
@@ -113,6 +130,7 @@ export interface AttemptResultDTO {
   questions: {
     itemId: string;
     stem: string;
+    figure?: VisualizationIntent;
     maximumMarks: number;
     awardedMarks: number;
     committedResponse: string;
@@ -274,6 +292,7 @@ async function preGradeRubricResponses(
     itemType: string;
     maximumMarks: number;
     learningObjective: string;
+    figure?: VisualizationIntent;
     spec: any;
     responseId: string;
     committedResponse: string;
@@ -303,6 +322,7 @@ async function preGradeRubricResponses(
         response: row.committedResponse,
         referenceSolution: row.spec?.reference_solution ?? null,
         learningObjective: row.learningObjective,
+        figure: row.figure,
       });
       graded.set(row.responseId, {
         responseId: row.responseId,
@@ -340,7 +360,7 @@ async function preGradeRubricResponses(
 export async function getAttemptForTaking(attemptId: string): Promise<AttemptForTakingDTO | null> {
   const db = await getDb();
   const attRes = db.exec(`
-    SELECT a.id, a.form_id, f.title, a.mode, a.status, a.started_at, a.deadline_at, a.current_ordinal
+    SELECT a.id, a.form_id, f.title, a.mode, a.assistance_policy, a.status, a.started_at, a.deadline_at, a.current_ordinal
     FROM assessment_attempts a
     JOIN assessment_forms f ON a.form_id = f.id
     WHERE a.id = ?;
@@ -353,10 +373,11 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
   const formId = row[1] as string;
   const title = row[2] as string;
   const mode = row[3] as string;
-  let status = row[4] as AttemptStatus;
-  const startedAt = row[5] as string;
-  const deadlineAt = row[6] as string | null;
-  const currentOrdinal = row[7] as number;
+  const assistancePolicy = row[4] as string;
+  let status = row[5] as AttemptStatus;
+  const startedAt = row[6] as string;
+  const deadlineAt = row[7] as string | null;
+  const currentOrdinal = row[8] as number;
 
   // Derive remaining time in backend
   let remainingSeconds: number | null = null;
@@ -374,7 +395,7 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
   // Get items
   const itemsRes = db.exec(`
     SELECT i.id, i.stable_ordinal, i.stem, i.item_type, i.maximum_marks, i.bloom_target, i.learning_objective, i.curriculum_node,
-           r.draft_response, r.response_flags, i.answer_spec_json
+           r.draft_response, r.response_flags, i.answer_spec_json, i.figure_spec_json
     FROM assessment_items i
     LEFT JOIN attempt_responses r ON i.id = r.item_id AND r.attempt_id = ?
     WHERE i.form_id = ?
@@ -402,6 +423,7 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
       bloomTarget: q[5] as string,
       learningObjective: q[6] as string,
       curriculumNode: q[7] as string,
+      figure: validatedStoredFigure(q[11], q[0] as string),
       draftResponse: (q[8] as string) ?? "",
       flags,
       options:
@@ -425,6 +447,7 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
     formId,
     title,
     mode,
+    assistancePolicy,
     status,
     startedAt,
     deadlineAt,
@@ -432,6 +455,96 @@ export async function getAttemptForTaking(attemptId: string): Promise<AttemptFor
     currentOrdinal,
     questions,
   };
+}
+
+/**
+ * Mark an available attempt as explicitly started by the learner.
+ *
+ * Generation deliberately leaves attempts in `created`. Keeping this transition
+ * separate from loading means inspecting an available test can never turn its
+ * Start button into Resume. The audit event also repairs the ambiguity of older
+ * generated attempts that were persisted as active before they were opened.
+ */
+export async function beginAttempt(attemptId: string): Promise<{ status: "active"; startedNow: boolean }> {
+  const db = await getDb();
+  const attempt = db.exec(`
+    SELECT status, deadline_at,
+           (SELECT COUNT(*) FROM attempt_responses r WHERE r.attempt_id = a.id),
+           (SELECT COUNT(*) FROM assessment_events e WHERE e.attempt_id = a.id AND e.event_type = 'attempt_started')
+    FROM assessment_attempts a
+    WHERE a.id = ?;
+  `, [attemptId]);
+  if (!attempt[0] || attempt[0].values.length === 0) {
+    throw new Error("Attempt not found");
+  }
+
+  const [status, deadlineAt, responseCount, startEventCount] = attempt[0].values[0] as [
+    AttemptStatus,
+    string | null,
+    number,
+    number,
+  ];
+  if (status !== "created" && status !== "active") {
+    throw new Error(`Cannot start an attempt in status: ${status}`);
+  }
+  if (deadlineAt && new Date(deadlineAt).getTime() <= Date.now()) {
+    db.run("UPDATE assessment_attempts SET status = 'expired' WHERE id = ?;", [attemptId]);
+    saveDbSync();
+    throw new Error("This attempt has expired");
+  }
+
+  const now = new Date().toISOString();
+  const startedNow = status === "created" || (responseCount === 0 && startEventCount === 0);
+  db.run("BEGIN TRANSACTION;");
+  try {
+    db.run(
+      `UPDATE assessment_attempts
+       SET status = 'active',
+           started_at = CASE WHEN ? = 1 THEN ? ELSE started_at END,
+           audit_updated_at = ?
+       WHERE id = ?;`,
+      [startedNow ? 1 : 0, now, now, attemptId]
+    );
+    if (startEventCount === 0) {
+      db.run(
+        `INSERT INTO assessment_events (id, attempt_id, response_id, event_type, metadata_json, timestamp)
+         VALUES (?, ?, NULL, 'attempt_started', ?, ?);`,
+        [`evt-start-${attemptId}-${Date.now()}`, attemptId, JSON.stringify({ explicit: true }), now]
+      );
+    }
+    db.run("COMMIT;");
+  } catch (error) {
+    db.run("ROLLBACK;");
+    throw error;
+  }
+  saveDbSync();
+  return { status: "active", startedNow };
+}
+
+/** Create a clean attempt for the same immutable generated form. */
+export async function createRetakeAttempt(attemptId: string): Promise<string> {
+  const db = await getDb();
+  const source = db.exec(`
+    SELECT form_id, learner_id, mode, assistance_policy
+    FROM assessment_attempts
+    WHERE id = ?;
+  `, [attemptId]);
+  if (!source[0] || source[0].values.length === 0) {
+    throw new Error("Attempt not found");
+  }
+
+  const [formId, learnerId, mode, assistancePolicy] = source[0].values[0] as [string, string, string, string];
+  const now = new Date().toISOString();
+  const retakeId = `attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  db.run(`
+    INSERT INTO assessment_attempts (
+      id, form_id, learner_id, status, mode, assistance_policy, started_at,
+      deadline_at, submitted_at, completed_at, current_ordinal,
+      aggregate_score, grading_status, audit_created_at, audit_updated_at
+    ) VALUES (?, ?, ?, 'created', ?, ?, ?, NULL, NULL, NULL, 1, 0, 'unseen', ?, ?);
+  `, [retakeId, formId, learnerId, mode, assistancePolicy, now, now, now]);
+  saveDbSync();
+  return retakeId;
 }
 
 export async function autosaveDraft(
@@ -462,10 +575,9 @@ export async function autosaveDraft(
     return { success: false, status: "expired" };
   }
 
-  // Ensure state is 'active' once draft is saved
-  if (status === "created") {
-    db.run("UPDATE assessment_attempts SET status = 'active' WHERE id = ?;", [attemptId]);
-  }
+  // A draft is also an unambiguous start signal for callers that bypass the
+  // Available tests button. This transition is idempotent and logs one event.
+  await beginAttempt(attemptId);
 
   if (currentOrdinal !== undefined) {
     db.run("UPDATE assessment_attempts SET current_ordinal = ? WHERE id = ?;", [currentOrdinal, attemptId]);
@@ -514,7 +626,7 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
   // Read what will be graded. The response the learner sees committed is the
   // draft, so grade against the same text the transaction is about to commit.
   const planRes = db.exec(`
-    SELECT i.id, i.item_type, i.maximum_marks, i.answer_spec_json, i.stem, i.learning_objective,
+    SELECT i.id, i.item_type, i.maximum_marks, i.answer_spec_json, i.stem, i.learning_objective, i.figure_spec_json,
            r.id AS resp_id, COALESCE(r.committed_response, r.draft_response, '') AS response_text
     FROM assessment_items i
     LEFT JOIN attempt_responses r ON i.id = r.item_id AND r.attempt_id = ?
@@ -529,6 +641,7 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
     spec: any;
     stem: string;
     learningObjective: string;
+    figure?: VisualizationIntent;
     responseId: string;
     committedResponse: string;
   }
@@ -543,8 +656,9 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
       spec,
       stem: (row[4] as string) ?? "",
       learningObjective: (row[5] as string) ?? "",
-      responseId: (row[6] as string) ?? `resp-${attemptId}-${row[0] as string}`,
-      committedResponse: (row[7] as string) ?? "",
+      figure: validatedStoredFigure(row[6], row[0] as string),
+      responseId: (row[7] as string) ?? `resp-${attemptId}-${row[0] as string}`,
+      committedResponse: (row[8] as string) ?? "",
     };
   });
 
@@ -732,7 +846,7 @@ export async function getAttemptResult(attemptId: string): Promise<AttemptResult
   const att = attRes[0].values[0];
 
   const itemsRes = db.exec(`
-    SELECT i.id, i.stem, i.maximum_marks, r.id AS resp_id, r.committed_response, r.grading_status
+    SELECT i.id, i.stem, i.figure_spec_json, i.maximum_marks, r.id AS resp_id, r.committed_response, r.grading_status
     FROM assessment_items i
     LEFT JOIN attempt_responses r ON i.id = r.item_id AND r.attempt_id = ?
     WHERE i.form_id = ?
@@ -743,10 +857,11 @@ export async function getAttemptResult(attemptId: string): Promise<AttemptResult
   const questions = (itemsRes[0]?.values ?? []).map((row) => {
     const itemId = row[0] as string;
     const stem = row[1] as string;
-    const maxMarks = row[2] as number;
-    const respId = row[3] as string | null;
-    const committedResponse = (row[4] as string) ?? "";
-    const gradingStatus = (row[5] as string) ?? "unseen";
+    const figure = validatedStoredFigure(row[2], itemId);
+    const maxMarks = row[3] as number;
+    const respId = row[4] as string | null;
+    const committedResponse = (row[5] as string) ?? "";
+    const gradingStatus = (row[6] as string) ?? "unseen";
 
     totalPossible += maxMarks;
 
@@ -800,6 +915,7 @@ export async function getAttemptResult(attemptId: string): Promise<AttemptResult
     return {
       itemId,
       stem,
+      figure,
       maximumMarks: maxMarks,
       awardedMarks: questionAwarded,
       committedResponse,

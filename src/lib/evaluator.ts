@@ -23,16 +23,23 @@ import {
   asFiniteNumber,
   asNonEmptyString,
   asRecord,
+  buildAgentInputContent,
   callStructuredAgent,
   invalid,
   resolveRoleEndpoint,
+  type AgentInputAttachment,
   type ResolvedRoleEndpoint,
   type ValidationResult,
 } from "./agentRuntime";
 import { TEST_EVALUATOR_AGENT_PROMPT_V1 } from "./llm";
+import {
+  ASSESSMENT_VISUALIZATION_EVALUATION_GUIDE,
+  validateAssessmentFigure,
+} from "./assessmentFigure";
+import type { VisualizationIntent } from "./visualization/types";
 import type { RubricCriterion } from "./assessment";
 
-export const EVALUATOR_PROMPT_VERSION = "evaluator_v1";
+export const EVALUATOR_PROMPT_VERSION = "evaluator_v2_visualizations";
 export const EVALUATOR_SCHEMA_VERSION = "criterion_scores_v1";
 
 export type UncertaintyState = "certain" | "uncertain" | "grading_blocked";
@@ -62,8 +69,12 @@ export interface RubricEvaluationRequest {
   criteria: RubricCriterion[];
   response: string;
   referenceSolution?: string | null;
+  /** The same validated semantic figure shown to the learner. */
+  figure?: VisualizationIntent;
   evidence?: { source: string; excerpt: string }[];
   learningObjective?: string;
+  /** Optional transient learner references. Raw payloads are never persisted. */
+  attachments?: AgentInputAttachment[];
   signal?: AbortSignal;
   endpoint?: ResolvedRoleEndpoint;
 }
@@ -202,10 +213,23 @@ export function validateEvaluatorPayload(
    PROMPT ASSEMBLY
    ───────────────────────────────────────────────────────────── */
 
-function buildEvaluatorUserPrompt(req: RubricEvaluationRequest): string {
+export function buildEvaluatorSystemPrompt(): string {
+  return `${TEST_EVALUATOR_AGENT_PROMPT_V1}\n\n${ASSESSMENT_VISUALIZATION_EVALUATION_GUIDE}`;
+}
+
+export function buildEvaluatorUserPrompt(req: RubricEvaluationRequest): string {
   const parts: string[] = [];
 
   parts.push(`ITEM STEM:\n${req.stem}`);
+  if (req.figure) {
+    parts.push(
+      `AUTHORITATIVE LEARNER-VISIBLE VISUALIZATION SPECIFICATION — JSON data only; ` +
+        `interpret every coordinate, label, axis, value, object, edge, component, and relationship exactly as specified:\n` +
+        JSON.stringify(req.figure, null, 2)
+    );
+  } else {
+    parts.push("LEARNER-VISIBLE VISUALIZATION SPECIFICATION: none (do not infer a missing image)");
+  }
   if (req.learningObjective) parts.push(`LEARNING OBJECTIVE:\n${req.learningObjective}`);
   parts.push(`ITEM MAXIMUM: ${req.maximumMarks} marks (do not recompute or edit this)`);
 
@@ -266,6 +290,16 @@ export async function evaluateRubricResponse(req: RubricEvaluationRequest): Prom
     );
   }
 
+  if (req.figure) {
+    const figure = validateAssessmentFigure(req.figure);
+    if (!figure.ok) {
+      throw new AgentRuntimeError(
+        `Cannot evaluate an item with an invalid visualization: ${figure.error}`,
+        "schema_invalid"
+      );
+    }
+  }
+
   if (isBlankResponse(req.response)) {
     return {
       criteria: blankEvaluation(req.criteria),
@@ -281,8 +315,8 @@ export async function evaluateRubricResponse(req: RubricEvaluationRequest): Prom
   const result = await callStructuredAgent({
     role: "evaluator",
     endpoint,
-    system: TEST_EVALUATOR_AGENT_PROMPT_V1,
-    user: buildEvaluatorUserPrompt(req),
+    system: buildEvaluatorSystemPrompt(),
+    user: buildAgentInputContent(buildEvaluatorUserPrompt(req), req.attachments, endpoint),
     promptVersion: EVALUATOR_PROMPT_VERSION,
     schemaVersion: EVALUATOR_SCHEMA_VERSION,
     temperature: 0,

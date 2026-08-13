@@ -535,7 +535,7 @@ function validateFunction(intent: FunctionIntent): ValidationResult {
           }
           break;
         default:
-          return { valid: false, reason: `Unknown function annotation kind: ${ann.kind}` };
+          return { valid: false, reason: `Unknown function annotation kind: ${String((ann as { kind?: unknown }).kind)}` };
       }
     }
   }
@@ -587,8 +587,8 @@ function validateGraph3D(intent: Graph3DIntent): ValidationResult {
 
   if (intent.sampling) {
     for (const [key, value] of Object.entries(intent.sampling)) {
-      if (value !== undefined && (!Number.isInteger(value) || value < 4 || value > 400)) {
-        return { valid: false, reason: `3D graph sampling.${key} must be an integer between 4 and 400` };
+      if (value !== undefined && (!Number.isInteger(value) || value < 4 || value > 200)) {
+        return { valid: false, reason: `3D graph sampling.${key} must be an integer between 4 and 200` };
       }
     }
   }
@@ -601,6 +601,14 @@ function validateGraph3D(intent: Graph3DIntent): ValidationResult {
   }
   if (intent.surfaces.length > MAX_EXPRESSIONS) {
     return { valid: false, reason: `Too many 3D graph objects (max ${MAX_EXPRESSIONS})` };
+  }
+
+  const pointCloudTotal = intent.surfaces.reduce(
+    (total, object) => total + (object?.kind === "point_cloud" && Array.isArray(object.points) ? object.points.length : 0),
+    0
+  );
+  if (pointCloudTotal > MAX_DATA_POINTS * 4) {
+    return { valid: false, reason: `3D graph point clouds exceed the aggregate ${MAX_DATA_POINTS * 4}-point budget` };
   }
 
   const ids = new Set<string>();
@@ -764,60 +772,145 @@ function validateChart(intent: ChartIntent): ValidationResult {
     }
   }
 
-  const series = intent.series ?? (intent.data ? intent.data.map((s) => ({ kind: intent.chartType === 'scatter' ? 'scatter' : intent.chartType === 'line' ? 'line' : 'bar', id: s.id, name: s.label, values: s.values, points: s.values.map((v, i) => [i, v]) } as any)) : []);
-  if (!Array.isArray(series) || series.length === 0) {
+  if (intent.series !== undefined && !Array.isArray(intent.series)) {
+    return { valid: false, reason: "Chart series must be an array" };
+  }
+  if (intent.data !== undefined && !Array.isArray(intent.data)) {
+    return { valid: false, reason: "Legacy chart data must be an array" };
+  }
+
+  const hasExplicitSeries = Array.isArray(intent.series) && intent.series.length > 0;
+  let series: any[];
+  if (hasExplicitSeries) {
+    series = intent.series as any[];
+  } else {
+    if (!Array.isArray(intent.data) || intent.data.length === 0) {
+      return { valid: false, reason: "Chart must have at least one series" };
+    }
+    if (!["bar", "line", "scatter"].includes(intent.chartType)) {
+      return { valid: false, reason: `Legacy chart data is only supported for bar, line, and scatter charts` };
+    }
+    if (intent.data.length > MAX_DATA_SERIES) {
+      return { valid: false, reason: `Too many data series (max ${MAX_DATA_SERIES})` };
+    }
+    for (const item of intent.data as any[]) {
+      if (!item || typeof item.id !== "string" || !validateString(item.id, MAX_STRING_LENGTH)) {
+        return { valid: false, reason: "Legacy chart data series must have an id" };
+      }
+      if (typeof item.label !== "string" || !validateString(item.label, MAX_STRING_LENGTH)) {
+        return { valid: false, reason: "Legacy chart data series must have a label" };
+      }
+      if (!Array.isArray(item.values)) {
+        return { valid: false, reason: "Legacy chart data values must be an array" };
+      }
+    }
+    series = intent.data.map((item) => intent.chartType === "scatter"
+      ? { kind: "scatter", id: item.id, name: item.label, points: item.values.map((value, index) => [index, value]) }
+      : { kind: intent.chartType, id: item.id, name: item.label, values: item.values });
+  }
+
+  if (series.length === 0) {
     return { valid: false, reason: "Chart must have at least one series" };
   }
   if (series.length > MAX_DATA_SERIES) {
     return { valid: false, reason: `Too many data series (max ${MAX_DATA_SERIES})` };
   }
+
   const ids = new Set<string>();
-  for (const seriesItem of series as any[]) {
-    if (!seriesItem.id || typeof seriesItem.id !== 'string') return { valid: false, reason: 'Chart series missing id' };
+  for (const seriesItem of series) {
+    if (!seriesItem || typeof seriesItem !== "object" || typeof seriesItem.kind !== "string") {
+      return { valid: false, reason: "Chart series must have a kind" };
+    }
+    if (seriesItem.kind !== intent.chartType) {
+      return { valid: false, reason: `Chart type ${intent.chartType} requires ${intent.chartType} series, received ${seriesItem.kind}` };
+    }
+    if (!seriesItem.id || typeof seriesItem.id !== "string" || !validateString(seriesItem.id, MAX_STRING_LENGTH)) {
+      return { valid: false, reason: "Chart series missing id" };
+    }
     if (ids.has(seriesItem.id)) return { valid: false, reason: `Duplicate series id: ${seriesItem.id}` };
     ids.add(seriesItem.id);
-    if ('name' in seriesItem && seriesItem.name !== undefined && !validateString(String(seriesItem.name), MAX_STRING_LENGTH)) return { valid: false, reason: 'Chart series name too long' };
-    if ('color' in seriesItem && seriesItem.color !== undefined && typeof seriesItem.color !== 'string') return { valid: false, reason: 'Chart series color must be string' };
-    if ('opacity' in seriesItem && seriesItem.opacity !== undefined && (typeof seriesItem.opacity !== 'number' || !isFinite(seriesItem.opacity) || seriesItem.opacity < 0 || seriesItem.opacity > 1)) return { valid: false, reason: 'Chart series opacity must be between 0 and 1' };
+    if ("name" in seriesItem && seriesItem.name !== undefined && !validateString(String(seriesItem.name), MAX_STRING_LENGTH)) return { valid: false, reason: "Chart series name too long" };
+    if ("color" in seriesItem && seriesItem.color !== undefined && typeof seriesItem.color !== "string") return { valid: false, reason: "Chart series color must be string" };
+    if ("opacity" in seriesItem && seriesItem.opacity !== undefined && (typeof seriesItem.opacity !== "number" || !isFinite(seriesItem.opacity) || seriesItem.opacity < 0 || seriesItem.opacity > 1)) return { valid: false, reason: "Chart series opacity must be between 0 and 1" };
+
     switch (seriesItem.kind) {
-      case 'bar':
-      case 'line':
-        if (!Array.isArray(seriesItem.values) || seriesItem.values.length > MAX_DATA_POINTS || !seriesItem.values.every((v: unknown) => typeof v === 'number' && isFinite(v as number))) return { valid: false, reason: `${seriesItem.kind} series values must be finite numbers` };
+      case "bar":
+      case "line":
+        if (!isFiniteNumberArray(seriesItem.values, true)) return { valid: false, reason: `${seriesItem.kind} series values must contain 1..${MAX_DATA_POINTS} finite numbers` };
         break;
-      case 'scatter':
-      case 'polar_line':
-      case 'polar_scatter':
-        if (!Array.isArray(seriesItem.points) || seriesItem.points.length > MAX_DATA_POINTS || !seriesItem.points.every((p: unknown) => Array.isArray(p) && p.length === 2 && p.every((n) => typeof n === 'number' && isFinite(n)))) return { valid: false, reason: `${seriesItem.kind} series points must be finite [x,y] pairs` };
+      case "scatter":
+      case "polar_line":
+      case "polar_scatter":
+        if (!isFiniteTupleArray(seriesItem.points, 2, true)) return { valid: false, reason: `${seriesItem.kind} series points must contain 1..${MAX_DATA_POINTS} finite [x,y] pairs` };
         break;
-      case 'histogram':
-      case 'box':
-        if (!Array.isArray(seriesItem.values) || seriesItem.values.length === 0 || seriesItem.values.length > MAX_DATA_POINTS || !seriesItem.values.every((v: unknown) => typeof v === 'number' && isFinite(v as number))) return { valid: false, reason: `${seriesItem.kind} series values must be finite numbers` };
+      case "histogram":
+      case "box":
+        if (!isFiniteNumberArray(seriesItem.values, true)) return { valid: false, reason: `${seriesItem.kind} series values must contain 1..${MAX_DATA_POINTS} finite numbers` };
         break;
-      case 'heatmap':
-      case 'contour': {
-        const hasPoints = Array.isArray(seriesItem.points) && seriesItem.points.every((p: unknown) => Array.isArray(p) && p.length === 3 && p.every((n) => typeof n === 'number' && isFinite(n)));
-        const hasGrid = seriesItem.grid && Array.isArray(seriesItem.grid.x) && Array.isArray(seriesItem.grid.y) && Array.isArray(seriesItem.grid.values);
-        if (!hasPoints && !hasGrid) return { valid: false, reason: `${seriesItem.kind} series requires points or grid` };
+      case "heatmap":
+      case "contour": {
+        const providesPoints = seriesItem.points !== undefined;
+        const providesGrid = seriesItem.grid !== undefined;
+        if (providesPoints === providesGrid) {
+          return { valid: false, reason: `${seriesItem.kind} series must provide exactly one of points or grid` };
+        }
+        if (providesPoints) {
+          if (!isFiniteTupleArray(seriesItem.points, 3, true)) return { valid: false, reason: `${seriesItem.kind} points must contain 1..${MAX_DATA_POINTS} finite [x,y,value] triples` };
+          if (seriesItem.kind === "contour") {
+            const uniqueX = new Set(seriesItem.points.map((point: number[]) => point[0])).size;
+            const uniqueY = new Set(seriesItem.points.map((point: number[]) => point[1])).size;
+            if (uniqueX < 2 || uniqueY < 2) return { valid: false, reason: "Contour points require at least two distinct x and y coordinates" };
+          }
+        } else {
+          const grid = seriesItem.grid;
+          if (!grid || !isFiniteNumberArray(grid.x, true) || !isFiniteNumberArray(grid.y, true)) {
+            return { valid: false, reason: `${seriesItem.kind} grid axes must be non-empty finite arrays` };
+          }
+          if (grid.x.length * grid.y.length > MAX_DATA_POINTS) {
+            return { valid: false, reason: `${seriesItem.kind} grid exceeds ${MAX_DATA_POINTS} cells` };
+          }
+          if (!Array.isArray(grid.values) || grid.values.length !== grid.y.length || !grid.values.every((row: unknown) => Array.isArray(row) && row.length === grid.x.length && row.every((value) => typeof value === "number" && isFinite(value)))) {
+            return { valid: false, reason: `${seriesItem.kind} grid values must be a finite rectangular y-by-x matrix` };
+          }
+          if (seriesItem.kind === "contour" && (grid.x.length < 2 || grid.y.length < 2)) {
+            return { valid: false, reason: "Contour grid requires at least two x and y coordinates" };
+          }
+        }
         break;
       }
-      case 'pie':
-      case 'donut':
+      case "pie":
+      case "donut":
         if (!Array.isArray(seriesItem.slices) || seriesItem.slices.length === 0 || seriesItem.slices.length > MAX_DATA_POINTS) return { valid: false, reason: `${seriesItem.kind} series slices must be a non-empty array` };
-        if (!seriesItem.slices.every((s: any) => typeof s.name === 'string' && validateString(s.name, MAX_STRING_LENGTH) && typeof s.value === 'number' && isFinite(s.value))) return { valid: false, reason: `${seriesItem.kind} slices invalid` };
+        if (!seriesItem.slices.every((slice: any) => typeof slice.name === "string" && validateString(slice.name, MAX_STRING_LENGTH) && typeof slice.value === "number" && isFinite(slice.value) && slice.value >= 0)) return { valid: false, reason: `${seriesItem.kind} slices must have names and non-negative finite values` };
         break;
-      case 'radar':
-        if (!Array.isArray(seriesItem.values) || !seriesItem.values.every((v: unknown) => typeof v === 'number' && isFinite(v as number))) return { valid: false, reason: 'Radar series values invalid' };
+      case "radar":
+        if (!isFiniteNumberArray(seriesItem.values, true)) return { valid: false, reason: "Radar series values invalid" };
+        if (!intent.indicators || seriesItem.values.length !== intent.indicators.length) return { valid: false, reason: "Radar series values must match the indicator count" };
         break;
-      case 'sankey':
-        if (!Array.isArray(seriesItem.nodes) || !Array.isArray(seriesItem.links)) return { valid: false, reason: 'Sankey series must have nodes and links' };
+      case "sankey": {
+        if (!Array.isArray(seriesItem.nodes) || seriesItem.nodes.length === 0 || seriesItem.nodes.length > MAX_NODES || !Array.isArray(seriesItem.links) || seriesItem.links.length > MAX_EDGES) {
+          return { valid: false, reason: `Sankey series must have 1..${MAX_NODES} nodes and at most ${MAX_EDGES} links` };
+        }
+        const nodeIds = new Set<string>();
+        for (const node of seriesItem.nodes) {
+          if (!node || typeof node.id !== "string" || !validateString(node.id, MAX_STRING_LENGTH) || nodeIds.has(node.id)) return { valid: false, reason: "Sankey nodes require unique string ids" };
+          if (node.name !== undefined && !validateString(node.name, MAX_STRING_LENGTH)) return { valid: false, reason: "Sankey node name too long" };
+          nodeIds.add(node.id);
+        }
+        if (!seriesItem.links.every((link: any) => link && nodeIds.has(link.source) && nodeIds.has(link.target) && typeof link.value === "number" && isFinite(link.value) && link.value >= 0)) {
+          return { valid: false, reason: "Sankey links must reference nodes and have non-negative finite values" };
+        }
         break;
-      case 'treemap':
-      case 'sunburst':
-        if (!Array.isArray(seriesItem.nodes) || seriesItem.nodes.length === 0) return { valid: false, reason: `${seriesItem.kind} series nodes must be non-empty` };
+      }
+      case "treemap":
+      case "sunburst": {
+        const treeResult = validateChartTree(seriesItem.nodes);
+        if (!treeResult.valid) return treeResult;
         break;
-      case 'candlestick':
-      case 'ohlc':
-        if (!Array.isArray(seriesItem.candles) || seriesItem.candles.length === 0 || seriesItem.candles.length > MAX_DATA_POINTS || !seriesItem.candles.every((c: unknown) => Array.isArray(c) && c.length === 4 && c.every((n) => typeof n === 'number' && isFinite(n)))) return { valid: false, reason: `${seriesItem.kind} candles invalid` };
+      }
+      case "candlestick":
+      case "ohlc":
+        if (!isFiniteTupleArray(seriesItem.candles, 4, true)) return { valid: false, reason: `${seriesItem.kind} candles must contain 1..${MAX_DATA_POINTS} finite OHLC tuples` };
         break;
       default:
         return { valid: false, reason: `Unknown chart series kind: ${seriesItem.kind}` };
@@ -1171,6 +1264,46 @@ function validateGraphTheory(intent: GraphTheoryIntent): ValidationResult {
 }
 
 /* ── Helpers ── */
+
+function isFiniteNumberArray(value: unknown, nonEmpty = false): value is number[] {
+  return Array.isArray(value)
+    && (!nonEmpty || value.length > 0)
+    && value.length <= MAX_DATA_POINTS
+    && value.every((item) => typeof item === "number" && isFinite(item));
+}
+
+function isFiniteTupleArray(value: unknown, width: number, nonEmpty = false): value is number[][] {
+  return Array.isArray(value)
+    && (!nonEmpty || value.length > 0)
+    && value.length <= MAX_DATA_POINTS
+    && value.every((tuple) => Array.isArray(tuple) && tuple.length === width && tuple.every((item) => typeof item === "number" && isFinite(item)));
+}
+
+function validateChartTree(roots: unknown): ValidationResult {
+  if (!Array.isArray(roots) || roots.length === 0) {
+    return { valid: false, reason: "Tree chart nodes must be non-empty" };
+  }
+  const seen = new WeakSet<object>();
+  const stack = roots.map((node) => ({ node, depth: 1 }));
+  let count = 0;
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop()!;
+    if (!node || typeof node !== "object" || seen.has(node)) return { valid: false, reason: "Tree chart contains an invalid or repeated node" };
+    seen.add(node);
+    count += 1;
+    if (count > MAX_DATA_POINTS) return { valid: false, reason: `Tree chart exceeds ${MAX_DATA_POINTS} nodes` };
+    if (depth > 20) return { valid: false, reason: "Tree chart exceeds maximum depth of 20" };
+    const item = node as { name?: unknown; value?: unknown; color?: unknown; children?: unknown };
+    if (typeof item.name !== "string" || !validateString(item.name, MAX_STRING_LENGTH)) return { valid: false, reason: "Tree chart node name invalid" };
+    if (item.value !== undefined && (typeof item.value !== "number" || !isFinite(item.value) || item.value < 0)) return { valid: false, reason: "Tree chart node value must be a non-negative finite number" };
+    if (item.color !== undefined && typeof item.color !== "string") return { valid: false, reason: "Tree chart node color must be string" };
+    if (item.children !== undefined) {
+      if (!Array.isArray(item.children)) return { valid: false, reason: "Tree chart children must be an array" };
+      for (const child of item.children) stack.push({ node: child, depth: depth + 1 });
+    }
+  }
+  return { valid: true };
+}
 
 function validateString(s: string, maxLen: number): boolean {
   return typeof s === "string" && s.length <= maxLen;

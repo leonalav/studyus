@@ -1,0 +1,24 @@
+.studio-button {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid rgb(255 255 255 / 0.10);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 0.055);
+  padding: 4px 8px;
+  color: var(--color-fg, #e8e8e6);
+  font-size: 10px;
+  line-height: 1;
+  transition: background-color 140ms ease, border-color 140ms ease, opacity 140ms ease;
+}
+
+.studio-button:hover:not(:disabled) {
+  border-color: rgb(255 255 255 / 0.16);
+  background: rgb(255 255 255 / 0.10);
+}
+
+.studio-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}

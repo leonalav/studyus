@@ -1,338 +1,167 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
-  Settings,
-  ChevronRight,
   ArrowLeft,
-  ChevronUp,
-  ChevronDown,
-  CornerDownLeft,
-  Sun,
-  Moon,
-  MonitorSmartphone,
   Check,
-  X,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  CornerDownLeft,
+  LockKeyhole,
+  MonitorSmartphone,
+  Moon,
   Plus,
+  Settings,
+  Sun,
   Trash2,
-  Star,
+  X,
 } from "lucide-react";
-
+import {
+  DEFAULT_PREFERENCES,
+  PREFERENCES_CHANGED_EVENT,
+  loadPreferences,
+  savePreferences,
+  type AppearancePreferences,
+  type DensityPreference,
+  type FontPreference,
+  type NotificationEventId,
+  type SavedModelEndpoint,
+  type StudyusPreferences,
+  type SummaryCadence,
+} from "../lib/preferences";
 interface Props {
   open: boolean;
   onClose: () => void;
-  onNotify: (t: string) => void;
-  /** Section to land on when opened (e.g. routed from search). Defaults to root. */
+  onNotify: (text: string) => void;
   initialSection?: Section;
 }
 
-type Section = "root" | "about" | "appearance" | "tutor" | "notifications" | "models";
+export type Section = "root" | "about" | "appearance" | "tutor" | "notifications" | "models";
 
-const SECTIONS: { id: Section; label: string; desc: string }[] = [
-  { id: "about", label: "About me", desc: "Account, usage and AI credits" },
-  { id: "appearance", label: "Appearance", desc: "Theme, font, density and accessibility" },
-  { id: "tutor", label: "AI Tutor & Study", desc: "How the tutor talks and approaches problems" },
-  { id: "notifications", label: "Notifications", desc: "Reminders, streaks and summaries" },
-  { id: "models", label: "Model configuration", desc: "Official models or your own endpoints" },
+const SECTIONS: { id: Exclude<Section, "root">; label: string; desc: string; disabled?: boolean }[] = [
+  { id: "about", label: "About me", desc: "Profile, usage, plans and account" },
+  { id: "appearance", label: "Appearance", desc: "Theme, font, layout and accessibility" },
+  { id: "notifications", label: "Notifications", desc: "Study reminders, results and summaries" },
+  { id: "models", label: "Model configuration", desc: "Your model endpoints and agent bindings" },
+  { id: "tutor", label: "Tutor Studio", desc: "...in a newer update", disabled: true },
 ];
 
-/** Exposes the real settings catalog to the search index, minus the synthetic
- *  "root" entry. Used by buildSearchIndex so search rows map 1:1 to a section
- *  the Settings modal can actually open. */
 export function getSettingsSections(): { id: string; label: string; desc: string }[] {
-  return SECTIONS.map((s) => ({ id: s.id, label: s.label, desc: s.desc }));
+  return SECTIONS.map(({ id, label, desc }) => ({ id, label, desc }));
 }
 
-/* ══════════════════════════════════════════════════════════════
-   NOTIFICATIONS
-   ══════════════════════════════════════════════════════════════ */
+function usePreferencesState(open: boolean) {
+  const [preferences, setPreferencesState] = useState<StudyusPreferences>(() => loadPreferences());
 
-type Channel = "Silent" | "In-app" | "Email";
-interface NotifRowT {
-  id: string;
-  label: string;
-  on: boolean;
-  channel: Channel;
-}
-const GENERAL: NotifRowT[] = [
-  { id: "mention", label: "I'm mentioned in a study group", on: true, channel: "In-app" },
-  { id: "reply", label: "Someone replies to my note", on: true, channel: "Email" },
-  { id: "assigned", label: "I'm assigned a practice set", on: true, channel: "In-app" },
-  { id: "overdue", label: "A study goal is overdue", on: true, channel: "Email" },
-];
-const SUMMARY: NotifRowT[] = [
-  { id: "daily", label: "Daily summary", on: false, channel: "In-app" },
-  { id: "weekly", label: "Weekly summary", on: true, channel: "In-app" },
-  { id: "monthly", label: "Monthly summary", on: true, channel: "Email" },
-];
-
-/* ══════════════════════════════════════════════════════════════
-   APPEARANCE
-   ══════════════════════════════════════════════════════════════ */
-
-type Theme = "dark" | "light" | "system";
-type Density = "comfortable" | "compact";
-type SysFont = "system" | "inter" | "grotesk" | "serif" | "mono";
-const SYS_FONTS: { id: SysFont; label: string; css: string }[] = [
-  { id: "system", label: "System default", css: "system-ui, sans-serif" },
-  { id: "inter", label: "Inter", css: "Inter, system-ui, sans-serif" },
-  { id: "grotesk", label: "Space Grotesk", css: "'Space Grotesk', sans-serif" },
-  { id: "serif", label: "Serif", css: "'Iowan Old Style', Georgia, serif" },
-  { id: "mono", label: "Mono", css: "'Space Mono', ui-monospace, monospace" },
-];
-
-/* ══════════════════════════════════════════════════════════════
-   AI TUTOR + STUDY
-   ══════════════════════════════════════════════════════════════ */
-
-interface TutorStyle {
-  id: string;
-  name: string;
-  tone: string;
-  approach: string;
-  verbosity: number;
-  patience: number;
-  challenge: number;
-  humor: number;
-  preview: string;
-  built?: boolean;
-}
-
-const PRESETS: TutorStyle[] = [
-  {
-    id: "witty",
-    name: "Witty",
-    tone: "Playful",
-    approach: "Analogy-first",
-    verbosity: 40,
-    patience: 60,
-    challenge: 55,
-    humor: 85,
-    preview: "So an orbit is really the universe's oldest running joke: you keep falling and keep missing the ground.",
-    built: true,
-  },
-  {
-    id: "professor",
-    name: "Professor",
-    tone: "Formal",
-    approach: "First principles",
-    verbosity: 80,
-    patience: 70,
-    challenge: 65,
-    humor: 15,
-    preview: "Let us begin with the definition. An orbit is the trajectory produced when gravitational acceleration balances the required centripetal acceleration.",
-    built: true,
-  },
-  {
-    id: "coach",
-    name: "Coach",
-    tone: "Encouraging",
-    approach: "Socratic",
-    verbosity: 55,
-    patience: 90,
-    challenge: 75,
-    humor: 30,
-    preview: "You've got this. Before I say anything, tell me: what has to be true for something to keep circling instead of falling straight down?",
-    built: true,
-  },
-  {
-    id: "socratic",
-    name: "Socratic",
-    tone: "Neutral",
-    approach: "Question-led",
-    verbosity: 45,
-    patience: 85,
-    challenge: 80,
-    humor: 20,
-    preview: "Interesting. What would happen if we doubled the radius — do you expect the speed to go up or down, and why?",
-    built: true,
-  },
-  {
-    id: "concise",
-    name: "Concise",
-    tone: "Direct",
-    approach: "Result-first",
-    verbosity: 20,
-    patience: 40,
-    challenge: 50,
-    humor: 10,
-    preview: "v = √(GM/r). Halves when r quadruples. Substitute your numbers, then verify units.",
-    built: true,
-  },
-  {
-    id: "storyteller",
-    name: "Storyteller",
-    tone: "Narrative",
-    approach: "History & context",
-    verbosity: 75,
-    patience: 65,
-    challenge: 45,
-    humor: 55,
-    preview: "In 1687 Newton pictured a cannon on a tall mountain. Fire it fast enough and the ball never lands — that's an orbit, and that image is where we start.",
-    built: true,
-  },
-];
-
-/* ══════════════════════════════════════════════════════════════
-   MODELS
-   ══════════════════════════════════════════════════════════════ */
-
-interface Endpoint {
-  id: string;
-  label: string;
-  provider: "openai" | "anthropic" | "custom";
-  baseUrl: string;
-  model: string;
-  keyMasked: string;
-  active: boolean;
-}
-/* No preset endpoints — the list is populated from bindings the user actually
-   configures. The "studyus" provider does not exist as a real service. */
-const DEFAULT_ENDPOINTS: Endpoint[] = [];
-
-/* ══════════════════════════════════════════════════════════════
-   MODAL
-   ══════════════════════════════════════════════════════════════ */
-
-export function SettingsModal({ open, onClose, onNotify, initialSection }: Props) {
-  const [section, setSection] = useState<Section>("root");
-  const [q, setQ] = useState("");
-
-  // notifications
-  const [general, setGeneral] = useState(GENERAL);
-  const [summary, setSummary] = useState(SUMMARY);
-
-  // appearance
-  const [theme, setTheme] = useState<Theme>("dark");
-  const [sysFont, setSysFont] = useState<SysFont>("grotesk");
-  const [density, setDensity] = useState<Density>("comfortable");
-  const [textSize, setTextSize] = useState(100);
-  const [reducedMotion, setReducedMotion] = useState(false);
-  const [highContrast, setHighContrast] = useState(false);
-  const [dyslexic, setDyslexic] = useState(false);
-  const [captions, setCaptions] = useState(true);
-
-  // tutor & study
-  const [styles, setStyles] = useState<TutorStyle[]>(PRESETS);
-  const [activeStyleId, setActiveStyleId] = useState("witty");
-  const activeStyle = styles.find((s) => s.id === activeStyleId) ?? styles[0];
-  const [customName, setCustomName] = useState("");
-  const [sessionLen, setSessionLen] = useState(30);
-  const [breakEvery, setBreakEvery] = useState(20);
-  const [difficulty, setDifficulty] = useState<"easier" | "adaptive" | "harder">("adaptive");
-  const [voice, setVoice] = useState(false);
-  const [autoNotes, setAutoNotes] = useState(true);
-
-  // models
-  const [endpoints, setEndpoints] = useState<Endpoint[]>(DEFAULT_ENDPOINTS);
-  const [showAdd, setShowAdd] = useState(false);
-  const [draft, setDraft] = useState<Endpoint>({
-    id: "",
-    label: "",
-    provider: "custom",
-    baseUrl: "https://",
-    model: "",
-    keyMasked: "",
-    active: false,
-  });
-
-  // Which agent roles actually have a bound endpoint (from the DB).
-  const [boundRoles, setBoundRoles] = useState<{ tutor: boolean; generation: boolean; evaluator: boolean }>({
-    tutor: false,
-    generation: false,
-    evaluator: false,
-  });
-  const refreshBoundRoles = () => {
-    void import("../lib/agentRuntime").then((m) => m.getBoundRoles().then(setBoundRoles));
-  };
   useEffect(() => {
-    if (open) refreshBoundRoles();
+    if (open) setPreferencesState(loadPreferences());
   }, [open]);
 
   useEffect(() => {
-    if (open) {
-      setSection(initialSection && initialSection !== "root" ? initialSection : "root");
-      setQ("");
-    }
-  }, [open, initialSection]);
+    const onChanged = (event: Event) => {
+      const next = (event as CustomEvent<StudyusPreferences>).detail;
+      if (next) setPreferencesState(next);
+    };
+    window.addEventListener(PREFERENCES_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(PREFERENCES_CHANGED_EVENT, onChanged);
+  }, []);
+
+  const updatePreferences = useCallback((updater: (current: StudyusPreferences) => StudyusPreferences) => {
+    setPreferencesState((current) => savePreferences(updater(current)));
+  }, []);
+
+  return [preferences, updatePreferences] as const;
+}
+
+export function SettingsModal({ open, onClose, onNotify, initialSection = "root" }: Props) {
+  const [section, setSection] = useState<Section>("root");
+  const [query, setQuery] = useState("");
+  const [cursor, setCursor] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [preferences, updatePreferences] = usePreferencesState(open);
+
+  const results = useMemo(() => {
+    const term = query.trim().toLowerCase();
+    if (!term) return SECTIONS;
+    return SECTIONS.filter((item) => `${item.label} ${item.desc}`.toLowerCase().includes(term));
+  }, [query]);
 
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
+    setSection(initialSection === "tutor" ? "root" : initialSection);
+    setQuery("");
+    setCursor(0);
+    window.setTimeout(() => inputRef.current?.focus(), 30);
+  }, [open, initialSection]);
+
+  useEffect(() => {
+    setCursor(0);
+  }, [query]);
+
+  useEffect(() => {
+    if (cursor >= results.length) setCursor(Math.max(0, results.length - 1));
+  }, [cursor, results.length]);
+
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>(`[data-settings-index="${cursor}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [cursor]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
         if (section === "root") onClose();
-        else setSection("root");
+        else {
+          setSection("root");
+          setQuery("");
+          window.setTimeout(() => inputRef.current?.focus(), 0);
+        }
+        return;
+      }
+      if (section !== "root") return;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setCursor((current) => results.length === 0 ? 0 : (current + 1) % results.length);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setCursor((current) => results.length === 0 ? 0 : (current - 1 + results.length) % results.length);
+      } else if (event.key === "Enter") {
+        const selected = results[cursor];
+        if (selected) {
+          event.preventDefault();
+          if (!selected.disabled) {
+            setSection(selected.id);
+            setQuery("");
+          }
+        }
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, section, onClose]);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [cursor, onClose, open, results, section]);
 
   if (!open) return null;
-
-  const sectionMeta = SECTIONS.find((s) => s.id === section);
   const inRoot = section === "root";
-
-  const updateStyle = (patch: Partial<TutorStyle>) => {
-    setStyles((list) => list.map((s) => (s.id === activeStyleId ? { ...s, ...patch } : s)));
-  };
-
-  const saveStyle = () => {
-    const trimmed = customName.trim();
-    if (!trimmed) {
-      onNotify("Give the style a name first");
-      return;
-    }
-    const id = `custom-${Date.now()}`;
-    setStyles((list) => [...list, { ...activeStyle, id, name: trimmed, built: false }]);
-    setActiveStyleId(id);
-    setCustomName("");
-    onNotify(`Saved style "${trimmed}"`);
-  };
-
-  const deleteStyle = (id: string) => {
-    setStyles((list) => list.filter((s) => s.id !== id));
-    if (activeStyleId === id) setActiveStyleId("witty");
-    onNotify("Style deleted");
-  };
-
-  const commitEndpoint = () => {
-    if (!draft.label.trim() || !draft.baseUrl.trim() || !draft.model.trim()) {
-      onNotify("Label, URL and model are required");
-      return;
-    }
-    const id = `ep-${Date.now()}`;
-    const key = draft.keyMasked.trim();
-    // Store the real key under the endpoint id; the list only ever holds a mask
-    // so the key never round-trips through UI state.
-    if (key) {
-      void import("../lib/llm").then((m) => m.storeCredentialLocally(`endpoint_${id}`, key));
-    }
-    const keyMasked = key ? `sk-••••${key.slice(-4)}` : "not set";
-    setEndpoints((list) => [...list, { ...draft, id, keyMasked, active: list.length === 0 }]);
-    setDraft({ id: "", label: "", provider: "custom", baseUrl: "https://", model: "", keyMasked: "", active: false });
-    setShowAdd(false);
-    refreshBoundRoles();
-    onNotify(`Added endpoint "${draft.label}"`);
-  };
-
-  const activateEndpoint = (id: string) => {
-    setEndpoints((list) => list.map((e) => ({ ...e, active: e.id === id })));
-  };
-  const removeEndpoint = (id: string) => {
-    setEndpoints((list) => list.filter((e) => e.id !== id));
-  };
+  const sectionMeta = SECTIONS.find((item) => item.id === section);
 
   return (
     <div className="fixed inset-0 z-[80] flex justify-center bg-black/50 px-4 pt-[8vh]" onMouseDown={onClose}>
       <div
-        onMouseDown={(e) => e.stopPropagation()}
-        className="anim-toast flex h-fit max-h-[80vh] w-[min(560px,100%)] flex-col overflow-hidden rounded-xl border border-[#3a3a3a] bg-[#252525]/97 shadow-[0_28px_80px_rgba(0,0,0,0.6)] backdrop-blur-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-label={sectionMeta?.label ?? "Settings"}
+        onMouseDown={(event) => event.stopPropagation()}
+        className="settings-modal-original anim-toast flex h-fit max-h-[80vh] w-[min(560px,100%)] flex-col overflow-hidden rounded-xl border border-[#3a3a3a] bg-[#252525]/97 shadow-[0_28px_80px_rgba(0,0,0,0.6)] backdrop-blur-xl"
       >
-        {/* breadcrumb */}
         <div className="flex items-center gap-2 border-b border-white/[0.07] px-3.5 py-2.5">
           <Settings size={13} className="text-mut" />
           <button
-            onClick={() => setSection("root")}
+            onClick={() => {
+              setSection("root");
+              setQuery("");
+              window.setTimeout(() => inputRef.current?.focus(), 0);
+            }}
             className="text-[12.5px] text-mut transition-colors hover:text-fg"
           >
             Settings
@@ -345,122 +174,101 @@ export function SettingsModal({ open, onClose, onNotify, initialSection }: Props
           )}
           <button
             onClick={onClose}
+            aria-label="Close settings"
             className="ml-auto grid h-6 w-6 place-items-center rounded text-dim transition-colors hover:bg-white/[0.07] hover:text-fg"
           >
             <X size={13} />
           </button>
         </div>
 
-        {/* search / back */}
         <div className="flex items-center gap-2 border-b border-white/[0.07] px-3.5 py-2">
           <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
+            ref={inputRef}
+            value={query}
+            onChange={(event) => {
+              if (!inRoot) setSection("root");
+              setQuery(event.target.value);
+            }}
             placeholder={sectionMeta ? `Search in ${sectionMeta.label}` : "Search settings"}
+            aria-label="Search settings"
             className="min-w-0 flex-1 bg-transparent py-1 text-[13px] text-fg outline-none placeholder:text-[#6e6e6c]"
           />
           {!inRoot && (
             <button
-              onClick={() => setSection("root")}
+              onClick={() => {
+                setSection("root");
+                setQuery("");
+                window.setTimeout(() => inputRef.current?.focus(), 0);
+              }}
               className="flex shrink-0 items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11.5px] text-mut transition-colors hover:bg-white/[0.12] hover:text-fg"
             >
-              <ArrowLeft size={11} />
-              Back
+              <ArrowLeft size={11} /> Back
             </button>
           )}
         </div>
 
-        {/* body */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-3.5 py-3">
+        <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-3.5 py-3">
           {inRoot && (
-            <div className="space-y-0.5">
-              {SECTIONS.filter((s) => s.label.toLowerCase().includes(q.trim().toLowerCase())).map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => setSection(s.id)}
-                  className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left transition-colors hover:bg-white/[0.06]"
-                >
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] text-fg">{s.label}</span>
-                    <span className="block truncate text-[11.5px] text-dim">{s.desc}</span>
-                  </span>
-                  <ChevronRight size={13} className="text-dim" />
-                </button>
-              ))}
+            <div role="listbox" aria-label="Settings sections" className="space-y-0.5">
+              {results.map((item, index) => {
+                const selected = index === cursor;
+                return (
+                  <button
+                    key={item.id}
+                    role="option"
+                    aria-selected={selected}
+                    data-settings-index={index}
+                    onMouseEnter={() => setCursor(index)}
+                    disabled={item.disabled}
+                    aria-disabled={item.disabled}
+                    onClick={() => {
+                      if (item.disabled) return;
+                      setSection(item.id);
+                      setQuery("");
+                    }}
+                    className={`flex w-full items-center gap-3 rounded-md px-2 py-2 text-left transition-colors ${
+                      item.disabled
+                        ? "cursor-not-allowed text-white/30"
+                        : selected ? "bg-white/[0.06]" : "hover:bg-white/[0.06]"
+                    }`}
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className={`block truncate text-[13px] ${item.disabled ? "text-white/35" : "text-fg"}`}>{item.label}</span>
+                      <span className={`block truncate ${item.disabled ? "text-[10px] text-white/25" : "text-[11.5px] text-dim"}`}>{item.desc}</span>
+                    </span>
+                    {item.disabled ? (
+                      <span className="flex shrink-0 items-center gap-1.5 font-mono text-[9px] tracking-wide text-white/30">
+                        <LockKeyhole size={11} /> COMING SOON
+                      </span>
+                    ) : (
+                      <ChevronRight size={13} className={selected ? "text-mut" : "text-dim"} />
+                    )}
+                  </button>
+                );
+              })}
+              {results.length === 0 && (
+                <p className="px-2 py-8 text-center text-[12.5px] text-dim">No settings match “{query}”.</p>
+              )}
             </div>
           )}
 
-          {section === "about" && <AboutMe onNotify={onNotify} />}
+          {section === "about" && (
+            <AboutMe preferences={preferences} updatePreferences={updatePreferences} onNotify={onNotify} />
+          )}
           {section === "appearance" && (
             <Appearance
-              theme={theme}
-              setTheme={setTheme}
-              sysFont={sysFont}
-              setSysFont={setSysFont}
-              density={density}
-              setDensity={setDensity}
-              textSize={textSize}
-              setTextSize={setTextSize}
-              reducedMotion={reducedMotion}
-              setReducedMotion={setReducedMotion}
-              highContrast={highContrast}
-              setHighContrast={setHighContrast}
-              dyslexic={dyslexic}
-              setDyslexic={setDyslexic}
-              captions={captions}
-              setCaptions={setCaptions}
-            />
-          )}
-          {section === "tutor" && (
-            <TutorAndStudy
-              styles={styles}
-              activeStyle={activeStyle}
-              activeStyleId={activeStyleId}
-              setActiveStyleId={setActiveStyleId}
-              updateStyle={updateStyle}
-              customName={customName}
-              setCustomName={setCustomName}
-              saveStyle={saveStyle}
-              deleteStyle={deleteStyle}
-              sessionLen={sessionLen}
-              setSessionLen={setSessionLen}
-              breakEvery={breakEvery}
-              setBreakEvery={setBreakEvery}
-              difficulty={difficulty}
-              setDifficulty={setDifficulty}
-              voice={voice}
-              setVoice={setVoice}
-              autoNotes={autoNotes}
-              setAutoNotes={setAutoNotes}
+              value={preferences.appearance}
+              onChange={(appearance) => updatePreferences((current) => ({ ...current, appearance }))}
             />
           )}
           {section === "notifications" && (
-            <Notifications
-              general={general}
-              summary={summary}
-              setGeneral={setGeneral}
-              setSummary={setSummary}
-              q={q}
-            />
+            <Notifications preferences={preferences} updatePreferences={updatePreferences} onNotify={onNotify} />
           )}
           {section === "models" && (
-            <Models
-              endpoints={endpoints}
-              activateEndpoint={activateEndpoint}
-              removeEndpoint={removeEndpoint}
-              showAdd={showAdd}
-              setShowAdd={setShowAdd}
-              draft={draft}
-              setDraft={setDraft}
-              commitEndpoint={commitEndpoint}
-              boundRoles={boundRoles}
-              refreshBoundRoles={refreshBoundRoles}
-              onNotify={onNotify}
-            />
+            <Models preferences={preferences} updatePreferences={updatePreferences} onNotify={onNotify} />
           )}
         </div>
 
-        {/* footer */}
         <div className="flex items-center gap-3 border-t border-white/[0.07] px-3.5 py-2">
           <span className="text-[11.5px] text-dim">Navigate</span>
           <Key><ChevronUp size={10} /></Key>
@@ -475,21 +283,15 @@ export function SettingsModal({ open, onClose, onNotify, initialSection }: Props
   );
 }
 
-/* ── shared bits ──────────────────────────────────────────── */
-
-function Key({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="grid h-[18px] min-w-[18px] place-items-center rounded border border-white/10 bg-white/[0.07] px-1 font-mono text-[10px] text-mut">
-      {children}
-    </kbd>
-  );
+function Key({ children }: { children: ReactNode }) {
+  return <kbd className="grid h-[18px] min-w-[18px] place-items-center rounded border border-white/10 bg-white/[0.07] px-1 font-mono text-[10px] text-mut">{children}</kbd>;
 }
 
-function GroupLabel({ children }: { children: React.ReactNode }) {
+function GroupLabel({ children }: { children: ReactNode }) {
   return <div className="mb-1.5 mt-3 px-1 text-[11.5px] font-medium uppercase tracking-wide text-dim first:mt-0">{children}</div>;
 }
 
-function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <div className="flex items-center gap-3 rounded-md px-1 py-2">
       <div className="min-w-0 flex-1">
@@ -501,36 +303,36 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
   );
 }
 
-function Segment<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
+function Segment<T extends string>({ value, options, onChange }: {
   value: T;
-  options: { id: T; label: React.ReactNode; icon?: typeof Sun }[];
-  onChange: (v: T) => void;
+  options: { id: T; label: ReactNode; icon?: typeof Sun }[];
+  onChange: (value: T) => void;
 }) {
   return (
     <div className="flex items-center gap-0.5 rounded-md bg-black/25 p-0.5">
-      {options.map((opt) => (
+      {options.map((option) => (
         <button
-          key={opt.id}
-          onClick={() => onChange(opt.id)}
+          key={option.id}
+          onClick={() => onChange(option.id)}
           className={`flex items-center gap-1.5 rounded px-2 py-[3px] text-[11px] transition-colors ${
-            value === opt.id ? "bg-white/[0.16] text-fg" : "text-dim hover:text-mut"
+            value === option.id ? "bg-white/[0.16] text-fg" : "text-dim hover:text-mut"
           }`}
         >
-          {opt.icon && <opt.icon size={11} />}
-          {opt.label}
+          {option.icon && <option.icon size={11} />}
+          {option.label}
         </button>
       ))}
     </div>
   );
 }
 
-function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+function Toggle({ on, onChange, label }: { on: boolean; onChange: (value: boolean) => void; label: string }) {
   return (
     <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
       onClick={() => onChange(!on)}
       className={`h-[18px] w-[32px] shrink-0 rounded-full p-[2px] transition-colors ${on ? "bg-accent" : "bg-[#4a4a48]"}`}
     >
@@ -539,69 +341,104 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
   );
 }
 
-function Slider({ value, onChange, min = 0, max = 100 }: { value: number; onChange: (v: number) => void; min?: number; max?: number }) {
+function Slider({ value, onChange, min = 0, max = 100 }: { value: number; onChange: (value: number) => void; min?: number; max?: number }) {
+  return <input type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} className="w-full accent-accent" />;
+}
+
+function Field({ value, onChange, type = "text", placeholder, id }: {
+  value: string;
+  onChange: (value: string) => void;
+  type?: string;
+  placeholder?: string;
+  id?: string;
+}) {
   return (
     <input
-      type="range"
-      min={min}
-      max={max}
+      id={id}
+      type={type}
       value={value}
-      onChange={(e) => onChange(parseInt(e.target.value, 10))}
-      className="w-full accent-accent"
+      onChange={(event) => onChange(event.target.value)}
+      placeholder={placeholder}
+      className="w-[180px] rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[12.5px] text-fg outline-none"
     />
   );
 }
 
-/* ── ABOUT ME ─────────────────────────────────────────────── */
+/* ── About me ─────────────────────────────────────────────── */
 
-function AboutMe({ onNotify }: { onNotify: (t: string) => void }) {
-  const used = 720;
-  const total = 1000;
-  const pct = Math.round((used / total) * 100);
+interface UsageStats {
+  calls: number;
+  successful: number;
+  tokens: number;
+  byRole: Record<string, number>;
+}
 
-  const topups = [
-    { credits: 500, price: 4, per: "$0.008/credit" },
-    { credits: 2000, price: 12, per: "$0.006/credit", popular: true },
-    { credits: 6000, price: 30, per: "$0.005/credit" },
-  ];
+function AboutMe({ preferences, updatePreferences, onNotify }: {
+  preferences: StudyusPreferences;
+  updatePreferences: (updater: (current: StudyusPreferences) => StudyusPreferences) => void;
+  onNotify: (text: string) => void;
+}) {
+  const [usage, setUsage] = useState<UsageStats>({ calls: 0, successful: 0, tokens: 0, byRole: {} });
+
+  useEffect(() => {
+    let cancelled = false;
+    void import("../db/database").then(async ({ getDb }) => {
+      const db = await getDb();
+      const result = db.exec("SELECT role, outcome, token_counts_json FROM agent_calls;");
+      const next: UsageStats = { calls: 0, successful: 0, tokens: 0, byRole: {} };
+      for (const row of result[0]?.values ?? []) {
+        const role = String(row[0] ?? "unknown");
+        next.calls += 1;
+        next.byRole[role] = (next.byRole[role] ?? 0) + 1;
+        if (row[1] === "success") next.successful += 1;
+        try {
+          const parsed = JSON.parse(String(row[2] || "{}")) as { total?: unknown };
+          if (typeof parsed.total === "number" && Number.isFinite(parsed.total)) next.tokens += parsed.total;
+        } catch {}
+      }
+      if (!cancelled) setUsage(next);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  const profile = preferences.profile;
+  const updateProfile = (patch: Partial<typeof profile>) => updatePreferences((current) => ({
+    ...current,
+    profile: { ...current.profile, ...patch },
+  }));
+  const initials = profile.fullName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "L";
+  const timezones = Array.from(new Set([profile.timezone, Intl.DateTimeFormat().resolvedOptions().timeZone, "UTC", "Asia/Bangkok", "Asia/Novosibirsk", "Europe/London", "America/New_York"])).filter(Boolean);
+  const successPct = usage.calls > 0 ? Math.round((usage.successful / usage.calls) * 100) : 0;
 
   return (
     <div>
       <GroupLabel>Account</GroupLabel>
       <div className="mb-3 flex items-center gap-3 rounded-md border border-white/8 bg-white/[0.03] p-3">
-        <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-accent/25 text-[16px] font-semibold text-accent">
-          AR
-        </div>
+        <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-accent/25 text-[16px] font-semibold text-accent">{initials}</div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[13.5px] font-medium text-fg">Ave Ravke</div>
-          <div className="truncate text-[11.5px] text-dim">ave@studyus.ai · Pro plan · joined Mar 2025</div>
+          <div className="truncate text-[13.5px] font-medium text-fg">{profile.fullName || "Learner"}</div>
+          <div className="truncate text-[11.5px] text-dim">{profile.email || "No email saved"} · stored on this device</div>
         </div>
         <button
-          onClick={() => onNotify("Profile — coming up")}
+          onClick={() => document.getElementById("settings-full-name")?.focus()}
           className="rounded-md border border-white/10 bg-white/[0.07] px-2.5 py-1 text-[11.5px] text-mut transition-colors hover:bg-white/[0.12] hover:text-fg"
         >
           Edit
         </button>
       </div>
-
       <Row label="Full name">
-        <input
-          defaultValue="Ave Ravke"
-          className="w-[180px] rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[12.5px] text-fg outline-none"
-        />
+        <Field id="settings-full-name" value={profile.fullName} onChange={(fullName) => updateProfile({ fullName })} placeholder="Your name" />
       </Row>
       <Row label="Email">
-        <input
-          defaultValue="ave@studyus.ai"
-          className="w-[180px] rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[12.5px] text-fg outline-none"
-        />
+        <Field value={profile.email} onChange={(email) => updateProfile({ email })} type="email" placeholder="you@example.com" />
       </Row>
       <Row label="Timezone">
-        <select className="w-[180px] rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[12.5px] text-fg outline-none">
-          <option>Pacific — Los Angeles</option>
-          <option>Mountain — Denver</option>
-          <option>Central — Chicago</option>
-          <option>Eastern — New York</option>
+        <select
+          value={profile.timezone}
+          onChange={(event) => updateProfile({ timezone: event.target.value })}
+          className="w-[180px] rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[12.5px] text-fg outline-none"
+        >
+          {timezones.map((timezone) => <option key={timezone}>{timezone}</option>)}
         </select>
       </Row>
 
@@ -610,114 +447,79 @@ function AboutMe({ onNotify }: { onNotify: (t: string) => void }) {
         <div className="mb-2 flex items-baseline justify-between">
           <div>
             <div className="text-[16px] font-semibold text-fg">
-              {used.toLocaleString()} <span className="text-[12px] font-normal text-dim">/ {total.toLocaleString()} credits</span>
+              {usage.tokens.toLocaleString()} <span className="text-[12px] font-normal text-dim">reported tokens</span>
             </div>
-            <div className="text-[11.5px] text-dim">Resets in 12 days · Pro plan includes 1,000 credits/mo</div>
+            <div className="text-[11.5px] text-dim">Measured from actual agent calls saved on this device</div>
           </div>
-          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent">{pct}%</span>
+          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent">{successPct}%</span>
         </div>
         <div className="h-1.5 overflow-hidden rounded-full bg-white/8">
-          <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
+          <div className="h-full rounded-full bg-accent" style={{ width: `${successPct}%` }} />
         </div>
         <div className="mt-3 grid grid-cols-3 gap-2 text-center">
           {[
-            { label: "Chalkboards", val: 42 },
-            { label: "Quizzes", val: 18 },
-            { label: "Practice", val: 61 },
-          ].map((m) => (
-            <div key={m.label} className="rounded-md bg-black/25 py-2">
-              <div className="text-[15px] font-semibold text-fg">{m.val}</div>
-              <div className="text-[10.5px] text-dim">{m.label}</div>
+            { label: "Agent calls", value: usage.calls.toLocaleString() },
+            { label: "Successful", value: usage.successful.toLocaleString() },
+            { label: "Tokens reported", value: usage.tokens.toLocaleString() },
+          ].map((metric) => (
+            <div key={metric.label} className="rounded-md bg-black/25 py-2">
+              <div className="text-[15px] font-semibold text-fg">{metric.value}</div>
+              <div className="text-[10.5px] text-dim">{metric.label}</div>
             </div>
           ))}
         </div>
+        <div className="mt-2 text-[10.5px] text-dim">
+          {usage.calls > 0
+            ? Object.entries(usage.byRole).map(([role, count]) => `${role}: ${count}`).join(" · ")
+            : "No agent calls have been logged yet."}
+        </div>
       </div>
-
-      <GroupLabel>Top up · pay as you go</GroupLabel>
-      <div className="mb-3 grid grid-cols-3 gap-2">
-        {topups.map((t) => (
-          <button
-            key={t.credits}
-            onClick={() => onNotify(`Charged $${t.price} for ${t.credits.toLocaleString()} credits`)}
-            className={`relative rounded-md border p-3 text-left transition-colors ${
-              t.popular ? "border-accent bg-accent/[0.08] hover:bg-accent/[0.12]" : "border-white/10 bg-white/[0.03] hover:bg-white/[0.06]"
-            }`}
-          >
-            {t.popular && (
-              <span className="absolute -top-2 right-2 rounded-full bg-accent px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-white">
-                Popular
-              </span>
-            )}
-            <div className="text-[15px] font-semibold text-fg">${t.price}</div>
-            <div className="text-[12px] text-mut">{t.credits.toLocaleString()} credits</div>
-            <div className="mt-1 text-[10.5px] text-dim">{t.per}</div>
-          </button>
-        ))}
-      </div>
-      <Row label="Auto-refill when low" hint="Buy 2,000 credits when balance drops below 100">
-        <Toggle on={false} onChange={() => onNotify("Auto-refill toggled")} />
-      </Row>
 
       <GroupLabel>Danger zone</GroupLabel>
       <button
-        onClick={() => onNotify("Type your email in the confirm dialog to proceed")}
+        onClick={() => {
+          if (!window.confirm("Reset the local name, email and timezone? Notes, tests, sessions and model bindings will not be deleted.")) return;
+          updatePreferences((current) => ({ ...current, profile: { ...DEFAULT_PREFERENCES.profile } }));
+          onNotify("Local profile reset");
+        }}
         className="w-full rounded-md border border-[#c42b1c]/40 bg-[#c42b1c]/10 py-2 text-[12.5px] font-medium text-[#ff8b80] transition-colors hover:bg-[#c42b1c]/20"
       >
-        Delete account
+        Reset local profile
       </button>
     </div>
   );
 }
 
-/* ── APPEARANCE ───────────────────────────────────────────── */
+/* ── Appearance ───────────────────────────────────────────── */
 
-function Appearance(props: {
-  theme: Theme;
-  setTheme: (t: Theme) => void;
-  sysFont: SysFont;
-  setSysFont: (f: SysFont) => void;
-  density: Density;
-  setDensity: (d: Density) => void;
-  textSize: number;
-  setTextSize: (n: number) => void;
-  reducedMotion: boolean;
-  setReducedMotion: (b: boolean) => void;
-  highContrast: boolean;
-  setHighContrast: (b: boolean) => void;
-  dyslexic: boolean;
-  setDyslexic: (b: boolean) => void;
-  captions: boolean;
-  setCaptions: (b: boolean) => void;
-}) {
-  const { theme, setTheme, sysFont, setSysFont, density, setDensity, textSize, setTextSize,
-    reducedMotion, setReducedMotion, highContrast, setHighContrast, dyslexic, setDyslexic, captions, setCaptions } = props;
+const FONTS: { id: FontPreference; label: string; css: string }[] = [
+  { id: "system", label: "System default", css: "system-ui, sans-serif" },
+  { id: "inter", label: "Inter", css: "Inter, system-ui, sans-serif" },
+  { id: "grotesk", label: "Space Grotesk", css: "'Space Grotesk', sans-serif" },
+  { id: "serif", label: "Serif", css: "'Iowan Old Style', Georgia, serif" },
+  { id: "mono", label: "Mono", css: "'Space Mono', ui-monospace, monospace" },
+];
 
+function Appearance({ value, onChange }: { value: AppearancePreferences; onChange: (value: AppearancePreferences) => void }) {
+  const patch = <K extends keyof AppearancePreferences>(key: K, next: AppearancePreferences[K]) => onChange({ ...value, [key]: next });
   return (
     <div>
       <GroupLabel>Theme</GroupLabel>
       <div className="mb-3 flex items-center gap-1 rounded-lg bg-black/25 p-1">
-        {(
-          [
-            { id: "dark", label: "Dark", icon: Moon, preview: "bg-[#191919]" },
-            { id: "light", label: "Light", icon: Sun, preview: "bg-[#f4f4f2]" },
-            { id: "system", label: "System", icon: MonitorSmartphone, preview: "bg-gradient-to-br from-[#191919] to-[#f4f4f2]" },
-          ] as const
-        ).map((opt) => (
+        {([
+          { id: "dark", label: "Dark", icon: Moon, preview: "bg-[#191919]" },
+          { id: "light", label: "Light", icon: Sun, preview: "bg-[#f4f4f2]" },
+          { id: "system", label: "System", icon: MonitorSmartphone, preview: "bg-gradient-to-br from-[#191919] to-[#f4f4f2]" },
+        ] as const).map((option) => (
           <button
-            key={opt.id}
-            onClick={() => setTheme(opt.id)}
-            className={`flex flex-1 items-center gap-2 rounded-md px-2 py-2 text-left transition-colors ${
-              theme === opt.id ? "bg-white/[0.14] text-fg" : "text-mut hover:bg-white/[0.06] hover:text-fg"
-            }`}
+            key={option.id}
+            onClick={() => patch("theme", option.id)}
+            className={`flex flex-1 items-center gap-2 rounded-md px-2 py-2 text-left transition-colors ${value.theme === option.id ? "bg-white/[0.14] text-fg" : "text-mut hover:bg-white/[0.06] hover:text-fg"}`}
           >
-            <span className={`h-6 w-6 shrink-0 rounded border border-white/12 ${opt.preview}`} />
+            <span className={`h-6 w-6 shrink-0 rounded border border-white/12 ${option.preview}`} />
             <span className="flex flex-col leading-tight">
-              <span className="flex items-center gap-1 text-[12.5px] font-medium">
-                <opt.icon size={11} /> {opt.label}
-              </span>
-              <span className="text-[10px] text-dim">
-                {opt.id === "system" ? "Follow OS" : opt.id === "dark" ? "Default" : "Bright"}
-              </span>
+              <span className="flex items-center gap-1 text-[12.5px] font-medium"><option.icon size={11} /> {option.label}</span>
+              <span className="text-[10px] text-dim">{option.id === "system" ? "Follow OS" : option.id === "dark" ? "Default" : "Bright"}</span>
             </span>
           </button>
         ))}
@@ -725,484 +527,553 @@ function Appearance(props: {
 
       <GroupLabel>System font</GroupLabel>
       <div className="mb-3 space-y-1">
-        {SYS_FONTS.map((f) => (
+        {FONTS.map((font) => (
           <button
-            key={f.id}
-            onClick={() => setSysFont(f.id)}
-            className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left transition-colors ${
-              sysFont === f.id ? "bg-white/[0.09]" : "hover:bg-white/[0.06]"
-            }`}
+            key={font.id}
+            onClick={() => patch("font", font.id)}
+            className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left transition-colors ${value.font === font.id && !value.dyslexiaFriendly ? "bg-white/[0.09]" : "hover:bg-white/[0.06]"}`}
           >
-            <span className="text-[13.5px] text-fg" style={{ fontFamily: f.css }}>
-              {f.label} · The quick brown fox
-            </span>
-            {sysFont === f.id && <Check size={13} className="text-accent" />}
+            <span className="text-[13.5px] text-fg" style={{ fontFamily: font.css }}>{font.label} · The quick brown fox</span>
+            {value.font === font.id && !value.dyslexiaFriendly && <Check size={13} className="text-accent" />}
           </button>
         ))}
       </div>
 
       <GroupLabel>Layout</GroupLabel>
       <Row label="Density" hint="Comfortable is roomier; compact fits more.">
-        <Segment
-          value={density}
-          onChange={setDensity}
-          options={[
-            { id: "comfortable", label: "Comfortable" },
-            { id: "compact", label: "Compact" },
-          ]}
+        <Segment<DensityPreference>
+          value={value.density}
+          onChange={(density) => patch("density", density)}
+          options={[{ id: "comfortable", label: "Comfortable" }, { id: "compact", label: "Compact" }]}
         />
       </Row>
-      <Row label={`Text size · ${textSize}%`}>
-        <div className="w-[180px]">
-          <Slider value={textSize} onChange={setTextSize} min={80} max={140} />
-        </div>
+      <Row label={`Text size · ${value.textSize}%`}>
+        <div className="w-[180px]"><Slider value={value.textSize} onChange={(size) => patch("textSize", size)} min={80} max={140} /></div>
       </Row>
 
       <GroupLabel>Accessibility</GroupLabel>
       <Row label="Reduce motion" hint="Cut animations and transitions">
-        <Toggle on={reducedMotion} onChange={setReducedMotion} />
+        <Toggle label="Reduce motion" on={value.reducedMotion} onChange={(next) => patch("reducedMotion", next)} />
       </Row>
       <Row label="High contrast" hint="Stronger separators and text">
-        <Toggle on={highContrast} onChange={setHighContrast} />
+        <Toggle label="High contrast" on={value.highContrast} onChange={(next) => patch("highContrast", next)} />
       </Row>
       <Row label="Dyslexia-friendly font" hint="Uses OpenDyslexic where available">
-        <Toggle on={dyslexic} onChange={setDyslexic} />
+        <Toggle label="Dyslexia-friendly font" on={value.dyslexiaFriendly} onChange={(next) => patch("dyslexiaFriendly", next)} />
       </Row>
       <Row label="Captions on tutor voice" hint="Always show what the tutor says">
-        <Toggle on={captions} onChange={setCaptions} />
+        <Toggle label="Captions on tutor voice" on={value.captions} onChange={(next) => patch("captions", next)} />
       </Row>
     </div>
   );
 }
 
-/* ── TUTOR & STUDY ────────────────────────────────────────── */
+/* ── Tutor Studio is implemented in settings/TutorStudio.tsx. ── */
 
-function TutorAndStudy(props: {
-  styles: TutorStyle[];
-  activeStyle: TutorStyle;
-  activeStyleId: string;
-  setActiveStyleId: (id: string) => void;
-  updateStyle: (patch: Partial<TutorStyle>) => void;
-  customName: string;
-  setCustomName: (s: string) => void;
-  saveStyle: () => void;
-  deleteStyle: (id: string) => void;
-  sessionLen: number;
-  setSessionLen: (n: number) => void;
-  breakEvery: number;
-  setBreakEvery: (n: number) => void;
-  difficulty: "easier" | "adaptive" | "harder";
-  setDifficulty: (d: "easier" | "adaptive" | "harder") => void;
-  voice: boolean;
-  setVoice: (b: boolean) => void;
-  autoNotes: boolean;
-  setAutoNotes: (b: boolean) => void;
+/* ── Notifications ────────────────────────────────────────── */
+
+const EVENT_LABELS: Record<NotificationEventId, string> = {
+  testReady: "Generated test is ready",
+  sessionComplete: "Study session is saved",
+};
+
+function Notifications({ preferences, updatePreferences, onNotify }: {
+  preferences: StudyusPreferences;
+  updatePreferences: (updater: (current: StudyusPreferences) => StudyusPreferences) => void;
+  onNotify: (text: string) => void;
 }) {
-  const { styles, activeStyle, activeStyleId, setActiveStyleId, updateStyle,
-    customName, setCustomName, saveStyle, deleteStyle,
-    sessionLen, setSessionLen, breakEvery, setBreakEvery, difficulty, setDifficulty,
-    voice, setVoice, autoNotes, setAutoNotes } = props;
+  const value = preferences.notifications;
+  const updateNotifications = (notifications: typeof value) => updatePreferences((current) => ({ ...current, notifications }));
+  const setEvent = (id: NotificationEventId, patch: Partial<(typeof value.events)[NotificationEventId]>) => updateNotifications({
+    ...value,
+    events: { ...value.events, [id]: { ...value.events[id], ...patch } },
+  });
 
-  const tones = ["Playful", "Formal", "Encouraging", "Direct", "Narrative", "Neutral"];
-  const approaches = ["Analogy-first", "First principles", "Socratic", "Question-led", "Result-first", "Worked example", "History & context"];
-
-  return (
-    <div>
-      <GroupLabel>Talking style</GroupLabel>
-      <div className="mb-3 grid grid-cols-3 gap-1.5">
-        {styles.map((s) => (
-          <div key={s.id} className="relative">
-            <button
-              onClick={() => setActiveStyleId(s.id)}
-              className={`w-full rounded-md border p-2 text-left transition-colors ${
-                activeStyleId === s.id ? "border-accent bg-accent/[0.08]" : "border-white/8 bg-white/[0.03] hover:bg-white/[0.06]"
-              }`}
-            >
-              <div className="mb-0.5 flex items-center gap-1">
-                {s.built && <Star size={9} className="text-dim" />}
-                <span className="truncate text-[12px] font-medium text-fg">{s.name}</span>
-              </div>
-              <div className="truncate text-[10.5px] text-dim">
-                {s.tone} · {s.approach}
-              </div>
-            </button>
-            {!s.built && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  deleteStyle(s.id);
-                }}
-                className="absolute right-1 top-1 grid h-4 w-4 place-items-center rounded text-dim opacity-0 transition-opacity hover:bg-white/[0.1] hover:text-fg group-hover:opacity-100"
-                style={{ opacity: 1 }}
-                title="Delete style"
-              >
-                <X size={10} />
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
-
-      <GroupLabel>Customize “{activeStyle.name}”</GroupLabel>
-      <Row label="Tone">
-        <select
-          value={activeStyle.tone}
-          onChange={(e) => updateStyle({ tone: e.target.value })}
-          className="w-[180px] rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[12.5px] text-fg outline-none"
-        >
-          {tones.map((t) => (
-            <option key={t}>{t}</option>
-          ))}
-        </select>
-      </Row>
-      <Row label="Problem approach">
-        <select
-          value={activeStyle.approach}
-          onChange={(e) => updateStyle({ approach: e.target.value })}
-          className="w-[180px] rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[12.5px] text-fg outline-none"
-        >
-          {approaches.map((a) => (
-            <option key={a}>{a}</option>
-          ))}
-        </select>
-      </Row>
-
-      {[
-        { key: "verbosity", label: "Verbosity", hint: "Short answers ← → full explanations" },
-        { key: "patience", label: "Patience", hint: "Straight to it ← → walks with you" },
-        { key: "challenge", label: "Challenge level", hint: "Gentle ← → keeps pushing" },
-        { key: "humor", label: "Humor", hint: "Deadpan ← → playful" },
-      ].map((slider) => (
-        <div key={slider.key} className="rounded-md px-1 py-2">
-          <div className="mb-1 flex items-baseline justify-between">
-            <span className="text-[12.5px] text-fg">{slider.label}</span>
-            <span className="font-mono text-[11px] text-dim">{(activeStyle as any)[slider.key]}</span>
-          </div>
-          <Slider
-            value={(activeStyle as any)[slider.key]}
-            onChange={(v) => updateStyle({ [slider.key]: v } as Partial<TutorStyle>)}
-          />
-          <div className="mt-0.5 text-[10.5px] text-dim">{slider.hint}</div>
-        </div>
-      ))}
-
-      <GroupLabel>Preview</GroupLabel>
-      <div className="mb-3 rounded-md border border-white/8 bg-white/[0.03] p-3">
-        <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-dim">AI Response</div>
-        <p className="text-[12.5px] italic leading-relaxed text-fg/85">“{activeStyle.preview}”</p>
-      </div>
-
-      <div className="mb-3 flex items-center gap-2 rounded-md border border-white/8 bg-white/[0.03] p-2">
-        <input
-          value={customName}
-          onChange={(e) => setCustomName(e.target.value)}
-          placeholder="Save current settings as…"
-          className="min-w-0 flex-1 bg-transparent px-1 text-[12.5px] text-fg outline-none placeholder:text-[#6e6e6c]"
-        />
+  const channelButtons = (active: "Silent" | "In-app" | "Email", choose: (channel: "Silent" | "In-app" | "Email") => void) => (
+    <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-black/25 p-0.5">
+      {(["Silent", "In-app", "Email"] as const).map((channel) => (
         <button
-          onClick={saveStyle}
-          className="flex items-center gap-1 rounded bg-accent px-2.5 py-1 text-[11.5px] font-medium text-white transition-colors hover:bg-accent-deep"
+          key={channel}
+          onClick={() => choose(channel)}
+          title={channel === "Email" ? "The preference is saved, but delivery needs a mail service" : undefined}
+          className={`rounded px-2 py-[3px] text-[11px] transition-colors ${
+            active === channel ? "bg-white/[0.16] text-fg" : "text-dim hover:text-mut"
+          }`}
         >
-          <Plus size={11} />
-          Save style
+          {channel}
         </button>
-      </div>
-
-      <GroupLabel>Session pacing</GroupLabel>
-      <Row label={`Session length · ${sessionLen} min`}>
-        <div className="w-[180px]"><Slider value={sessionLen} onChange={setSessionLen} min={10} max={90} /></div>
-      </Row>
-      <Row label={`Break every · ${breakEvery} min`}>
-        <div className="w-[180px]"><Slider value={breakEvery} onChange={setBreakEvery} min={10} max={60} /></div>
-      </Row>
-      <Row label="Difficulty" hint="How hard the practice problems get">
-        <Segment
-          value={difficulty}
-          onChange={setDifficulty}
-          options={[
-            { id: "easier", label: "Easier" },
-            { id: "adaptive", label: "Adaptive" },
-            { id: "harder", label: "Harder" },
-          ]}
-        />
-      </Row>
-      <Row label="Voice replies" hint="Read tutor answers aloud">
-        <Toggle on={voice} onChange={setVoice} />
-      </Row>
-      <Row label="Auto-notes" hint="Collect key points on every session">
-        <Toggle on={autoNotes} onChange={setAutoNotes} />
-      </Row>
+      ))}
     </div>
   );
-}
 
-/* ── NOTIFICATIONS ────────────────────────────────────────── */
-
-function Notifications({
-  general,
-  summary,
-  setGeneral,
-  setSummary,
-  q,
-}: {
-  general: NotifRowT[];
-  summary: NotifRowT[];
-  setGeneral: React.Dispatch<React.SetStateAction<NotifRowT[]>>;
-  setSummary: React.Dispatch<React.SetStateAction<NotifRowT[]>>;
-  q: string;
-}) {
-  const term = q.trim().toLowerCase();
-  const filter = (rows: NotifRowT[]) => (term ? rows.filter((r) => r.label.toLowerCase().includes(term)) : rows);
-
-  const setRow = (list: "g" | "s", id: string, patch: Partial<NotifRowT>) => {
-    const apply = (rows: NotifRowT[]) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
-    if (list === "g") setGeneral(apply);
-    else setSummary(apply);
-  };
-
-  const channels: Channel[] = ["Silent", "In-app", "Email"];
-
-  const render = (rows: NotifRowT[], key: "g" | "s") =>
-    rows.map((r) => (
-      <div key={r.id} className="flex items-center gap-3 rounded-md px-1 py-1.5">
-        <Toggle on={r.on} onChange={(v) => setRow(key, r.id, { on: v })} />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg">{r.label}</span>
-        <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-black/25 p-0.5">
-          {channels.map((c) => (
-            <button
-              key={c}
-              onClick={() => setRow(key, r.id, { channel: c })}
-              className={`rounded px-2 py-[3px] text-[11px] transition-colors ${
-                r.channel === c ? "bg-white/[0.16] text-fg" : "text-dim hover:text-mut"
-              }`}
-            >
-              {c}
-            </button>
-          ))}
-        </div>
-      </div>
-    ));
+  const chooseEmail = () => onNotify("Email preference saved; delivery remains unavailable until a mail service is configured");
 
   return (
     <div>
       <GroupLabel>General notifications</GroupLabel>
-      <div className="mb-2 space-y-1">{render(filter(general), "g")}</div>
+      <div className="mb-2 space-y-1">
+        {(Object.keys(EVENT_LABELS) as NotificationEventId[]).map((id) => {
+          const rule = value.events[id];
+          const active = !rule.enabled ? "Silent" : rule.channel === "email" ? "Email" : rule.channel === "in-app" || rule.channel === "both" ? "In-app" : "Silent";
+          return (
+            <div key={id} className="flex items-center gap-3 rounded-md px-1 py-1.5">
+              <Toggle
+                label={EVENT_LABELS[id]}
+                on={rule.enabled}
+                onChange={(enabled) => setEvent(id, { enabled })}
+              />
+              <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg">{EVENT_LABELS[id]}</span>
+              {channelButtons(active, (channel) => {
+                if (channel === "Silent") setEvent(id, { enabled: false });
+                else if (channel === "Email") {
+                  setEvent(id, { enabled: true, channel: "email" });
+                  chooseEmail();
+                } else setEvent(id, { enabled: true, channel: "in-app" });
+              })}
+            </div>
+          );
+        })}
+      </div>
+
       <GroupLabel>Summary notifications</GroupLabel>
-      <div className="space-y-1">{render(filter(summary), "s")}</div>
+      <div className="space-y-1">
+        {(["daily", "weekly", "monthly"] as Exclude<SummaryCadence, "off">[]).map((cadence) => {
+          const enabled = value.summary.cadence === cadence;
+          const active = !enabled ? "Silent" : value.summary.channel === "email" ? "Email" : value.summary.channel === "in-app" || value.summary.channel === "both" ? "In-app" : "Silent";
+          const label = `${cadence[0].toUpperCase()}${cadence.slice(1)} summary`;
+          return (
+            <div key={cadence} className="flex items-center gap-3 rounded-md px-1 py-1.5">
+              <Toggle
+                label={label}
+                on={enabled}
+                onChange={(on) => updateNotifications({ ...value, summary: { ...value.summary, cadence: on ? cadence : "off" } })}
+              />
+              <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg">{label}</span>
+              {channelButtons(active, (channel) => {
+                updateNotifications({
+                  ...value,
+                  summary: {
+                    cadence: channel === "Silent" ? "off" : cadence,
+                    channel: channel === "Silent" ? value.summary.channel : channel === "Email" ? "email" : "in-app",
+                  },
+                });
+                if (channel === "Email") chooseEmail();
+              })}
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-2 px-1 text-[10.5px] text-dim">In-app summaries are checked while Studyus is open. Email is shown for continuity with the original control, but is unavailable without a mail service.</p>
     </div>
   );
 }
 
-/* ── MODELS ───────────────────────────────────────────────── */
+/* ── Model configuration ──────────────────────────────────── */
 
-function Models({
-  endpoints,
-  activateEndpoint,
-  removeEndpoint,
-  showAdd,
-  setShowAdd,
-  draft,
-  setDraft,
-  commitEndpoint,
-  boundRoles,
-  refreshBoundRoles,
-  onNotify,
-}: {
-  endpoints: Endpoint[];
-  activateEndpoint: (id: string) => void;
-  removeEndpoint: (id: string) => void;
-  showAdd: boolean;
-  setShowAdd: (b: boolean) => void;
-  draft: Endpoint;
-  setDraft: React.Dispatch<React.SetStateAction<Endpoint>>;
-  commitEndpoint: () => void;
-  boundRoles: { tutor: boolean; generation: boolean; evaluator: boolean };
-  refreshBoundRoles: () => void;
-  onNotify: (t: string) => void;
+const EMPTY_ENDPOINT: SavedModelEndpoint = {
+  id: "",
+  label: "",
+  provider: "custom",
+  baseUrl: "https://",
+  model: "",
+  keyMasked: "",
+  active: false,
+  vision: false,
+};
+
+const MODEL_ROLES = [
+  ["tutor", "Assign as Tutor"],
+  ["generation", "Assign as test generation agent"],
+  ["evaluator", "Assign as test evaluation agent"],
+] as const;
+
+type ModelRole = (typeof MODEL_ROLES)[number][0];
+type RoleAssignments = Record<ModelRole, string | null>;
+
+const EMPTY_ASSIGNMENTS: RoleAssignments = {
+  tutor: null,
+  generation: null,
+  evaluator: null,
+};
+
+function sameEndpoint(
+  endpoint: SavedModelEndpoint,
+  binding: { provider: string; baseUrl: string; modelId: string }
+): boolean {
+  return endpoint.provider === binding.provider
+    && endpoint.baseUrl.replace(/\/+$/, "") === binding.baseUrl.replace(/\/+$/, "")
+    && endpoint.model === binding.modelId;
+}
+
+function Models({ preferences, updatePreferences, onNotify }: {
+  preferences: StudyusPreferences;
+  updatePreferences: (updater: (current: StudyusPreferences) => StudyusPreferences) => void;
+  onNotify: (text: string) => void;
 }) {
+  const endpoints = preferences.modelEndpoints;
+  const appEndpoints = endpoints.filter((endpoint) => endpoint.provider === "studyus");
+  const customEndpoints = endpoints.filter((endpoint) => endpoint.provider !== "studyus");
+  const [category, setCategory] = useState<"app" | "custom">(
+    appEndpoints.length > 0 ? "app" : "custom"
+  );
+  const [showAdd, setShowAdd] = useState(false);
+  const [draft, setDraft] = useState<SavedModelEndpoint>(EMPTY_ENDPOINT);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<SavedModelEndpoint | null>(null);
+  const [assignments, setAssignments] = useState<RoleAssignments>(EMPTY_ASSIGNMENTS);
+  const [credentialId, setCredentialId] = useState<string | null>(null);
+  const [credentialDraft, setCredentialDraft] = useState("");
+
+  const setEndpoints = useCallback((modelEndpoints: SavedModelEndpoint[]) => {
+    updatePreferences((current) => ({ ...current, modelEndpoints }));
+  }, [updatePreferences]);
+
+  const endpointConfig = useCallback(async (endpoint: SavedModelEndpoint) => {
+    const { getCredentialLocally } = await import("../lib/llm");
+    return {
+      provider: endpoint.provider,
+      baseUrl: endpoint.baseUrl,
+      modelId: endpoint.model,
+      apiKey: getCredentialLocally(`endpoint_${endpoint.id}`) || undefined,
+    };
+  }, []);
+
+  const refreshBindings = useCallback(async () => {
+    const { bindModelRole, defaultCapabilities, getModelBindings } = await import("../lib/llm");
+    const roles = MODEL_ROLES.map(([role]) => role);
+    let records = await getModelBindings();
+
+    // Keep the invariant as soon as at least one usable model exists. A sole
+    // model necessarily owns all roles; with several, valid independent picks
+    // are preserved and only missing/stale roles are repaired.
+    if (endpoints.length > 0) {
+      const fallback = endpoints.find((endpoint) => endpoint.active) ?? endpoints[0];
+      for (const role of roles) {
+        const record = records.find((candidate) => candidate.role === role);
+        const validEndpoint = record && endpoints.find((endpoint) => sameEndpoint(endpoint, record));
+        const target = endpoints.length === 1 ? endpoints[0] : validEndpoint ?? fallback;
+        // Re-applying a valid assignment also synchronizes its endpoint
+        // credential and latest persisted capability flags into the role.
+        const config = await endpointConfig(target);
+        await bindModelRole(role, config, {
+          ...defaultCapabilities(),
+          vision: target.vision,
+        });
+      }
+      records = await getModelBindings();
+    }
+
+    const next: RoleAssignments = { ...EMPTY_ASSIGNMENTS };
+    for (const [role] of MODEL_ROLES) {
+      const record = records.find((candidate) => candidate.role === role);
+      next[role] = record
+        ? endpoints.find((endpoint) => sameEndpoint(endpoint, record))?.id ?? null
+        : null;
+    }
+    setAssignments(next);
+  }, [endpointConfig, endpoints]);
+
+  useEffect(() => {
+    void refreshBindings().catch(() => undefined);
+  }, [refreshBindings]);
+
+  const commitEndpoint = async () => {
+    const label = draft.label.trim();
+    const baseUrl = draft.baseUrl.trim();
+    const model = draft.model.trim();
+    if (!label || !baseUrl || !model) return onNotify("Label, URL and model are required");
+    if (!/^https?:\/\//i.test(baseUrl)) return onNotify("Endpoint URL must begin with http:// or https://");
+
+    const id = `ep-${Date.now()}`;
+    const key = draft.keyMasked.trim();
+    const { storeCredentialLocally } = await import("../lib/llm");
+    storeCredentialLocally(`endpoint_${id}`, key);
+    const nextEndpoint: SavedModelEndpoint = {
+      ...draft,
+      id,
+      label,
+      baseUrl,
+      model,
+      keyMasked: key ? `••••${key.slice(-4)}` : "not set",
+      active: endpoints.length === 0,
+    };
+    setEndpoints([
+      ...endpoints.map((endpoint) => ({ ...endpoint, active: endpoints.length === 0 ? false : endpoint.active })),
+      nextEndpoint,
+    ]);
+    setDraft(EMPTY_ENDPOINT);
+    setShowAdd(false);
+    setCategory("custom");
+    onNotify(`Saved endpoint “${label}”`);
+  };
+
+  const activateEndpoint = (id: string) => {
+    setEndpoints(endpoints.map((endpoint) => ({ ...endpoint, active: endpoint.id === id })));
+  };
+
+  const removeEndpoint = async (endpoint: SavedModelEndpoint) => {
+    if (endpoints.length === 1) {
+      onNotify("Add another model before removing the only assigned model");
+      return;
+    }
+    if (!window.confirm(`Remove “${endpoint.label}” from saved endpoints? Its assigned roles will move to another model.`)) return;
+    const { storeCredentialLocally } = await import("../lib/llm");
+    storeCredentialLocally(`endpoint_${endpoint.id}`, "");
+    const remaining = endpoints.filter((candidate) => candidate.id !== endpoint.id);
+    if (!remaining.some((candidate) => candidate.active)) remaining[0] = { ...remaining[0], active: true };
+    setEndpoints(remaining);
+    onNotify("Saved endpoint removed; assignments were preserved");
+  };
+
+  const assignRole = async (role: ModelRole, endpoint: SavedModelEndpoint) => {
+    if (assignments[role] === endpoint.id) {
+      onNotify("Each role must always have one assigned model");
+      return;
+    }
+    const { bindModelRole, defaultCapabilities } = await import("../lib/llm");
+    try {
+      await bindModelRole(role, await endpointConfig(endpoint), {
+        ...defaultCapabilities(),
+        vision: endpoint.vision,
+      });
+      await refreshBindings();
+      onNotify(`${endpoint.label} assigned`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not save model assignment");
+    }
+  };
+
+  const updateVision = async (endpoint: SavedModelEndpoint, vision: boolean) => {
+    const updated = { ...endpoint, vision };
+    setEndpoints(endpoints.map((candidate) => candidate.id === endpoint.id ? updated : candidate));
+    const { bindModelRole, defaultCapabilities } = await import("../lib/llm");
+    for (const [role] of MODEL_ROLES) {
+      if (assignments[role] === endpoint.id) {
+        await bindModelRole(role, await endpointConfig(updated), {
+          ...defaultCapabilities(),
+          vision,
+        });
+      }
+    }
+  };
+
+  const testEndpoint = async (endpoint: SavedModelEndpoint) => {
+    setTestingId(endpoint.id);
+    try {
+      const { testModelEndpoint } = await import("../lib/llm");
+      const result = await testModelEndpoint(await endpointConfig(endpoint));
+      if (result.reachable && result.modelAvailable && result.capabilities.vision !== endpoint.vision) {
+        await updateVision(endpoint, result.capabilities.vision);
+      }
+      onNotify(result.reachable && result.modelAvailable
+        ? `${endpoint.model} is reachable and returned a compatible response`
+        : result.error || "The endpoint did not return a compatible response");
+    } finally {
+      setTestingId(null);
+    }
+  };
+
+  const beginEndpointEdit = (endpoint: SavedModelEndpoint) => {
+    setEditingId(endpoint.id);
+    setEditDraft({ ...endpoint });
+    setCredentialId(null);
+    setCredentialDraft("");
+  };
+
+  const cancelEndpointEdit = () => {
+    setEditingId(null);
+    setEditDraft(null);
+    setCredentialId(null);
+    setCredentialDraft("");
+  };
+
+  const saveEndpointEdit = async (endpoint: SavedModelEndpoint) => {
+    if (!editDraft || editDraft.id !== endpoint.id) return;
+    const label = editDraft.label.trim();
+    const baseUrl = editDraft.baseUrl.trim();
+    const model = editDraft.model.trim();
+    if (!label || !baseUrl || !model) return onNotify("Label, URL and model are required");
+    if (!/^https?:\/\//i.test(baseUrl)) return onNotify("Endpoint URL must begin with http:// or https://");
+
+    const updated: SavedModelEndpoint = {
+      ...endpoint,
+      label,
+      provider: editDraft.provider,
+      baseUrl,
+      model,
+    };
+    try {
+      // Update every owned role before publishing the new endpoint metadata so
+      // assignment records and the saved card can never disagree.
+      const { bindModelRole, defaultCapabilities } = await import("../lib/llm");
+      for (const [role] of MODEL_ROLES) {
+        if (assignments[role] === endpoint.id) {
+          await bindModelRole(role, await endpointConfig(updated), {
+            ...defaultCapabilities(),
+            vision: updated.vision,
+          });
+        }
+      }
+      setEndpoints(endpoints.map((candidate) => candidate.id === endpoint.id ? updated : candidate));
+      cancelEndpointEdit();
+      onNotify(`Updated endpoint “${label}”`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not update this endpoint");
+    }
+  };
+
+  const saveCredential = async (endpoint: SavedModelEndpoint) => {
+    const { storeCredentialLocally } = await import("../lib/llm");
+    const value = credentialDraft.trim();
+    storeCredentialLocally(`endpoint_${endpoint.id}`, value);
+    setEndpoints(endpoints.map((candidate) => candidate.id === endpoint.id
+      ? { ...candidate, keyMasked: value ? `••••${value.slice(-4)}` : "not set" }
+      : candidate));
+    // Re-bind every role owned by this endpoint so stale role credentials are
+    // replaced or explicitly cleared immediately.
+    for (const [role] of MODEL_ROLES) {
+      if (assignments[role] === endpoint.id) {
+        const { bindModelRole, defaultCapabilities } = await import("../lib/llm");
+        await bindModelRole(role, {
+          provider: endpoint.provider,
+          baseUrl: endpoint.baseUrl,
+          modelId: endpoint.model,
+          apiKey: value || undefined,
+        }, { ...defaultCapabilities(), vision: endpoint.vision });
+      }
+    }
+    setCredentialId(null);
+    setCredentialDraft("");
+    onNotify(value ? "API key replaced" : "API key cleared");
+  };
+
+  const visibleEndpoints = category === "app" ? appEndpoints : customEndpoints;
+
   return (
     <div>
-      <GroupLabel>Three Assignable Agent Roles</GroupLabel>
-      <div className="mb-3 space-y-2 rounded-md border border-white/8 bg-white/[0.03] p-3">
-        {[
-          { role: "tutor" as const, label: "Role 1: Socratic Tutor Agent", desc: "Chalkboard explanations, diagrams, progressive hints" },
-          { role: "generation" as const, label: "Role 2: Test Generation Agent", desc: "Creates grounded assessment items & rubrics" },
-          { role: "evaluator" as const, label: "Role 3: Test Evaluator Agent", desc: "Analytic rubric grading & explanation gate evaluation" },
-        ].map((r) => (
-          <div key={r.role} className="flex items-center justify-between border-b border-white/6 pb-2 last:border-0 last:pb-0">
-            <div>
-              <div className="text-[12px] font-medium text-fg">{r.label}</div>
-              <div className="text-[10.5px] text-dim">{r.desc}</div>
-            </div>
-            <span
-              className={`rounded-full px-2 py-0.5 font-mono text-[10px] ${
-                boundRoles[r.role] ? "bg-accent/15 text-accent" : "bg-white/8 text-dim"
-              }`}
-            >
-              {boundRoles[r.role] ? "Bound" : "Unbound"}
-            </span>
-          </div>
-        ))}
-
+      <GroupLabel>Models</GroupLabel>
+      <div className="mb-3 grid grid-cols-2 rounded-md bg-black/25 p-0.5" aria-label="Model categories">
         <button
-          onClick={() => {
-            const activeEp = endpoints.find((e) => e.active) || endpoints[0];
-            if (!activeEp) {
-              onNotify("Add an endpoint first");
-              return;
-            }
-            void import("../lib/llm").then((m) => {
-              const apiKey = m.getCredentialLocally(`endpoint_${activeEp.id}`);
-              m.bindAllModelRoles({
-                provider: activeEp.provider as any,
-                baseUrl: activeEp.baseUrl,
-                modelId: activeEp.model,
-                apiKey: apiKey || undefined,
-              }).then(() => {
-                refreshBoundRoles();
-                onNotify(`Bound ${activeEp.label} to all 3 roles`);
-              });
-            });
-          }}
-          className="w-full mt-2 rounded bg-accent/20 border border-accent/40 py-1.5 text-[11.5px] font-medium text-accent hover:bg-accent/30 transition-colors"
+          onClick={() => setCategory("app")}
+          className={`rounded px-2 py-1.5 text-[11.5px] transition-colors ${category === "app" ? "bg-white/[0.14] text-fg" : "text-dim hover:text-mut"}`}
         >
-          Single action: Assign active model to all 3 roles
+          Studyus models · {appEndpoints.length}
+        </button>
+        <button
+          onClick={() => setCategory("custom")}
+          className={`rounded px-2 py-1.5 text-[11.5px] transition-colors ${category === "custom" ? "bg-white/[0.14] text-fg" : "text-dim hover:text-mut"}`}
+        >
+          Custom endpoints · {customEndpoints.length}
         </button>
       </div>
 
-      <GroupLabel>Saved endpoints</GroupLabel>
-      <div className="mb-2 space-y-1.5">
-        {endpoints.map((e) => (
-          <div
-            key={e.id}
-            className={`flex items-center gap-2 rounded-md border p-2.5 transition-colors ${
-              e.active ? "border-accent/60 bg-accent/[0.05]" : "border-white/8 bg-white/[0.03]"
-            }`}
-          >
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <span className="truncate text-[12.5px] font-medium text-fg">{e.label}</span>
-                {e.active && (
-                  <span className="rounded-full bg-accent/20 px-1.5 py-[1px] text-[9.5px] font-medium text-accent">
-                    Active
-                  </span>
-                )}
-              </div>
-              <div className="truncate font-mono text-[10.5px] text-dim">
-                {e.model} · {e.baseUrl} · key: {e.keyMasked}
-              </div>
-            </div>
-            <button
-              onClick={() => {
-                void import("../lib/llm").then((m) => {
-                  m.testModelEndpoint({
-                    provider: e.provider as any,
-                    baseUrl: e.baseUrl,
-                    modelId: e.model,
-                    apiKey: m.getCredentialLocally(`endpoint_${e.id}`) || undefined,
-                  }).then((res) => {
-                    if (res.reachable && res.modelAvailable) {
-                      alert(`Test connection success: Model ${e.model} is reachable and available.`);
-                    } else {
-                      alert(`Test connection failure: ${res.error || "Could not reach endpoint."}`);
-                    }
-                  });
-                });
-              }}
-              className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut transition-colors hover:bg-white/[0.12] hover:text-fg"
-            >
-              Test
-            </button>
-            {!e.active && (
-              <button
-                onClick={() => activateEndpoint(e.id)}
-                className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[11px] text-mut transition-colors hover:bg-white/[0.12] hover:text-fg"
-              >
-                Use
-              </button>
-            )}
-            <button
-                onClick={() => removeEndpoint(e.id)}
-                className="shrink-0 grid h-6 w-6 place-items-center rounded text-dim transition-colors hover:bg-white/[0.07] hover:text-[#ff8b80]"
-                title="Remove endpoint"
-              >
-                <Trash2 size={12} />
-              </button>
-          </div>
-        ))}
-      </div>
-
-      {!showAdd ? (
-        <button
-          onClick={() => setShowAdd(true)}
-          className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-white/12 py-2 text-[12px] text-mut transition-colors hover:border-white/20 hover:text-fg"
-        >
-          <Plus size={12} />
-          Add OpenAI-compatible endpoint
-        </button>
-      ) : (
-        <div className="mb-2 space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-3">
-          <div className="mb-1 flex items-center justify-between">
-            <span className="text-[11.5px] font-medium text-fg">New endpoint</span>
-            <button
-              onClick={() => setShowAdd(false)}
-              className="grid h-5 w-5 place-items-center rounded text-dim hover:bg-white/[0.07] hover:text-fg"
-            >
-              <X size={11} />
-            </button>
-          </div>
-          <input
-            value={draft.label}
-            onChange={(e) => setDraft((d) => ({ ...d, label: e.target.value }))}
-            placeholder="Label (e.g. My local Llama)"
-            className="w-full rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[12px] text-fg outline-none placeholder:text-[#6e6e6c]"
-          />
-          <div className="flex gap-2">
-            <select
-              value={draft.provider}
-              onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value as Endpoint["provider"] }))}
-              className="w-[110px] rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[12px] text-fg outline-none"
-            >
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="custom">Custom</option>
-            </select>
-            <input
-              value={draft.baseUrl}
-              onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))}
-              placeholder="Base URL"
-              className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[11.5px] text-fg outline-none placeholder:text-[#6e6e6c]"
-            />
-          </div>
-          <input
-            value={draft.model}
-            onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
-            placeholder="Model identifier"
-            className="w-full rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[11.5px] text-fg outline-none placeholder:text-[#6e6e6c]"
-          />
-          <input
-            type="password"
-            value={draft.keyMasked}
-            onChange={(e) => setDraft((d) => ({ ...d, keyMasked: e.target.value }))}
-            placeholder="API key"
-            className="w-full rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[11.5px] text-fg outline-none placeholder:text-[#6e6e6c]"
-          />
-          <div className="flex items-center justify-end gap-2">
-            <button
-              onClick={() => setShowAdd(false)}
-              className="rounded-md px-2.5 py-1 text-[11.5px] text-mut hover:text-fg"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={commitEndpoint}
-              className="rounded-md bg-accent px-3 py-1 text-[11.5px] font-medium text-white transition-colors hover:bg-accent-deep"
-            >
-              Save endpoint
-            </button>
-          </div>
+      {category === "app" && appEndpoints.length === 0 && (
+        <div className="mb-3 rounded-md border border-dashed border-white/10 p-4 text-center text-[11.5px] text-dim">
+          No app-provided model is bundled in this installation.
         </div>
       )}
+
+      <div className="mb-2 space-y-2">
+        {category === "custom" && customEndpoints.length === 0 && (
+          <div className="rounded-md border border-dashed border-white/10 p-4 text-center text-[11.5px] text-dim">
+            No custom endpoint is saved on this device.
+          </div>
+        )}
+        {visibleEndpoints.map((endpoint) => {
+          const editing = editingId === endpoint.id && editDraft?.id === endpoint.id;
+          return (
+            <div key={endpoint.id} className={`rounded-md border p-2 transition-colors ${endpoint.active ? "border-accent/50 bg-accent/[0.05]" : "border-white/8 bg-white/[0.03]"}`}>
+              <div className="flex items-start gap-1.5">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-[12.5px] font-medium text-fg">{endpoint.label}</span>
+                    {endpoint.active && <span className="rounded-full bg-accent/20 px-1.5 py-[1px] text-[9.5px] font-medium text-accent">Active</span>}
+                    {endpoint.vision && <span className="rounded-full bg-[#7dd3fc]/15 px-1.5 py-[1px] text-[9.5px] text-[#7dd3fc]">Vision</span>}
+                  </div>
+                  <div className="truncate font-mono text-[10px] text-dim">{endpoint.model} · {endpoint.baseUrl} · key: {endpoint.keyMasked}</div>
+                </div>
+                <button disabled={testingId === endpoint.id} onClick={() => { void testEndpoint(endpoint); }} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[10.5px] text-mut hover:bg-white/[0.12] hover:text-fg disabled:opacity-50">{testingId === endpoint.id ? "Testing…" : "Test"}</button>
+                {endpoint.provider !== "studyus" && (
+                  <button
+                    onClick={() => editing ? cancelEndpointEdit() : beginEndpointEdit(endpoint)}
+                    className={`shrink-0 rounded-md border px-2 py-1 text-[10.5px] transition-colors ${editing ? "border-accent/35 bg-accent/15 text-accent" : "border-white/10 bg-white/[0.07] text-mut hover:bg-white/[0.12] hover:text-fg"}`}
+                  >
+                    Edit
+                  </button>
+                )}
+                {!endpoint.active && <button onClick={() => activateEndpoint(endpoint.id)} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[10.5px] text-mut hover:bg-white/[0.12] hover:text-fg">Use</button>}
+                {endpoint.provider !== "studyus" && <button onClick={() => { void removeEndpoint(endpoint); }} title="Remove saved endpoint" className="grid h-6 w-6 shrink-0 place-items-center rounded text-dim hover:bg-white/[0.07] hover:text-[#ff8b80]"><Trash2 size={12} /></button>}
+              </div>
+
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-0 border-t border-white/6 pt-1.5">
+                {MODEL_ROLES.map(([role, label]) => (
+                  <label key={role} className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded px-1 py-0.5 text-[10.5px] text-mut hover:bg-white/[0.04] hover:text-fg">
+                    <input
+                      type="checkbox"
+                      checked={assignments[role] === endpoint.id}
+                      onChange={() => { void assignRole(role, endpoint); }}
+                      className="h-3.5 w-3.5 accent-[var(--accent)]"
+                    />
+                    {label}
+                  </label>
+                ))}
+                <label className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded px-1 py-0.5 text-[10.5px] text-mut hover:bg-white/[0.04] hover:text-fg">
+                  <input type="checkbox" checked={endpoint.vision} onChange={(event) => { void updateVision(endpoint, event.target.checked); }} className="h-3.5 w-3.5 accent-[var(--accent)]" />
+                  Supports Vision input
+                </label>
+              </div>
+
+              {editing && editDraft && (
+                <div className="mt-1.5 space-y-1.5 border-t border-white/6 pt-2">
+                  <div className="grid gap-1.5 sm:grid-cols-[1fr_112px]">
+                    <input value={editDraft.label} onChange={(event) => setEditDraft((current) => current ? { ...current, label: event.target.value } : current)} placeholder="Endpoint label" aria-label="Endpoint label" className="min-w-0 rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[11px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+                    <select value={editDraft.provider} onChange={(event) => setEditDraft((current) => current ? { ...current, provider: event.target.value as SavedModelEndpoint["provider"] } : current)} aria-label="Provider" className="rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[11px] text-fg outline-none"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="custom">Custom</option></select>
+                  </div>
+                  <div className="grid gap-1.5 sm:grid-cols-2">
+                    <input value={editDraft.baseUrl} onChange={(event) => setEditDraft((current) => current ? { ...current, baseUrl: event.target.value } : current)} placeholder="Base URL" aria-label="Base URL" className="min-w-0 rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[10.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+                    <input value={editDraft.model} onChange={(event) => setEditDraft((current) => current ? { ...current, model: event.target.value } : current)} placeholder="Model identifier" aria-label="Model identifier" className="min-w-0 rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[10.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+                  </div>
+                  {credentialId === endpoint.id ? (
+                    <div className="flex gap-1.5">
+                      <input type="password" autoFocus value={credentialDraft} onChange={(event) => setCredentialDraft(event.target.value)} placeholder="New API key (blank clears it)" aria-label="New API key" className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[10.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+                      <button onClick={() => { void saveCredential(endpoint); }} className="rounded-md bg-accent px-2.5 py-1 text-[10.5px] font-medium text-white">Save key</button>
+                      <button onClick={() => { setCredentialId(null); setCredentialDraft(""); }} className="rounded-md px-2 py-1 text-[10.5px] text-dim hover:text-fg">Cancel</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between gap-2 px-0.5 text-[10px] text-dim">
+                      <span>API key · {endpoint.keyMasked}</span>
+                      <button onClick={() => { setCredentialId(endpoint.id); setCredentialDraft(""); }} className="shrink-0 text-mut hover:text-fg">Replace or clear</button>
+                    </div>
+                  )}
+                  <div className="flex justify-end gap-1.5">
+                    <button onClick={cancelEndpointEdit} className="rounded-md px-2.5 py-1 text-[10.5px] text-dim hover:text-fg">Cancel</button>
+                    <button onClick={() => { void saveEndpointEdit(endpoint); }} className="rounded-md bg-accent px-2.5 py-1 text-[10.5px] font-medium text-white">Save changes</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {category === "custom" && (!showAdd ? (
+        <button onClick={() => setShowAdd(true)} className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-white/12 py-2 text-[12px] text-mut transition-colors hover:border-white/20 hover:text-fg"><Plus size={12} />Add OpenAI-compatible endpoint</button>
+      ) : (
+        <div className="mb-2 space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-3">
+          <div className="mb-1 flex items-center justify-between"><span className="text-[11.5px] font-medium text-fg">New custom endpoint</span><button onClick={() => setShowAdd(false)} className="grid h-5 w-5 place-items-center rounded text-dim hover:bg-white/[0.07] hover:text-fg"><X size={11} /></button></div>
+          <input value={draft.label} onChange={(event) => setDraft((current) => ({ ...current, label: event.target.value }))} placeholder="Label (e.g. My local Llama)" className="w-full rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[12px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+          <div className="flex gap-2">
+            <select value={draft.provider} onChange={(event) => setDraft((current) => ({ ...current, provider: event.target.value as SavedModelEndpoint["provider"] }))} className="w-[110px] rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[12px] text-fg outline-none"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="custom">Custom</option></select>
+            <input value={draft.baseUrl} onChange={(event) => setDraft((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="Base URL" className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[11.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+          </div>
+          <input value={draft.model} onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))} placeholder="Model identifier" className="w-full rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[11.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+          <input type="password" value={draft.keyMasked} onChange={(event) => setDraft((current) => ({ ...current, keyMasked: event.target.value }))} placeholder="API key (optional for a local endpoint)" className="w-full rounded-md border border-white/10 bg-black/25 px-2 py-1.5 font-mono text-[11.5px] text-fg outline-none placeholder:text-[#6e6e6c]" />
+          <label className="flex items-center gap-2 text-[11px] text-mut"><input type="checkbox" checked={draft.vision} onChange={(event) => setDraft((current) => ({ ...current, vision: event.target.checked }))} className="h-3.5 w-3.5 accent-[var(--accent)]" />This model supports Vision image input</label>
+          <div className="flex items-center justify-end gap-2"><button onClick={() => setShowAdd(false)} className="rounded-md px-2.5 py-1 text-[11.5px] text-mut hover:text-fg">Cancel</button><button onClick={() => { void commitEndpoint(); }} className="rounded-md bg-accent px-3 py-1 text-[11.5px] font-medium text-white transition-colors hover:bg-accent-deep">Save endpoint</button></div>
+        </div>
+      ))}
+      <p className="px-1 text-[10.5px] leading-relaxed text-dim">Model registrations and role assignments persist on this device. API key values remain in the local credential store and are not included in searchable settings metadata.</p>
     </div>
   );
 }

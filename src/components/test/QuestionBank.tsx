@@ -1,20 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, X as XIcon, MinusCircle } from "lucide-react";
-import { getDb } from "../../db/database";
+import {
+  getCompletedQuestionBankRecords,
+  type QuestionBankRecord,
+  type QuestionBankStatus,
+} from "../../lib/questionBank";
+import { AssessmentFigure } from "./AssessmentFigure";
 
-type Status = "correct" | "wrong" | "unattempted";
-
-export interface QuestionBankRecord {
-  id: string;
-  prompt: string;
-  subject: string;
-  topic: string;
-  format: "mcq" | "proof";
-  status: Status;
-  yourAnswer: string;
-  correctAnswer: string;
-  reason: string;
-}
+export type { QuestionBankRecord } from "../../lib/questionBank";
+type Status = QuestionBankStatus;
 
 export function QuestionBank({ onNotify }: { onNotify: (t: string) => void }) {
   const [subject, setSubject] = useState<string>("all");
@@ -24,62 +18,24 @@ export function QuestionBank({ onNotify }: { onNotify: (t: string) => void }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [questions, setQuestions] = useState<QuestionBankRecord[]>([]);
 
-  // Load real question records and responses from SQLite DB
+  // Only completed attempts become learner-history records. Generated and
+  // in-progress tests stay out of Question bank until submission finishes.
   useEffect(() => {
-    (async () => {
-      const db = await getDb();
-
-      const itemsRes = db.exec(`
-        SELECT i.id, i.stem, i.curriculum_node, i.item_type, i.answer_spec_json,
-               r.committed_response, r.grading_status,
-               c.awarded_mark, c.maximum_mark, c.rationale
-        FROM assessment_items i
-        LEFT JOIN attempt_responses r ON i.id = r.item_id
-        LEFT JOIN criterion_scores c ON r.id = c.response_id;
-      `);
-
-      if (!itemsRes[0]) {
-        setQuestions([]);
-        return;
-      }
-
-      const records: QuestionBankRecord[] = itemsRes[0].values.map((row) => {
-        const id = row[0] as string;
-        const prompt = row[1] as string;
-        const topic = (row[2] as string) || "General Concept";
-        const itemType = row[3] as string;
-        const specRaw = row[4] as string;
-        const userResp = (row[5] as string) || "";
-        const awarded = (row[7] as number) ?? 0;
-        const maxMark = (row[8] as number) ?? 1;
-        const rationale = (row[9] as string) || "";
-
-        let st: Status = "unattempted";
-        if (userResp.trim()) {
-          st = awarded >= maxMark ? "correct" : "wrong";
+    let cancelled = false;
+    getCompletedQuestionBankRecords()
+      .then((records) => {
+        if (!cancelled) setQuestions(records);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setQuestions([]);
+          onNotify(error instanceof Error ? error.message : "Could not load Question bank");
         }
-
-        let spec: any = {};
-        try { spec = JSON.parse(specRaw); } catch { spec = {}; }
-
-        const correctAnswer = spec.accepted?.[0]?.value ?? spec.reference_solution ?? "Reference solution";
-
-        return {
-          id,
-          prompt,
-          subject: "Physics",
-          topic,
-          format: itemType === "mcq" ? "mcq" : "proof",
-          status: st,
-          yourAnswer: userResp || "No attempt recorded",
-          correctAnswer,
-          reason: rationale || (st === "correct" ? "Evaluation verified requirement." : "Review required step."),
-        };
       });
-
-      setQuestions(records);
-    })();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [onNotify]);
 
   const rows = useMemo(() => {
     const term = q.trim().toLowerCase();
@@ -108,7 +64,7 @@ export function QuestionBank({ onNotify }: { onNotify: (t: string) => void }) {
       <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Testing & Practice</div>
       <h1 className="mb-1 text-[36px] font-bold leading-tight tracking-tight text-fg">Question bank</h1>
       <p className="mb-6 text-[13.5px] text-dim">
-        Every question you've seen, recorded with your answers and evaluation rationale in SQLite.
+        Questions from completed tests, recorded with your submitted answers and evaluation rationale in SQLite.
       </p>
 
       <div className="mb-5 grid grid-cols-3 gap-2">
@@ -307,6 +263,13 @@ function QuestionDetail({
         </div>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+          {item.figure && (
+            <section>
+              <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Question figure</div>
+              <AssessmentFigure intent={item.figure} />
+            </section>
+          )}
+
           <section>
             <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-dim">
               <span>Your answer</span>

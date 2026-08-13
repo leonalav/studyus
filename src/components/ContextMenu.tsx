@@ -19,6 +19,9 @@ import {
   CheckSquare,
   AlertTriangle,
   Grid,
+  Pin,
+  PanelTopOpen,
+  History,
 } from "lucide-react";
 
 export type ContextType =
@@ -27,7 +30,10 @@ export type ContextType =
   | "graph"
   | "curriculum_node"
   | "chat_message"
-  | "assessment_item";
+  | "assessment_item"
+  | "past_note"
+  | "curriculum_source"
+  | "app_tab";
 
 export interface ContextMenuTarget {
   type: ContextType;
@@ -107,7 +113,10 @@ export function ContextMenu({ target, onClose, onAction }: ContextMenuProps) {
       ref={menuRef}
       className="anim-toast fixed z-[100] w-[240px] overflow-hidden rounded-xl border border-[#3a3a3a] bg-[#1e1e20]/96 font-sans text-[12.5px] text-fg shadow-[0_20px_60px_rgba(0,0,0,0.65)] backdrop-blur-xl select-none"
       style={{ left, top }}
-      onContextMenu={(e) => e.preventDefault()}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
     >
       <div className="p-1 space-y-1">
         {sections.map((sec, sIdx) => (
@@ -189,8 +198,61 @@ export function ContextMenu({ target, onClose, onAction }: ContextMenuProps) {
   );
 }
 
-function getMenuSections(type: ContextType, _data?: any): MenuSection[] {
+export function getMenuSections(type: ContextType, data?: any): MenuSection[] {
   switch (type) {
+    case "past_note":
+      return [
+        {
+          items: [
+            { id: "delete_past_note", label: "Delete", icon: Trash2 },
+            { id: "rename_past_note", label: "Rename", icon: Edit },
+          ],
+        },
+        {
+          items: [
+            { id: "copy_past_note", label: "Copy", icon: Copy, shortcut: "⌘C" },
+            { id: "cut_past_note", label: "Cut", icon: Scissors, shortcut: "⌘X" },
+            {
+              id: "paste_past_note",
+              label: "Paste",
+              icon: Clipboard,
+              shortcut: "⌘V",
+              disabled: data?.canPaste === false,
+              disabledReason: data?.canPaste === false ? "Copy or cut a Past Note first" : undefined,
+            },
+          ],
+        },
+      ];
+
+    case "curriculum_source":
+      return [
+        {
+          items: [
+            { id: "delete_curriculum", label: "Delete", icon: Trash2 },
+            { id: "rename_curriculum", label: "Rename", icon: Edit },
+          ],
+        },
+      ];
+
+    case "app_tab":
+      return [
+        {
+          items: [
+            { id: "open_new_tab", label: "Open new tab", icon: PanelTopOpen },
+            { id: "close_all_tabs", label: "Close all tabs", icon: Trash2 },
+            { id: "duplicate_tab", label: "Duplicate", icon: Copy },
+            { id: "pin_tab", label: data?.pinned ? "Unpin tab" : "Pin tab", icon: Pin },
+            {
+              id: "reopen_closed_tabs",
+              label: "Reopen closed tabs",
+              icon: History,
+              disabled: data?.canReopen === false,
+              disabledReason: data?.canReopen === false ? "No recently closed tabs" : undefined,
+            },
+          ],
+        },
+      ];
+
     case "chalkboard_bg":
       return [
         {

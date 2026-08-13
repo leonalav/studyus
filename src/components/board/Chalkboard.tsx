@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { memo, useEffect, useRef, useState, useCallback } from "react";
+import { Minus, Plus } from "lucide-react";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
 import { Latex, ChalkStrong } from "./Visuals";
@@ -70,6 +71,8 @@ interface Props {
   /** Persist a visualization block's interactive state (e.g. dragged point
    * positions) back into the board so it survives a session reopen. */
   onBlockStateChange?: (blockId: string, state: VisualizationState) => void;
+  /** Render the canonical board without mutation, pan, zoom, or selection UI. */
+  readOnly?: boolean;
 }
 
 export interface Stroke {
@@ -84,7 +87,14 @@ export interface BoardView {
   x: number;
   y: number;
   s: number;
+  /** Original viewport dimensions let Past Notes scale the saved view exactly. */
+  viewportWidth?: number;
+  viewportHeight?: number;
 }
+
+const MIN_BOARD_ZOOM = 0.4;
+const MAX_BOARD_ZOOM = 2.2;
+const BOARD_ZOOM_STEP = 0.15;
 
 export function Chalkboard({
   board,
@@ -105,6 +115,7 @@ export function Chalkboard({
   initialStrokes,
   onStrokesChange,
   onBlockStateChange,
+  readOnly = false,
 }: Props) {
   const [view, setView] = useState<BoardView>(initialView ?? { x: 48, y: 36, s: 1 });
   const [revealed, setRevealed] = useState(writing ? 0 : board.blocks.length);
@@ -115,6 +126,8 @@ export function Chalkboard({
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
+  const viewRef = useRef(view);
+  viewRef.current = view;
   const accent = DOMAIN_META[board.domain].accent;
 
   useEffect(() => {
@@ -122,17 +135,27 @@ export function Chalkboard({
     return () => onRootRef?.(null);
   }, [onRootRef]);
 
+  const blockCountRef = useRef(board.blocks.length);
+  blockCountRef.current = board.blocks.length;
+
+  // A restored board starts fully visible; a newly written board reveals from
+  // the beginning. Subsequent block arrivals never reset this progress.
   useEffect(() => {
     setRevealed(writing ? 0 : board.blocks.length);
-    if (!writing) return;
-    let i = 0;
+  }, [board.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    setRevealed((current) => Math.min(current, board.blocks.length));
+  }, [board.id, board.blocks.length]);
+
+  // Keep one ticker alive for the board identity. Tutor operations can arrive
+  // faster than the reveal cadence without repeatedly cancelling the timer.
+  useEffect(() => {
     const id = window.setInterval(() => {
-      i += 1;
-      setRevealed(i);
-      if (i >= board.blocks.length) window.clearInterval(id);
+      setRevealed((current) => current < blockCountRef.current ? current + 1 : current);
     }, 620);
     return () => window.clearInterval(id);
-  }, [board.id, writing, board.blocks.length]);
+  }, [board.id]);
 
   useEffect(() => {
     setView(initialView ?? { x: 48, y: 36, s: 1 });
@@ -140,12 +163,29 @@ export function Chalkboard({
     setAskOpen(false);
   }, [board.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Read-only snapshots may provide a controlled camera (for example, Past
+  // Notes' up/down controls). Keep live boards uncontrolled so their normal
+  // drag and zoom behavior is unchanged.
   useEffect(() => {
-    onViewChange?.(view);
+    if (!readOnly || !initialView) return;
+    setView((current) => (
+      current.x === initialView.x && current.y === initialView.y && current.s === initialView.s
+        ? current
+        : { ...initialView }
+    ));
+  }, [initialView?.x, initialView?.y, initialView?.s, readOnly]);
+
+  useEffect(() => {
+    const viewport = wrapRef.current;
+    onViewChange?.({
+      ...view,
+      viewportWidth: viewport?.clientWidth,
+      viewportHeight: viewport?.clientHeight,
+    });
   }, [view, onViewChange]);
 
   const onDown = (e: React.MouseEvent) => {
-    if (annotating) return;
+    if (readOnly || annotating) return;
     const t = e.target as HTMLElement;
     if (e.button !== 0 && e.button !== 1) return;
     if (t.closest("[data-nopan]")) return;
@@ -174,19 +214,42 @@ export function Chalkboard({
   }, [panning]);
 
   const onWheel = (e: React.WheelEvent) => {
-    if (annotating) return;
+    if (readOnly || annotating) return;
     const target = e.target as HTMLElement;
     if (target.closest("[data-nopan]")) return;
     if (e.ctrlKey || e.metaKey) {
       const delta = -e.deltaY * 0.0016;
-      setView((v) => ({ ...v, s: Math.min(2.2, Math.max(0.4, v.s + delta)) }));
+      setView((v) => ({ ...v, s: Math.min(MAX_BOARD_ZOOM, Math.max(MIN_BOARD_ZOOM, v.s + delta)) }));
     } else {
       setView((v) => ({ ...v, x: v.x - e.deltaX, y: v.y - e.deltaY }));
     }
   };
 
+  const zoomBoard = useCallback((direction: -1 | 1) => {
+    const box = wrapRef.current?.getBoundingClientRect();
+    setView((current) => {
+      const nextScale = Math.min(
+        MAX_BOARD_ZOOM,
+        Math.max(MIN_BOARD_ZOOM, Number((current.s + direction * BOARD_ZOOM_STEP).toFixed(2)))
+      );
+      if (nextScale === current.s) return current;
+
+      // Keep the same board point under the viewport center while zooming so
+      // keyboard/trackpad-free controls do not make the notes jump away.
+      const centerX = (box?.width ?? 0) / 2;
+      const centerY = (box?.height ?? 0) / 2;
+      const boardX = (centerX - current.x) / current.s;
+      const boardY = (centerY - current.y) / current.s;
+      return {
+        x: centerX - boardX * nextScale,
+        y: centerY - boardY * nextScale,
+        s: nextScale,
+      };
+    });
+  }, []);
+
   const checkSelection = useCallback(() => {
-    if (annotating) return;
+    if (readOnly || annotating) return;
     const s = window.getSelection();
     const text = s?.toString().trim() ?? "";
     if (!text || text.length < 3 || !wrapRef.current) {
@@ -198,13 +261,14 @@ export function Chalkboard({
     const box = wrapRef.current.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) return;
     setSel({ text, x: r.left - box.left + r.width / 2, y: r.top - box.top });
-  }, [annotating, askOpen]);
+  }, [annotating, askOpen, readOnly]);
 
   useEffect(() => {
+    if (readOnly) return;
     const h = () => window.setTimeout(checkSelection, 10);
     document.addEventListener("mouseup", h);
     return () => document.removeEventListener("mouseup", h);
-  }, [checkSelection]);
+  }, [checkSelection, readOnly]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokes = useRef<Stroke[]>([]);
@@ -241,12 +305,19 @@ export function Chalkboard({
       c.width = w.clientWidth;
       c.height = w.clientHeight;
       redraw();
+      if (!readOnly) {
+        onViewChange?.({
+          ...viewRef.current,
+          viewportWidth: w.clientWidth,
+          viewportHeight: w.clientHeight,
+        });
+      }
     };
     fit();
     const ro = new ResizeObserver(fit);
     ro.observe(w);
     return () => ro.disconnect();
-  }, [redraw]);
+  }, [onViewChange, readOnly, redraw]);
 
   useEffect(() => {
     strokes.current = initialStrokes ? initialStrokes.map((stroke) => ({ ...stroke, pts: [...stroke.pts] })) : [];
@@ -263,7 +334,7 @@ export function Chalkboard({
   }, [onClearRef, onStrokesChange, redraw]);
 
   const annDown = (e: React.MouseEvent) => {
-    if (!annotating) return;
+    if (readOnly || !annotating) return;
     const r = canvasRef.current!.getBoundingClientRect();
     const p = { x: e.clientX - r.left, y: e.clientY - r.top };
     cur.current = {
@@ -297,8 +368,9 @@ export function Chalkboard({
       className="relative h-full w-full overflow-hidden select-none"
       style={{
         background: theme.bg,
-        cursor: annotating ? "crosshair" : panning ? "grabbing" : "grab",
+        cursor: readOnly ? "default" : annotating ? "crosshair" : panning ? "grabbing" : "grab",
       }}
+      aria-label={readOnly ? "Read-only chalkboard snapshot" : "Interactive chalkboard"}
     >
       {/* ordered grid behind the content */}
       <div
@@ -322,6 +394,7 @@ export function Chalkboard({
 
       {/* ordered content stream — vertical stack, never absolute chaos */}
       <div
+        data-board-content
         className="absolute left-0 top-0 origin-top-left"
         style={{
           transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`,
@@ -340,7 +413,7 @@ export function Chalkboard({
             <div
               key={b.id}
               data-block
-              className="anim-chalk cursor-text select-text"
+              className={`${readOnly ? "" : containsVisualization(b) ? "anim-chalk-visual" : "anim-chalk"} ${readOnly ? "cursor-default" : "cursor-text select-text"}`}
               style={{ animationDelay: `${Math.min(i, 4) * 40}ms` }}
             >
               <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} blockId={b.id} />
@@ -436,14 +509,57 @@ export function Chalkboard({
         </div>
       )}
 
-      <div className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-black/45 px-2 py-1 font-mono text-[10px] text-white/65 backdrop-blur-sm">
-        {Math.round(view.s * 100)}% · drag empty space to pan · ⌘/ctrl + scroll to zoom
+      {!readOnly && (
+        <>
+      <div
+        data-nopan
+        className="absolute bottom-3 left-3 z-30 flex items-center overflow-hidden rounded-lg border border-white/15 bg-[#171819]/88 text-white shadow-[0_8px_24px_rgba(0,0,0,0.3)] backdrop-blur-md"
+        role="group"
+        aria-label="Board zoom controls"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          onClick={() => zoomBoard(-1)}
+          disabled={view.s <= MIN_BOARD_ZOOM}
+          className="grid h-8 w-8 place-items-center transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:text-white/20"
+          aria-label="Zoom out"
+          title="Zoom out"
+        >
+          <Minus size={15} strokeWidth={2.2} />
+        </button>
+        <output
+          className="min-w-[48px] border-x border-white/10 px-2 text-center font-mono text-[10px] text-white/70"
+          aria-live="polite"
+          aria-label={`Board zoom ${Math.round(view.s * 100)} percent`}
+        >
+          {Math.round(view.s * 100)}%
+        </output>
+        <button
+          type="button"
+          onClick={() => zoomBoard(1)}
+          disabled={view.s >= MAX_BOARD_ZOOM}
+          className="grid h-8 w-8 place-items-center transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:text-white/20"
+          aria-label="Zoom in"
+          title="Zoom in"
+        >
+          <Plus size={15} strokeWidth={2.2} />
+        </button>
       </div>
+
+      <div className="pointer-events-none absolute bottom-3 left-[138px] rounded-md bg-black/40 px-2 py-1 font-mono text-[9.5px] text-white/55 backdrop-blur-sm">
+        drag empty space to pan · ⌘/ctrl + scroll to zoom
+      </div>
+      <div className="pointer-events-none absolute bottom-3 right-3 max-w-[34%] truncate rounded-md bg-black/40 px-2 py-1 text-right font-mono text-[9.5px] text-white/55 backdrop-blur-sm" title={board.title}>
+        {board.title}
+      </div>
+        </>
+      )}
     </div>
   );
 }
 
-function BlockView({
+const BlockView = memo(function BlockView({
   block,
   chalk,
   accent,
@@ -460,6 +576,11 @@ function BlockView({
   onBlockStateChange?: (blockId: string, state: VisualizationState) => void;
   blockId: string;
 }) {
+  const handleVisualizationState = useCallback(
+    (next: VisualizationState) => onBlockStateChange?.(blockId, next),
+    [blockId, onBlockStateChange]
+  );
+
   switch (block.kind) {
     case "title":
       return (
@@ -514,7 +635,7 @@ function BlockView({
           chalk={chalk}
           accent={accent}
           scale={scale}
-          onState={onBlockStateChange ? (next) => onBlockStateChange(blockId, next) : undefined}
+          onState={onBlockStateChange ? handleVisualizationState : undefined}
         />
       );
     case "callout":
@@ -539,6 +660,10 @@ function BlockView({
     default:
       return null;
   }
+});
+
+function containsVisualization(block: Block): boolean {
+  return block.kind === "visualization" || (block.kind === "row" && block.children.some(containsVisualization));
 }
 
 /* `**bold**` and `*em*` markers become yellow-strong text in chalk. */
