@@ -117,10 +117,21 @@ function WidgetShell({
 
   return (
     <figure
-      className="m-0 w-full max-w-[460px] overflow-hidden rounded-lg border shadow-[0_12px_32px_rgba(0,0,0,0.25)] backdrop-blur-md"
+      className="m-0 w-[460px] max-w-full overflow-hidden rounded-lg border shadow-[0_12px_32px_rgba(0,0,0,0.25)] backdrop-blur-md"
       data-nopan
       data-widget={intent.kind}
-      style={{ borderColor: `${accent}33`, background: "rgba(52,52,54,0.34)", color: chalk, fontSize }}
+      style={{
+        borderColor: `${accent}33`,
+        background: "rgba(52,52,54,0.34)",
+        color: chalk,
+        fontSize,
+        // Widgets are instruments, not handwriting. The board's chalk font is
+        // cursive by design, which suits prose the tutor "writes" but hurts the
+        // dense, scannable content widgets carry: options, tables, verdicts,
+        // numbers, code. Opt out of the inherited chalk font here so every
+        // widget body reads in Space Grotesk.
+        fontFamily: "var(--font-widget)",
+      }}
     >
       <header
         className="flex items-center gap-2 border-b px-3 py-2"

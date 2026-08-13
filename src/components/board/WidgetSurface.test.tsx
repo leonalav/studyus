@@ -267,6 +267,26 @@ describe("WidgetSurface — all 17 widgets", () => {
     expect(html).toContain("Likely to forget why h cannot be 0");
   });
 
+  it("opts every widget out of the board's cursive chalk font", () => {
+    // The board sets a handwriting font on the whole content stream. Widgets
+    // carry dense scannable content — options, tables, verdicts, numbers — that
+    // a cursive face makes genuinely hard to read, so each one must override
+    // the inherited family rather than relying on where it happens to sit.
+    for (const kind of WIDGET_KINDS) {
+      expect(render(EXEMPLARS[kind])).toContain("font-family:var(--font-widget)");
+    }
+  });
+
+  it("bounds a widget to its own width so the board beside it stays draggable", () => {
+    // A full-bleed widget would stretch its wrapper across the content stream
+    // and swallow left-drags landing hundreds of pixels to its right, which is
+    // how the board became nearly impossible to pan.
+    const html = render(EXEMPLARS.question);
+    expect(html).toMatch(/w-\[460px\]/);
+    expect(html).toMatch(/max-w-full/);
+    expect(html).not.toMatch(/class="[^"]*\bw-full\b[^"]*max-w-\[460px\]/);
+  });
+
   it("keeps a reveal item obscured and unselectable until the learner uncovers it", () => {
     const hidden = render(EXEMPLARS.reveal);
     expect(hidden).toContain("What is the derivative of x^2?");

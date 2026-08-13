@@ -215,6 +215,31 @@ a signal whose turn fails is released for retry.
 
 ---
 
+## Typography and hit area
+
+**Widgets do not use the chalk font.** The board applies a cursive handwriting
+face to its whole content stream, which suits prose the tutor "writes" but hurts
+what widgets actually carry: options, comparison tables, mastery verdicts,
+numbers, learner input. `WidgetShell` sets `font-family: var(--font-widget)`
+(Space Grotesk) so every widget reads as an instrument rather than handwriting.
+The one exception is the dyslexia-friendly font preference, which overrides
+`--font-widget` too — that accessibility choice outranks the default typeface.
+
+**Widgets are bounded to their own width.** A widget used to render `w-full
+max-w-[460px]`, so its wrapper stretched across the full 920px content stream
+while only 460px was visible. Left-clicking the empty region beside it hit
+`[data-block]`, which suppresses panning to allow text selection — the board
+became nearly impossible to drag from anywhere right of a widget. Two changes:
+
+- The shell is `w-[460px] max-w-full`, and bounded block kinds
+  (`SHRINK_WRAP_BLOCKS`) get a `w-fit` wrapper. Visualizations and rows keep
+  full-width wrappers because their layout depends on it.
+- `onDown` pans when a left-click lands on a block *wrapper* rather than any
+  rendered child — clicking empty margin has nothing to select. `.board-block`
+  shows `grab` with `text` only over content, so the cursor predicts the action.
+
+---
+
 ## Reverting a message reverts the board
 
 Every user message carries a `boardSnapshot` — the board exactly as it stood

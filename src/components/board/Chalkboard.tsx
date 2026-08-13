@@ -44,6 +44,12 @@ export const THEMES: BoardTheme[] = [
   },
 ];
 
+/** Block kinds that render at a bounded width, so their wrapper can shrink to
+ *  the content and leave the surrounding board draggable. "visualization" and
+ *  "row" are deliberately absent: both stretch to the content stream by design.
+ */
+const SHRINK_WRAP_BLOCKS = new Set<Block["kind"]>(["title", "text", "bullets", "latex", "callout", "widget"]);
+
 export const FONTS = [
   { id: "gloria", label: "Gloria Hallelujah", css: "'Gloria Hallelujah', cursive" },
   { id: "playwrite", label: "Playwrite NZ", css: "'Playwrite NZ', cursive" },
@@ -196,7 +202,14 @@ export function Chalkboard({
     const t = e.target as HTMLElement;
     if (e.button !== 0 && e.button !== 1) return;
     if (t.closest("[data-nopan]")) return;
-    if (e.button === 0 && t.closest("[data-block]")) return;
+    // Left-drag over block CONTENT selects text instead of panning. But a
+    // block's wrapper is full-width, so a click far to the right of a narrow
+    // widget or paragraph still lands inside [data-block] with nothing to
+    // select — that dead zone made the board feel unpannable. When the click
+    // landed on the wrapper itself rather than any rendered child, it is empty
+    // margin: pan.
+    const block = e.button === 0 ? t.closest("[data-block]") : null;
+    if (block && block !== t) return;
     dragRef.current = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
     setPanning(true);
   };
@@ -420,7 +433,15 @@ export function Chalkboard({
             <div
               key={b.id}
               data-block
-              className={`${readOnly ? "" : containsVisualization(b) ? "anim-chalk-visual" : "anim-chalk"} ${readOnly ? "cursor-default" : "cursor-text select-text"}`}
+              /* Shrink-wrap blocks that render at a bounded width — widgets are
+                 fixed-width instruments, prose and equations cap themselves —
+                 so the empty board beside them stays board: draggable, with a
+                 grab cursor rather than an I-beam. Without this the wrapper
+                 spans the whole 920px stream and swallows left-drags landing
+                 hundreds of pixels away from anything visible. Rows and
+                 visualizations keep the full-width wrapper because their
+                 internal layout depends on it; onDown covers their margins. */
+              className={`${readOnly ? "" : containsVisualization(b) ? "anim-chalk-visual" : "anim-chalk"} ${readOnly ? "cursor-default" : "board-block select-text"} ${SHRINK_WRAP_BLOCKS.has(b.kind) ? "w-fit max-w-full" : ""}`}
               style={{ animationDelay: `${Math.min(i, 4) * 40}ms` }}
             >
               <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={b.id} readOnly={readOnly} />

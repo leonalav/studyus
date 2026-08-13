@@ -3,6 +3,11 @@
 @theme {
   --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Space Mono", ui-monospace, monospace;
+  /* Study widgets are instruments, not handwriting. The board's chalk font is
+     deliberately cursive, which is fine for prose a tutor "writes" but hurts
+     the dense, scannable content widgets carry: options, tables, verdicts,
+     numbers. Widgets opt out of the chalk font and use this instead. */
+  --font-widget: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
 
   --color-ink: #191919;
   --color-panel: #202020;
@@ -54,6 +59,7 @@ html[data-font="mono"] {
 }
 html[data-font="dyslexic"] {
   --font-display: OpenDyslexic, Atkinson Hyperlegible, Verdana, system-ui, sans-serif;
+  --font-widget: OpenDyslexic, Atkinson Hyperlegible, Verdana, system-ui, sans-serif;
   letter-spacing: 0.015em;
   word-spacing: 0.04em;
 }
@@ -124,6 +130,16 @@ html[data-motion="reduced"] *::after {
 
 html[data-captions="off"] [data-tutor-caption] {
   display: none !important;
+}
+
+/* A block's wrapper is full-width, so the empty margin beside a narrow
+   paragraph or widget is really board, not text. Show the grab cursor there and
+   the I-beam only over the rendered content, matching what a click will do. */
+.board-block {
+  cursor: grab;
+}
+.board-block > * {
+  cursor: text;
 }
 
 body {
