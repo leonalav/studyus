@@ -350,6 +350,7 @@ export interface AgentActivity {
 }
 
 function AgentActivityWidget({ activity }: { activity: AgentActivity }) {
+<<<<<<< HEAD
   // Planning/thinking is intentionally a tiny neutral presence. The expanded
   // blue activity card is reserved for an actual board/tool operation.
   if (["planning", "thinking", "responding"].includes(activity.kind)) {
@@ -363,6 +364,8 @@ function AgentActivityWidget({ activity }: { activity: AgentActivity }) {
     );
   }
 
+=======
+>>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
   const done = activity.kind === "complete";
   const failed = activity.kind === "error";
   const active = !done && !failed;
@@ -571,6 +574,29 @@ export function ChatDock({
     reader.readAsDataURL(file);
   };
 
+  const readImageAttachment = (file: File) => {
+    // The Tutor transport accepts data URLs up to 8M characters. Reject before
+    // FileReader allocates a larger base64 copy in the webview.
+    if (!file.type.startsWith("image/")) {
+      setAttachmentError("Choose an image file.");
+      return;
+    }
+    if (file.size > 5_000_000) {
+      setAttachmentError("Images must be 5 MB or smaller.");
+      return;
+    }
+    setAttachmentError("");
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const url = evt.target?.result;
+      if (typeof url === "string" && url.startsWith("data:image/")) {
+        onAddAttachment("image", file.name, url, file.type);
+      } else setAttachmentError("That image could not be read.");
+    };
+    reader.onerror = () => setAttachmentError("That image could not be read.");
+    reader.readAsDataURL(file);
+  };
+
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -752,7 +778,11 @@ export function ChatDock({
           )}
           <textarea
             value={val}
+<<<<<<< HEAD
             rows={Math.min(5, Math.max(1, val.split(/\r?\n/).length))}
+=======
+            rows={1}
+>>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
             aria-label="AI Response message"
             onChange={(e) => setVal(e.target.value)}
             onMouseDown={(e) => e.stopPropagation()}
@@ -764,7 +794,11 @@ export function ChatDock({
             }}
             disabled={rewinding}
             placeholder={rewinding ? "Returning conversation…" : busy ? "Studyus is responding…" : "Ask anything about the board…"}
+<<<<<<< HEAD
             className="max-h-[90px] min-w-0 flex-1 resize-none overflow-y-auto cursor-text bg-transparent text-[11px] leading-[18px] text-white outline-none placeholder:text-white/35 disabled:cursor-wait disabled:opacity-60"
+=======
+            className="max-h-12 min-w-0 flex-1 resize-none cursor-text bg-transparent text-[11px] leading-[18px] text-white outline-none placeholder:text-white/35 disabled:cursor-wait disabled:opacity-60"
+>>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
           />
           <button
             onClick={send}
@@ -887,7 +921,11 @@ export function ChatDock({
             <AgentActivityWidget
               activity={{
                 kind: agentStatus === "writing" ? "writing" : agentStatus === "error" ? "error" : "thinking",
+<<<<<<< HEAD
                 label: agentStatus === "writing" ? "Updating the board" : agentStatus === "error" ? "Could not finish" : "agent is thinking...",
+=======
+                label: agentStatus === "writing" ? "Updating the board" : agentStatus === "error" ? "Could not finish" : "Planning a response",
+>>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
                 detail: agentStatus === "writing" ? "Applying validated board changes" : agentStatus === "error" ? "The operation stopped safely" : "Reading your request and board context",
               }}
             />
@@ -904,7 +942,11 @@ export function ChatDock({
           <div className="flex items-center gap-2 px-2.5 pb-2">
             <textarea
               value={val}
+<<<<<<< HEAD
               rows={Math.min(5, Math.max(1, val.split(/\r?\n/).length))}
+=======
+              rows={1}
+>>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
               aria-label="AI Response message"
               onChange={(e) => setVal(e.target.value)}
               onKeyDown={(e) => {
@@ -915,7 +957,11 @@ export function ChatDock({
               }}
               disabled={rewinding}
               placeholder={rewinding ? "Returning conversation…" : "what if I want to…"}
+<<<<<<< HEAD
               className="max-h-[90px] min-w-0 flex-1 resize-none overflow-y-auto rounded bg-black/15 px-2 py-1.5 text-[10px] leading-relaxed text-white outline-none placeholder:text-white/30 disabled:cursor-wait disabled:opacity-60"
+=======
+              className="max-h-24 min-w-0 flex-1 resize-y rounded bg-black/15 px-2 py-1.5 text-[10px] leading-relaxed text-white outline-none placeholder:text-white/30 disabled:cursor-wait disabled:opacity-60"
+>>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
             />
             <button
               onClick={send}

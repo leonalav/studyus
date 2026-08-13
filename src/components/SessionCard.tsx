@@ -863,7 +863,11 @@ function ContextPicker({
   // The picker's title is the chosen subconcept — that is what replaces
   // "Add context" once a concept is picked from the PDF's bookmarks.
   const label = selectedNode
+<<<<<<< HEAD
     ? formatNodeLabel(selectedNode)
+=======
+    ? [selectedNode.sectionNumber, selectedNode.title].filter(Boolean).join(" ")
+>>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
     : docName ?? meta?.label ?? externalSelection?.label ?? "Add context";
 
   return (
@@ -1009,7 +1013,13 @@ function ContextPicker({
                       })
                     }
                     onPick={(picked) => {
+<<<<<<< HEAD
                       const pickedLabel = formatNodeLabel(picked);
+=======
+                      const pickedLabel = [picked.sectionNumber, picked.title]
+                        .filter(Boolean)
+                        .join(" ");
+>>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
                       setSubsection(picked.id);
                       onSelectionChange?.({ sourceId: doc!, nodeId: picked.id, label: pickedLabel });
                       setOpen(false);
@@ -1132,7 +1142,11 @@ function resolveConcept(
   if (subsectionId) {
     const doc = curricula.find((c) => c.id === docId);
     const node = doc ? findNodeDeep(doc.nodes, subsectionId) : null;
+<<<<<<< HEAD
     if (node) return formatNodeLabel(node);
+=======
+    if (node) return [node.sectionNumber, node.title].filter(Boolean).join(" ") || node.title;
+>>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
   }
   if (docId) {
     const doc = curricula.find((c) => c.id === docId);
