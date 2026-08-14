@@ -244,8 +244,29 @@ components. An incomplete widget renders an explanation ("This widget arrived
 with no frames…") instead of blank chrome, because silence reads as *the tutor
 drew nothing* and the learner never thinks to ask for it again.
 
+**3. Interaction was the real crash path.** The reported failure was a *click*,
+not a first paint. Two things had to be fixed that render-time hardening does
+not reach:
+
+- **The re-render after a click.** Setting `selectedOptionId` or
+  `animationProgress` re-renders the body, and a list containing a `null` entry
+  threw on the first property access. The presence check was not enough:
+  `normalizeIntent` now also drops unusable entries, pads short comparison rows
+  against their column count, and discards an animation `motion` whose
+  `tDomain` or expressions cannot produce a path (falling back to the progress
+  dot, which still teaches). Partial data is repaired rather than rejected —
+  nine good steps out of ten are still worth teaching with.
+- **The handler itself.** React error boundaries **do not catch throws from
+  event handlers**; they escape to `window.onerror` with the board already
+  half-updated. Both interaction choke points — `emit` in `WidgetSurface` and
+  `saveWidgetState` in `StudyRoom` — are wrapped, so a failed interaction costs
+  one click, never the session. The async tutor-signal path releases its
+  dedupe claim on failure, otherwise a single error would permanently prevent
+  that widget from ever waking the tutor again.
+
 `widgetResilience.test.tsx` renders all 17 kinds from a bare `{ kind }`, plus
-structurally-empty and unknown-kind payloads, and asserts none throw.
+structurally-empty, ragged-list, broken-motion and unknown-kind payloads, each
+crossed with ten post-interaction states, and asserts none throw.
 
 ---
 

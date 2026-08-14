@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { WidgetSurface } from "./WidgetSurface";
 import { ErrorBoundary } from "../ErrorBoundary";
-import { WIDGET_KINDS, type WidgetIntent } from "../../lib/widgets/types";
+import { WIDGET_KINDS, type WidgetIntent, type WidgetState } from "../../lib/widgets/types";
 
 /**
  * A widget must never be able to take down the application.
@@ -56,6 +56,128 @@ describe("widget rendering is total", () => {
 
   it("ignores an unknown widget kind from a newer build instead of throwing", () => {
     expect(() => render({ kind: "widget_from_the_future", title: "X" })).not.toThrow();
+  });
+});
+
+describe("interacting with a widget can never throw", () => {
+  // The reported crash was a CLICK, not a first paint: selecting an option or
+  // pressing play sets state, and the RE-RENDER is what threw. Error boundaries
+  // do not catch event handlers either, so both halves are covered — here for
+  // the re-render, and by the try/catch around `emit` and `saveWidgetState` for
+  // the handler itself.
+  const STATES: WidgetState[] = [
+    { selectedOptionId: "o1", submitted: true, correct: false },
+    { selectedOptionId: "no-such-option", submitted: true },
+    { animationProgress: 0 },
+    { animationProgress: 0.5 },
+    { animationProgress: 1 },
+    { hintLevelOpened: 3 },
+    { revealedIds: ["not-an-item"] },
+    { sliderValue: 1e9 },
+    { sliderValue: -1e9 },
+    { responseText: "typed an answer", submitted: true },
+  ];
+
+  it("survives every interaction state on every widget kind", () => {
+    for (const kind of WIDGET_KINDS) {
+      for (const state of STATES) {
+        expect(
+          () =>
+            renderToStaticMarkup(
+              <WidgetSurface intent={{ kind } as WidgetIntent} state={state} chalk="#e8e8ea" accent="#7dd3fc" />
+            ),
+          `${kind} threw for state ${JSON.stringify(state)}`
+        ).not.toThrow();
+      }
+    }
+  });
+
+  it("survives intents whose lists contain unusable entries", () => {
+    // A truncated write or an older build can leave nulls inside an otherwise
+    // present list. Bodies index into these and read fields off each entry.
+    const ragged: unknown[] = [
+      { kind: "roadmap", heading: "h", steps: [null] },
+      { kind: "hint", steps: [null] },
+      { kind: "reveal", items: [null] },
+      { kind: "example", problem: "p", steps: [null] },
+      { kind: "mistake_check", lines: [null] },
+      { kind: "annotation", marks: [null] },
+      { kind: "comparison", columns: [null, null] },
+      { kind: "animation", frames: [null] },
+      { kind: "animation", frames: [{ id: "f", caption: "c" }, undefined] },
+      { kind: "question", format: "multiple_choice", prompt: "p", options: [null] },
+      { kind: "slider", label: "L", parameter: "h", min: 0, max: 1, value: 0, readouts: [null] },
+    ];
+    for (const intent of ragged) {
+      for (const state of STATES) {
+        expect(
+          () =>
+            renderToStaticMarkup(
+              <WidgetSurface intent={intent as WidgetIntent} state={state} chalk="#e8e8ea" accent="#7dd3fc" />
+            ),
+          `${JSON.stringify(intent).slice(0, 70)} threw`
+        ).not.toThrow();
+      }
+    }
+  });
+
+  it("survives an animation whose motion path cannot be computed", () => {
+    // This is the projectile-prediction widget from the report. AnimationBody
+    // destructures motion.tDomain and evaluates two expressions; every one of
+    // these shapes used to throw on the first render after a click.
+    const frames = [{ id: "f", caption: "c" }];
+    const broken: unknown[] = [
+      { kind: "animation", frames, motion: {} },
+      { kind: "animation", frames, motion: null },
+      { kind: "animation", frames, motion: { tDomain: null, xExpression: "t", yExpression: "t" } },
+      { kind: "animation", frames, motion: { tDomain: [1], xExpression: "t", yExpression: "t" } },
+      { kind: "animation", frames, motion: { tDomain: [NaN, NaN], xExpression: "t", yExpression: "t" } },
+      { kind: "animation", frames, motion: { tDomain: [0, 1], xExpression: "@@@", yExpression: "###" } },
+      { kind: "animation", frames, motion: { tDomain: [0, 1] } },
+    ];
+    for (const intent of broken) {
+      for (const state of STATES) {
+        expect(
+          () =>
+            renderToStaticMarkup(
+              <WidgetSurface intent={intent as WidgetIntent} state={state} chalk="#e8e8ea" accent="#7dd3fc" />
+            ),
+          `${JSON.stringify(intent).slice(0, 80)} threw`
+        ).not.toThrow();
+      }
+    }
+  });
+
+  it("keeps a widget usable when only some list entries are unusable", () => {
+    // Dropping the bad entry beats rejecting the widget: nine good steps out of
+    // ten are still worth teaching with.
+    const html = renderToStaticMarkup(
+      <WidgetSurface
+        intent={{ kind: "roadmap", heading: "Derivatives", steps: [null, { id: "s2", label: "The difference quotient" }] } as unknown as WidgetIntent}
+        chalk="#e8e8ea"
+        accent="#7dd3fc"
+        readOnly
+      />
+    );
+    expect(html).toContain("The difference quotient");
+    expect(html).not.toMatch(/nothing to show/);
+  });
+
+  it("pads a comparison row that is shorter than its column count", () => {
+    const html = renderToStaticMarkup(
+      <WidgetSurface
+        intent={{
+          kind: "comparison",
+          columns: [{ id: "a", title: "Secant" }, { id: "b", title: "Tangent" }],
+          rows: [{ id: "r", label: "Touches", cells: ["two points"] }],
+        } as unknown as WidgetIntent}
+        chalk="#e8e8ea"
+        accent="#7dd3fc"
+        readOnly
+      />
+    );
+    expect(html).toContain("two points");
+    expect(html).toContain("Tangent");
   });
 });
 

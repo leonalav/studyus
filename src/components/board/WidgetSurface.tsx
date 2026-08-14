@@ -19,6 +19,7 @@ import { gradeAnswerableWidget } from "../../lib/widgets/validate";
 import { WIDGET_LABEL, type WidgetIntent, type WidgetState, type WidgetKind } from "../../lib/widgets/types";
 import { assessMastery, MASTERY_DIMENSION_LABEL, MASTERY_THRESHOLD } from "../../lib/mastery";
 import { MASTERY_EVIDENCE_DIMENSIONS } from "../../lib/widgets/types";
+import { ErrorBoundary } from "../ErrorBoundary";
 
 export interface WidgetSurfaceProps {
   intent: WidgetIntent;
@@ -172,7 +173,16 @@ export const WidgetSurface = memo(function WidgetSurface({
   const emit = useCallback(
     (patch: WidgetState) => {
       if (readOnly || !onState) return;
-      onState({ ...(state ?? {}), ...patch, interactedAt: new Date().toISOString() });
+      // Every widget interaction funnels through here, and React error
+      // boundaries do NOT catch throws from event handlers — an uncaught one
+      // escapes to window.onerror and can leave the board wedged mid-update
+      // with no fallback UI. Contain it at the single choke point instead: the
+      // learner's click is lost, which is recoverable; the session is not.
+      try {
+        onState({ ...(state ?? {}), ...patch, interactedAt: new Date().toISOString() });
+      } catch (error) {
+        console.error("[widget] failed to record interaction", error);
+      }
     },
     [onState, readOnly, state]
   );
@@ -181,7 +191,12 @@ export const WidgetSurface = memo(function WidgetSurface({
 
   return (
     <WidgetShell intent={intent} chalk={chalk} accent={accent} scale={scale}>
-      {renderBody(intent, shared)}
+      {/* The shell (title, tag, chalk mark) renders outside this boundary, so a
+          body that fails still leaves an identifiable card on the board rather
+          than a hole the learner cannot connect to anything. */}
+      <ErrorBoundary label={WIDGET_LABEL[intent.kind]} resetKey={intent.id ?? intent.kind} fallback={widgetBodyFallback}>
+        {renderBody(intent, shared)}
+      </ErrorBoundary>
     </WidgetShell>
   );
 });
@@ -215,24 +230,115 @@ const REQUIRED_LIST: Partial<Record<WidgetIntent["kind"], string>> = {
   mistake_check: "lines",
 };
 
-/** Returns a human-readable reason the widget cannot be drawn, or null. */
-function incompleteReason(intent: WidgetIntent): string | null {
+/**
+ * Drop list entries that are not usable objects.
+ *
+ * Bodies index into these lists and read fields off each entry. A null or
+ * primitive entry — from a truncated write, a restored session, or an older
+ * build — throws on the first property access. Filtering is preferable to
+ * rejecting the whole widget: nine valid steps out of ten are still worth
+ * teaching with.
+ */
+function usableEntries(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (entry): entry is Record<string, unknown> =>
+      typeof entry === "object" && entry !== null && !Array.isArray(entry)
+  );
+}
+
+/**
+ * Repair an intent into something every body can render without throwing.
+ *
+ * Placement validates intents, but three paths reach the renderer unchecked: a
+ * board restored from a saved session, a payload truncated mid-write, and a
+ * widget authored by an older build. Rather than scatter optional chaining
+ * across seventeen components, normalize once here so each body keeps its
+ * straightforward, readable shape.
+ *
+ * Returns the repaired intent, or a reason string when nothing renderable is
+ * left. Structurally sound intents are returned unchanged (same reference), so
+ * the common path costs one lookup and allocates nothing.
+ */
+function normalizeIntent(intent: WidgetIntent): { intent: WidgetIntent } | { reason: string } {
   const listField = REQUIRED_LIST[intent.kind];
+  const patch: Record<string, unknown> = {};
+
   if (listField) {
-    const value = (intent as unknown as Record<string, unknown>)[listField];
-    if (!Array.isArray(value) || value.length === 0) return `no ${listField}`;
+    const raw = (intent as unknown as Record<string, unknown>)[listField];
+    if (!Array.isArray(raw) || raw.length === 0) return { reason: `no ${listField}` };
+    const usable = usableEntries(raw);
+    if (usable.length === 0) return { reason: `no readable ${listField}` };
+    if (usable.length !== raw.length) patch[listField] = usable;
   }
+
   if (intent.kind === "slider") {
-    const { min, max, value } = intent as unknown as { min?: number; max?: number; value?: number };
-    if (![min, max, value].every((n) => typeof n === "number" && Number.isFinite(n))) {
-      return "an incomplete range";
+    const { min, max, value } = intent as unknown as { min?: unknown; max?: unknown; value?: unknown };
+    const finite = (n: unknown) => typeof n === "number" && Number.isFinite(n);
+    if (!finite(min) || !finite(max) || !finite(value)) return { reason: "an incomplete range" };
+    const readouts = (intent as unknown as { readouts?: unknown }).readouts;
+    if (Array.isArray(readouts)) patch.readouts = usableEntries(readouts);
+  }
+
+  if (intent.kind === "comparison") {
+    // Rows are indexed positionally against columns; a short row would read
+    // undefined and throw. Pad rather than drop so the learner still sees the
+    // comparison the tutor drew.
+    const columns = usableEntries((intent as unknown as Record<string, unknown>).columns);
+    const rows = usableEntries((intent as unknown as Record<string, unknown>).rows);
+    const padded = rows.map((row) => {
+      const cells = Array.isArray(row.cells) ? row.cells : [];
+      return cells.length === columns.length
+        ? row
+        : { ...row, cells: columns.map((_, index) => cells[index] ?? "") };
+    });
+    if (padded.some((row, index) => row !== rows[index])) patch.rows = padded;
+    else if (rows.length !== (Array.isArray((intent as unknown as Record<string, unknown>).rows)
+      ? ((intent as unknown as Record<string, unknown>).rows as unknown[]).length
+      : 0)) patch.rows = padded;
+  }
+
+  if (intent.kind === "animation") {
+    // The motion path destructures tDomain and evaluates two expressions. Any
+    // of those being absent or non-numeric leaves no path to draw; dropping
+    // motion falls back to the simple progress dot, which still teaches.
+    const motion = (intent as unknown as { motion?: unknown }).motion;
+    if (motion !== undefined) {
+      const m = motion as { tDomain?: unknown; xExpression?: unknown; yExpression?: unknown } | null;
+      const domain = m && Array.isArray(m.tDomain) ? m.tDomain : null;
+      const ok =
+        m !== null &&
+        typeof m === "object" &&
+        domain !== null &&
+        domain.length >= 2 &&
+        domain.slice(0, 2).every((n) => typeof n === "number" && Number.isFinite(n)) &&
+        typeof m.xExpression === "string" &&
+        typeof m.yExpression === "string";
+      if (!ok) patch.motion = undefined;
     }
   }
+
+  if (intent.kind === "question" || intent.kind === "retrieval_check" || intent.kind === "challenge") {
+    const options = (intent as unknown as { options?: unknown }).options;
+    if (Array.isArray(options)) patch.options = usableEntries(options);
+  }
+
   if (intent.kind === "mastery_card") {
     const evidence = (intent as unknown as { evidence?: unknown }).evidence;
-    if (!evidence || typeof evidence !== "object") return "no evidence";
+    if (!evidence || typeof evidence !== "object") return { reason: "no evidence" };
   }
-  return null;
+
+  if (Object.keys(patch).length === 0) return { intent };
+  return { intent: { ...intent, ...patch } as WidgetIntent };
+}
+
+/** Shown when a widget body throws despite normalization. */
+function widgetBodyFallback() {
+  return (
+    <div className="text-[10.5px] opacity-60">
+      This widget could not be drawn. The rest of the board is unaffected.
+    </div>
+  );
 }
 
 /** Shown in place of a widget whose payload cannot be drawn. */
@@ -245,9 +351,10 @@ function IncompleteWidget({ reason }: { reason: string }) {
   );
 }
 
-function renderBody(intent: WidgetIntent, props: BodyProps) {
-  const reason = incompleteReason(intent);
-  if (reason) return <IncompleteWidget reason={reason} />;
+function renderBody(rawIntent: WidgetIntent, props: BodyProps) {
+  const normalized = normalizeIntent(rawIntent);
+  if ("reason" in normalized) return <IncompleteWidget reason={normalized.reason} />;
+  const intent = normalized.intent;
 
   switch (intent.kind) {
     case "roadmap": return <RoadmapBody intent={intent} {...props} />;

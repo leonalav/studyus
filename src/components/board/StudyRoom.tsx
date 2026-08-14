@@ -348,52 +348,70 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   // worksheet instead of a lesson.
   const saveWidgetState = useCallback(
     (blockId: string, state: WidgetState) => {
-      const safe = sanitizeWidgetState(state);
-      if (!safe) return;
+      // Called straight from a widget's event handler. React error boundaries
+      // do not catch throws from handlers, so anything escaping here reaches
+      // window.onerror with the board already half-updated. Every failure below
+      // is contained: losing one interaction is recoverable, losing the session
+      // is not.
+      try {
+        const safe = sanitizeWidgetState(state);
+        if (!safe) return;
 
-      const target = boardsRef.current
-        .find((b) => b.id === activeId)
-        ?.blocks.find((blk) => blk.id === blockId);
-      const widget = target?.kind === "widget" ? target : null;
+        const target = boardsRef.current
+          .find((b) => b.id === activeId)
+          ?.blocks.find((blk) => blk.id === blockId);
+        const widget = target?.kind === "widget" ? target : null;
 
-      setBoards((current) =>
-        current.map((b) =>
-          b.id === activeId
-            ? {
-                ...b,
-                blocks: b.blocks.map((blk) =>
-                  blk.id === blockId && blk.kind === "widget" ? { ...blk, state: safe } : blk
-                ),
-              }
-            : b
-        )
-      );
+        setBoards((current) =>
+          current.map((b) =>
+            b.id === activeId
+              ? {
+                  ...b,
+                  blocks: b.blocks.map((blk) =>
+                    blk.id === blockId && blk.kind === "widget" ? { ...blk, state: safe } : blk
+                  ),
+                }
+              : b
+          )
+        );
 
-      if (!widget) return;
-      // Only a committed answer wakes the tutor; exploration must not. Decided
-      // synchronously so a double click cannot slip two turns through the
-      // await below.
-      if (!shouldSignalTutor(widget.intent, widget.state, safe)) return;
-      if (signalledWidgets.current.has(blockId)) return;
-      signalledWidgets.current.add(blockId);
+        if (!widget) return;
+        // Only a committed answer wakes the tutor; exploration must not. Decided
+        // synchronously so a double click cannot slip two turns through the
+        // await below.
+        if (!shouldSignalTutor(widget.intent, widget.state, safe)) return;
+        if (signalledWidgets.current.has(blockId)) return;
+        signalledWidgets.current.add(blockId);
 
-      const previousState = widget.state;
-      void (async () => {
-        const { stage } = await getSessionMasteryStage(sessionId);
-        const signal = buildWidgetSignal(blockId, widget.intent, previousState, safe, stage);
-        if (!signal) {
-          signalledWidgets.current.delete(blockId);
-          return;
-        }
-        // Routed through the normal turn path so the full tutor contract
-        // applies, but shown as the learner's own board action rather than a
-        // chat message they did not type.
-        void handleSendRef.current?.(signal.message, undefined, false, {
-          kind: "widget",
-          displayText: signal.displayText,
-          signalKey: blockId,
-        });
-      })();
+        const previousState = widget.state;
+        void (async () => {
+          try {
+            const { stage } = await getSessionMasteryStage(sessionId);
+            const signal = buildWidgetSignal(blockId, widget.intent, previousState, safe, stage);
+            if (!signal) {
+              signalledWidgets.current.delete(blockId);
+              return;
+            }
+            // Routed through the normal turn path so the full tutor contract
+            // applies, but shown as the learner's own board action rather than a
+            // chat message they did not type.
+            void handleSendRef.current?.(signal.message, undefined, false, {
+              kind: "widget",
+              displayText: signal.displayText,
+              signalKey: blockId,
+            });
+          } catch (error) {
+            // Release the dedupe claim, or this widget could never wake the tutor
+            // again for the rest of the session — a silent dead end far worse
+            // than one failed turn. The answer itself is already saved above.
+            signalledWidgets.current.delete(blockId);
+            console.error("[widget] failed to signal the tutor", error);
+            notify("Your answer was saved, but the tutor could not be reached");
+          }
+        })();
+      } catch (error) {
+        console.error("[widget] failed to record interaction", error);
+      }
     },
     [activeId, sessionId]
   );

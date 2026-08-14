@@ -11,6 +11,14 @@ import { initializePreferences } from "./lib/preferences";
 // when the learner chose Light or follows a light system theme.
 initializePreferences();
 
+// Last-resort visibility. Error boundaries cover render; the try/catch at each
+// interaction choke point covers handlers. Anything still reaching here is a
+// defect we want recorded rather than silently swallowed — and crucially, an
+// unhandled rejection must not be left to blank the page.
+window.addEventListener("unhandledrejection", (event) => {
+  console.error("[studyus] unhandled promise rejection", event.reason);
+});
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     {/* Last line of defence. Inner boundaries should catch failures long before
