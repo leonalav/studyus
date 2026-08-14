@@ -215,6 +215,40 @@ a signal whose turn fails is released for retry.
 
 ---
 
+## Failure containment
+
+A white screen mid-session is the worst outcome this app can produce: the
+learner loses the board, the transcript, and any sense of what went wrong. Two
+independent defects combined to allow it, and both are now closed.
+
+**1. Nothing caught render errors.** The app had no error boundary at all, so
+any throw anywhere unmounted the entire React tree. Boundaries now sit at three
+levels, each containing failure at the smallest honest unit:
+
+| Level | Catches | Learner sees |
+| --- | --- | --- |
+| Per block (`Chalkboard`) | One widget or visualization | An inline card naming the block; every other block survives |
+| Board shell (`StudyRoom`) | Pan/zoom, annotation canvas | "This board could not be drawn" + Redraw; chat and toolbar stay usable |
+| Root (`main.tsx`) | Anything else | Explanation, the error message, and a Reload button |
+
+Boundaries take a `resetKey` (the board or block id) so navigating away from a
+broken board clears the error instead of stranding the learner on a dead card.
+
+**2. Ten of seventeen widgets threw on malformed input.** Placement validates
+every intent, but three paths reach the renderer unchecked: a board restored
+from a saved session, a payload truncated mid-write, and a widget authored by an
+older build. `renderBody` now screens each intent through `incompleteReason`
+before dispatching — one auditable list of the structural fields each body
+dereferences, rather than optional chaining scattered across seventeen
+components. An incomplete widget renders an explanation ("This widget arrived
+with no frames…") instead of blank chrome, because silence reads as *the tutor
+drew nothing* and the learner never thinks to ask for it again.
+
+`widgetResilience.test.tsx` renders all 17 kinds from a bare `{ kind }`, plus
+structurally-empty and unknown-kind payloads, and asserts none throw.
+
+---
+
 ## Typography and hit area
 
 **Widgets do not use the chalk font.** The board applies a cursive handwriting
@@ -283,3 +317,4 @@ notebook can turn it off and keep everything drawn.
 | `src/lib/tutor.prompt.test.ts` | Prompt carries the directive, ladder, widget catalog and invariants |
 | `src/lib/widgets/signal.test.ts` | Which interactions wake the tutor, and the pedagogical obligation each one creates |
 | `src/components/board/boardRevert.test.ts` | Snapshot storage bound, recency, and isolation from later mutation |
+| `src/components/board/widgetResilience.test.tsx` | No widget payload can throw; the error boundary fallback is actionable |

@@ -6,7 +6,8 @@ import { Latex, ChalkStrong } from "./Visuals";
 import { VisualizationSurface } from "./VisualizationSurface";
 import { WidgetSurface } from "./WidgetSurface";
 import type { VisualizationState } from "../../lib/visualization/types";
-import type { WidgetState } from "../../lib/widgets/types";
+import { WIDGET_LABEL, type WidgetState } from "../../lib/widgets/types";
+import { ErrorBoundary } from "../ErrorBoundary";
 
 export interface BoardTheme {
   id: "classic" | "blueprint" | "carbon";
@@ -444,7 +445,13 @@ export function Chalkboard({
               className={`${readOnly ? "" : containsVisualization(b) ? "anim-chalk-visual" : "anim-chalk"} ${readOnly ? "cursor-default" : "board-block select-text"} ${SHRINK_WRAP_BLOCKS.has(b.kind) ? "w-fit max-w-full" : ""}`}
               style={{ animationDelay: `${Math.min(i, 4) * 40}ms` }}
             >
-              <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={b.id} readOnly={readOnly} />
+              {/* One malformed block must never blank the board. A widget with
+                  a truncated payload, a visualization with impossible bounds:
+                  contain it here so every other block the tutor drew survives
+                  and the session stays usable. */}
+              <ErrorBoundary label={blockLabel(b)} resetKey={b.id}>
+                <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={b.id} readOnly={readOnly} />
+              </ErrorBoundary>
             </div>
           ))}
 
@@ -700,7 +707,9 @@ const BlockView = memo(function BlockView({
         <div className="grid grid-cols-1 gap-8 md:grid-cols-2 md:items-start">
           {block.children.map((child) => (
             <div key={child.id} data-block className="min-w-0">
+              <ErrorBoundary label={blockLabel(child)} resetKey={child.id}>
               <BlockView block={child} chalk={chalk} accent={accent} scale={scale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={child.id} readOnly={readOnly} />
+              </ErrorBoundary>
             </div>
           ))}
         </div>
@@ -709,6 +718,13 @@ const BlockView = memo(function BlockView({
       return null;
   }
 });
+
+/** Name a block for an error message the learner can actually act on. */
+function blockLabel(block: Block): string {
+  if (block.kind === "widget") return `${WIDGET_LABEL[block.intent.kind]} widget`;
+  if (block.kind === "visualization") return "Visualization";
+  return "Board block";
+}
 
 function containsVisualization(block: Block): boolean {
   return block.kind === "visualization"

@@ -31,6 +31,7 @@ import { ContextMenu, ContextMenuTarget } from "../ContextMenu";
 import { toPng } from "html-to-image";
 import { saveStudySession, type StoredStudySession } from "../../state/studySessionStore";
 import type { OnboardingAnswers } from "../../data/tutor";
+import { ErrorBoundary } from "../ErrorBoundary";
 import {
   PREFERENCES_CHANGED_EVENT,
   loadPreferences,
@@ -809,6 +810,31 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     >
       {/* the shared screen frame */}
       <div className="share-frame absolute inset-2 overflow-hidden rounded-lg">
+        {/* Per-block boundaries inside Chalkboard catch content failures. This
+            one catches the board shell itself (pan/zoom, annotation canvas) so
+            a failure there still leaves the chat dock and toolbar usable and
+            the session recoverable rather than blanking the window. */}
+        <ErrorBoundary
+          label="Chalkboard"
+          resetKey={board.id}
+          fallback={(_error, reset) => (
+            <div className="grid h-full w-full place-items-center bg-[#191b1f] px-6 text-center">
+              <div className="max-w-sm">
+                <div className="text-[14px] font-medium text-white/90">This board could not be drawn</div>
+                <p className="mt-1.5 text-[12px] leading-relaxed text-white/55">
+                  Your transcript and notes are safe. Reopening the board usually clears it.
+                </p>
+                <button
+                  type="button"
+                  onClick={reset}
+                  className="mt-3 rounded-md bg-white/12 px-3 py-1.5 text-[12px] text-white/90 hover:bg-white/20"
+                >
+                  Redraw board
+                </button>
+              </div>
+            </div>
+          )}
+        >
         <Chalkboard
           board={board}
           theme={theme}
@@ -830,6 +856,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           onBlockStateChange={saveBlockState}
           onWidgetStateChange={saveWidgetState}
         />
+        </ErrorBoundary>
       </div>
 
       <BoardToolbar

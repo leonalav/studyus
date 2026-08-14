@@ -194,7 +194,61 @@ interface BodyProps {
   readOnly: boolean;
 }
 
+/**
+ * Structural content each widget body dereferences unconditionally.
+ *
+ * Placement validates every intent, but a board restored from a saved session,
+ * a payload truncated mid-write, or a widget authored by an older build reaches
+ * the renderer unchecked. Those bodies used to throw on the missing field and —
+ * before error boundaries existed — blank the entire application. Naming the
+ * requirement here keeps the check in one auditable place instead of scattering
+ * optional chaining through seventeen components.
+ */
+const REQUIRED_LIST: Partial<Record<WidgetIntent["kind"], string>> = {
+  roadmap: "steps",
+  animation: "frames",
+  comparison: "columns",
+  hint: "steps",
+  annotation: "marks",
+  reveal: "items",
+  example: "steps",
+  mistake_check: "lines",
+};
+
+/** Returns a human-readable reason the widget cannot be drawn, or null. */
+function incompleteReason(intent: WidgetIntent): string | null {
+  const listField = REQUIRED_LIST[intent.kind];
+  if (listField) {
+    const value = (intent as unknown as Record<string, unknown>)[listField];
+    if (!Array.isArray(value) || value.length === 0) return `no ${listField}`;
+  }
+  if (intent.kind === "slider") {
+    const { min, max, value } = intent as unknown as { min?: number; max?: number; value?: number };
+    if (![min, max, value].every((n) => typeof n === "number" && Number.isFinite(n))) {
+      return "an incomplete range";
+    }
+  }
+  if (intent.kind === "mastery_card") {
+    const evidence = (intent as unknown as { evidence?: unknown }).evidence;
+    if (!evidence || typeof evidence !== "object") return "no evidence";
+  }
+  return null;
+}
+
+/** Shown in place of a widget whose payload cannot be drawn. */
+function IncompleteWidget({ reason }: { reason: string }) {
+  return (
+    <div className="text-[10.5px] opacity-60">
+      This widget arrived with {reason}, so there is nothing to show yet. Ask the
+      tutor to place it again.
+    </div>
+  );
+}
+
 function renderBody(intent: WidgetIntent, props: BodyProps) {
+  const reason = incompleteReason(intent);
+  if (reason) return <IncompleteWidget reason={reason} />;
+
   switch (intent.kind) {
     case "roadmap": return <RoadmapBody intent={intent} {...props} />;
     case "concept_card": return <ConceptCardBody intent={intent} {...props} />;
@@ -1136,7 +1190,11 @@ function MasteryCardBody({ intent, chalk, accent }: BodyProps & { intent: Extrac
 
       <div className="mt-2 space-y-1">
         {MASTERY_EVIDENCE_DIMENSIONS.map((dimension) => {
-          const score = Math.round(Math.min(100, Math.max(0, intent.evidence[dimension])));
+          // A dimension absent from a drifted payload reads as 0 rather than
+          // NaN: an unproven dimension is exactly what a missing score means,
+          // and the weakest-link verdict stays honest.
+          const raw = intent.evidence[dimension];
+          const score = Math.round(Math.min(100, Math.max(0, Number.isFinite(raw) ? raw : 0)));
           const isWeakest = dimension === assessment.weakestLink;
           const met = score >= MASTERY_THRESHOLD;
           return (
