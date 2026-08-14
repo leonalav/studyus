@@ -134,6 +134,7 @@ export type BoardOp =
   | ({ op: "update_visualization"; intent?: VisualizationIntent; statePatch?: VisualizationStatePatch } & BoardTargetSpec)
   | ({ op: "update_widget"; intent: WidgetIntent } & BoardTargetSpec)
   | ({ op: "revise_text"; find: string; replace: string; replaceAll?: boolean } & BoardTargetSpec)
+  | ({ op: "redraw_block" } & BoardTargetSpec)
   | {
       op: "spawn_thread";
       title: string;
@@ -454,6 +455,12 @@ export function enforceTutorToolPolicy(
       case "delete_block":
       case "revise_text":
         return tools.boardEditing ? [op] : [];
+      // Redrawing is a repair, not an edit: it changes no content, only forces
+      // a fresh mount of a block the learner says they cannot see. Gating it
+      // behind boardEditing would leave a learner stuck with a blank widget in
+      // a read-mostly configuration, which is the exact situation it exists for.
+      case "redraw_block":
+        return [op];
       case "update_visualization":
         return visualizationUpdateAllowed(op, tools, board) ? [op] : [];
       case "spawn_thread": {
@@ -878,6 +885,7 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
     "update_visualization",
     "update_widget",
     "revise_text",
+    "redraw_block",
     "spawn_thread",
   ], `${path}.op`, errors);
   if (!op) return null;
@@ -946,7 +954,8 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
       if (!target || !block) return null;
       return { op, ...target, block } as BoardOp;
     }
-    case "delete_block": {
+    case "delete_block":
+    case "redraw_block": {
       const target = validateBoardTarget(rec, path, errors);
       if (!target) return null;
       return { op, ...target } as BoardOp;
@@ -1757,7 +1766,7 @@ export function buildTutorUserPrompt(params: {
     `Return JSON only, in this exact shape:\n` +
       `{\n` +
       `  "speech": "<your reply to the learner — one or two sentences, direct and helpful. When the learner explicitly asked for a visualization, confirm what you drew instead of asking a question>",\n` +
-      `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "place_widget" | "update_widget" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text" | "spawn_thread", ...fields }, ... ],\n` +
+      `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "place_widget" | "update_widget" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text" | "redraw_block" | "spawn_thread", ...fields }, ... ],\n` +
       `  "stage": "encounter"|"understand"|"construct"|"apply"|"transfer"|"master" /* the mastery stage you are teaching in this turn */,\n` +
       `  "stage_advance": { "ready": boolean, "evidence": "<what the learner did that satisfies this stage's exit condition>" } /* optional; ready:true REQUIRES evidence */,\n` +
       `  "diagnosis": { "misconceptions": [string], "weak_criteria": [string], "hint_dependence": "none"|"low"|"medium"|"high", "calibration": "under"|"over"|"accurate" } /* optional */,\n` +
@@ -1771,6 +1780,7 @@ export function buildTutorUserPrompt(params: {
       `- spawn_thread: { "op", "title": string, "reason": string, "initial_blocks": BoardBlockSpec[] } — creates a logged child board in Threads without leaving the current board. Use it only when a substantial, separable investigation would clutter or derail the current explanation; never spawn a thread for a routine answer. Create at most one per turn, keep title/reason learner-facing, and include at most ${MAX_THREAD_INITIAL_BLOCKS} useful starter blocks.\n` +
       `- place_widget: { "op", "intent": WidgetIntent } — appends a new study widget. This is how you teach: every widget below is a specific pedagogical move with its own required fields.\n` +
       `- update_widget: { "op", targetAnchor?|targetIndex?|targetMatchText?, "intent": WidgetIntent } — reconfigures an existing widget in place, keeping the learner's answers and interaction state. Use it to mark the next roadmap step current, add a deeper hint level, or reveal a mistake_check correction after the learner has responded — never append a second copy of a widget you already placed.\n` +
+      `- redraw_block: { "op", targetAnchor?|targetIndex?|targetMatchText? } — force a block to re-render from scratch, keeping its content exactly as-is. Use this ONLY when the learner reports they cannot see something you placed ("the widget is blank", "the diagram didn't load", "I can't see the equation"). It repairs a block that failed to draw; it does not change what the block says. Acknowledge it plainly ("Redrawing that now") and, if it still does not appear after one redraw, place the content again in a different form rather than redrawing a second time.\n` +
       `WIDGET CATALOG — a widget "intent" is keyed on its "kind" field (visualization intents remain keyed on "type"). Graphs, geometry/points, and equations are NOT widgets: emit those through visualize as "function", "geometry", and "equation" intents.\n` +
       `${formatWidgetCatalog()}\n` +
       `- visualize: { "op", "intent": VisualizationIntent } — appends a new visualization block. Use this immediately when the learner explicitly asks for a diagram, graph, plot, or structure. ` +

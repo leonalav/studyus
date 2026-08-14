@@ -1096,6 +1096,13 @@ function activityForBoardOp(op: BoardOp, index: number, total: number): AgentAct
         detail: "Deleting the targeted block",
         progress,
       };
+    case "redraw_block":
+      return {
+        kind: "revising",
+        label: "Redrawing that for you",
+        detail: "Remounting the block so it renders from scratch",
+        progress,
+      };
     case "insert_after":
       return {
         kind: "writing",
@@ -1349,9 +1356,31 @@ function widgetSearchText(intent: WidgetIntent): string {
   return parts.filter(Boolean).join(" ");
 }
 
+/** Drop any previous redraw suffix so repeated redraws do not grow the id
+ *  unboundedly, and so the tutor's original anchor still matches. */
+function stripRedrawSuffix(id: string): string {
+  return id.replace(/~r[0-9a-z]+$/, "");
+}
+
+/** Monotonic, so two redraws within the same millisecond still produce
+ *  different ids. An identical id would leave React's key unchanged and skip
+ *  the remount entirely — the exact repair the learner asked for. */
+let redrawCounter = 0;
+function redrawId(id: string): string {
+  redrawCounter += 1;
+  return `${stripRedrawSuffix(id)}~r${redrawCounter.toString(36)}${Date.now().toString(36)}`;
+}
+
 function resolveBoardTargetIndex(board: BoardDoc, op: Record<string, any>): number {
   if (typeof op.targetAnchor === "string" && op.targetAnchor.trim()) {
-    return board.blocks.findIndex((block) => block.id === op.targetAnchor.trim());
+    const anchor = op.targetAnchor.trim();
+    const exact = board.blocks.findIndex((block) => block.id === anchor);
+    if (exact >= 0) return exact;
+    // A redrawn block carries a fresh id, but the tutor is still holding the
+    // id it was given when the block was placed. Match through the suffix so a
+    // redraw does not orphan every later update targeting that block.
+    const base = stripRedrawSuffix(anchor);
+    return board.blocks.findIndex((block) => stripRedrawSuffix(block.id) === base);
   }
   if (Number.isInteger(op.targetIndex)) {
     return op.targetIndex >= 0 && op.targetIndex < board.blocks.length ? op.targetIndex : -1;
@@ -1388,7 +1417,7 @@ function reviseBlockText(block: BoardDoc["blocks"][number], find: string, replac
   }
 }
 
-function applyBoardOp(board: BoardDoc, op: Record<string, any>, domain: BoardDoc["domain"]): BoardDoc {
+export function applyBoardOp(board: BoardDoc, op: Record<string, any>, domain: BoardDoc["domain"]): BoardDoc {
   switch (op.op) {
     case "replace_block": {
       const index = resolveBoardTargetIndex(board, op);
@@ -1412,6 +1441,19 @@ function applyBoardOp(board: BoardDoc, op: Record<string, any>, domain: BoardDoc
       const index = resolveBoardTargetIndex(board, op);
       if (index < 0) return board;
       return { ...board, blocks: board.blocks.filter((_, i) => i !== index) };
+    }
+    case "redraw_block": {
+      // "I can't see it" repair. Content is untouched; only the block's id
+      // changes, and React keys the block list by id, so the old subtree
+      // unmounts and a brand-new one mounts. That clears a tripped error
+      // boundary, a failed lazy-loaded adapter, or a widget wedged in a bad
+      // internal state — none of which a content edit would fix.
+      const index = resolveBoardTargetIndex(board, op);
+      if (index < 0) return board;
+      const target = board.blocks[index];
+      const blocks = board.blocks.slice();
+      blocks[index] = { ...target, id: redrawId(target.id) };
+      return { ...board, blocks };
     }
     case "update_visualization": {
       const index = resolveBoardTargetIndex(board, op);

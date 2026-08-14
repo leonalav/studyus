@@ -129,6 +129,24 @@ describe("Tutor turn schema validation", () => {
     if (res.ok) expect(res.value.boardOps).toHaveLength(turns.length);
   });
 
+  it("accepts redraw_block, the 'I cannot see it' repair", () => {
+    // Content-preserving: it carries no payload beyond the target, because a
+    // redraw must never quietly change what the block says.
+    const res = validateTutorPayload(
+      validTurn({ board_ops: [{ op: "redraw_block", targetAnchor: "agent-vis-1" }] }),
+      EVIDENCE
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value.boardOps[0]).toEqual({ op: "redraw_block", targetAnchor: "agent-vis-1" });
+  });
+
+  it("requires a target for redraw_block", () => {
+    // Without a target there is no way to know what the learner cannot see,
+    // and redrawing an arbitrary block would look like a random glitch.
+    const res = validateTutorPayload(validTurn({ board_ops: [{ op: "redraw_block" }] }), EVIDENCE);
+    expect(res.ok).toBe(false);
+  });
+
   it("accepts and normalizes a bounded agent thread operation", () => {
     const res = validateTutorPayload(validTurn({
       board_ops: [{

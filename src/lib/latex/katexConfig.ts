@@ -61,6 +61,18 @@ export const MACROS: Readonly<Record<string, string>> = Object.freeze({
 })
 
 /**
+ * A fresh, MUTABLE macro map for one KaTeX call.
+ *
+ * KaTeX treats the `macros` option as scratch space: expanding `\\begin{cases}`
+ * (or aligned/matrix/array) makes it define `\\cr` inside the map. Sharing one
+ * object across calls also leaks those definitions between renders. Always hand
+ * KaTeX its own copy.
+ */
+export function freshMacros(): Record<string, string> {
+  return { ...MACROS }
+}
+
+/**
  * The frozen, shared KaTeX options.
  *
  * `strict: 'ignore'` — a tutoring model emits imperfect LaTeX constantly
@@ -81,7 +93,12 @@ export const KATEX_OPTIONS: Readonly<KatexOptions> = Object.freeze({
   throwOnError: false,
   strict: 'ignore',
   output: 'html',
-  macros: MACROS,
+  // NOT the frozen MACROS object. KaTeX WRITES into the macros map while
+  // expanding multi-line environments — it stores `\\cr` there — so passing a
+  // frozen object throws "Cannot add property \\cr, object is not extensible"
+  // and fails EVERY \begin{cases}/aligned/matrix render straight through to
+  // the raw-source fallback. `macros()` hands out a fresh mutable copy.
+  macros: { ...MACROS },
   // Typed loosely: `@types/katex` and the version bundled with the `katex`
   // package ship slightly different `TrustContext` unions (neither lists
   // `\color`), so we accept a structural `{ command?: string }` and compare the

@@ -1,5 +1,5 @@
 import katex from 'katex'
-import { KATEX_VALIDATE_OPTIONS } from './katexConfig'
+import { KATEX_VALIDATE_OPTIONS, freshMacros } from './katexConfig'
 
 /**
  * KaTeX-backed validation, memoised. `render.ts` uses this to decide whether a
@@ -43,7 +43,7 @@ export function validate(tex: string, displayMode: boolean): ValidateResult {
 
   let result: ValidateResult
   try {
-    katex.renderToString(tex, { ...KATEX_VALIDATE_OPTIONS, displayMode })
+    katex.renderToString(tex, { ...KATEX_VALIDATE_OPTIONS, macros: freshMacros(), displayMode })
     result = { ok: true }
   } catch (e) {
     result = { ok: false, error: e instanceof Error ? e.message : String(e) }

@@ -270,6 +270,53 @@ crossed with ten post-interaction states, and asserts none throw.
 
 ---
 
+## LaTeX must never leak its source
+
+A Concept Card rendered the literal text `raw LaTeX\begin{cases} x = f(t) …`
+onto the board. The LaTeX was valid; the renderer was broken.
+
+**Root cause.** KaTeX *writes into* the `macros` option while expanding a
+multi-line environment — it defines `\cr` there. `KATEX_OPTIONS.macros` pointed
+at an `Object.freeze`d map, so KaTeX threw `Cannot add property \cr, object is
+not extensible` and the render ladder fell through to its rung-3 raw-source
+fallback. This broke **every** `cases`, `aligned`, `matrix`, `pmatrix`,
+`bmatrix` and `array` in the entire app, not just widgets. `freshMacros()` now
+hands each call its own mutable copy; note that `{ ...KATEX_OPTIONS }` is a
+shallow spread and does *not* copy the nested map, so all three call sites pass
+`macros: freshMacros()` explicitly.
+
+**Defence in depth.** The rung-3 fallback still exists — silently dropping an
+equation is worse than showing its source — but it no longer reads as leaked
+plumbing. It is labelled *unrendered maths* rather than *raw LaTeX* and styled
+as a quiet dashed inline note (`.latex-raw`) instead of an unstyled code block.
+
+## Redrawing a block the learner cannot see
+
+`redraw_block { targetAnchor | targetIndex | targetMatchText }` forces a block
+to re-render with its content untouched. The board keys its block list by id, so
+assigning a fresh id unmounts the old subtree and mounts a new one — clearing a
+tripped error boundary, a failed lazy-loaded adapter, or a widget wedged in a
+bad internal state. None of those are repaired by editing content, which is why
+this is separate from `update_widget`.
+
+- **Learner state survives.** A redraw keeps `state`, so reporting a display bug
+  never costs the learner their answer.
+- **Anchors keep resolving.** The tutor still holds the id from placement time,
+  so `resolveBoardTargetIndex` matches through the `~r…` suffix. Without that,
+  one redraw would silently orphan every later update to that block.
+- **The suffix never accumulates**, and its counter is monotonic so two redraws
+  in the same millisecond still differ — an identical id would leave React's key
+  unchanged and skip the remount entirely.
+- **Not gated behind `boardEditing`.** It changes no content, and gating it
+  would strand a learner with a blank widget in exactly the configuration the op
+  exists to rescue.
+
+The prompt instructs the tutor to use it only when the learner reports they
+cannot see something, and to re-place the content in a different form rather
+than redrawing twice.
+
+---
+
 ## Typography and hit area
 
 **Widgets do not use the chalk font.** The board applies a cursive handwriting

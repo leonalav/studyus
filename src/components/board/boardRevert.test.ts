@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pruneSnapshotsForStorage } from "./StudyRoom";
+import { pruneSnapshotsForStorage, applyBoardOp } from "./StudyRoom";
 import type { BoardSnapshot, ChatMsg } from "./BoardPanels";
 import type { BoardDoc } from "../../data/boards";
 
@@ -90,5 +90,63 @@ describe("snapshot isolation", () => {
 
     const restored = captured.boards[0].blocks[0];
     expect(restored.kind === "text" && restored.text).toBe("original");
+  });
+});
+
+describe("redraw_block", () => {
+  /**
+   * The "I can't see it" repair. React keys the board's block list by id, so
+   * changing only the id unmounts the old subtree and mounts a fresh one —
+   * clearing a tripped error boundary, a failed lazy adapter, or a widget
+   * wedged in a bad internal state. None of those are fixed by editing content,
+   * which is why this op exists separately from update_widget.
+   */
+  const board = {
+    id: "b1",
+    title: "T",
+    subtitle: "",
+    domain: "math" as const,
+    blocks: [
+      { id: "keep", kind: "text" as const, text: "untouched" },
+      {
+        id: "agent-w1",
+        kind: "widget" as const,
+        intent: { kind: "concept_card" as const, term: "Derivative", definition: "d" },
+        state: { submitted: true },
+      },
+    ],
+  };
+
+  it("gives the block a new id so React remounts it", () => {
+    const next = applyBoardOp(board, { op: "redraw_block", targetAnchor: "agent-w1" }, "math");
+    expect(next.blocks[1].id).not.toBe("agent-w1");
+    expect(next.blocks[1].id.startsWith("agent-w1~r")).toBe(true);
+  });
+
+  it("changes nothing else — not content, not learner state, not siblings", () => {
+    const next = applyBoardOp(board, { op: "redraw_block", targetAnchor: "agent-w1" }, "math");
+    const before = board.blocks[1] as Record<string, unknown>;
+    const after = next.blocks[1] as Record<string, unknown>;
+    expect(after.intent).toEqual(before.intent);
+    // The learner's answer must survive a redraw; losing it would punish them
+    // for reporting a display bug.
+    expect(after.state).toEqual(before.state);
+    expect(next.blocks[0]).toEqual(board.blocks[0]);
+    expect(next.blocks).toHaveLength(2);
+  });
+
+  it("still resolves the tutor's original anchor after a redraw", () => {
+    // The tutor holds the id it was given at placement time. If a redraw
+    // orphaned that anchor, every later update to the block would silently
+    // no-op — a far worse failure than the blank widget being repaired.
+    const once = applyBoardOp(board, { op: "redraw_block", targetAnchor: "agent-w1" }, "math");
+    const twice = applyBoardOp(once, { op: "redraw_block", targetAnchor: "agent-w1" }, "math");
+    expect(twice.blocks[1].id).not.toBe(once.blocks[1].id);
+    // Repeated redraws must not grow the id without bound.
+    expect(twice.blocks[1].id.match(/~r/g)).toHaveLength(1);
+  });
+
+  it("leaves the board untouched when the target cannot be found", () => {
+    expect(applyBoardOp(board, { op: "redraw_block", targetAnchor: "nope" }, "math")).toBe(board);
   });
 });
