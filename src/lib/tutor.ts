@@ -56,7 +56,7 @@ import type { MathNode, FunctionNode, OperatorNode, SymbolNode } from "mathjs";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
 import type { WidgetIntent, WidgetState } from "./widgets/types";
-import { WIDGET_LABEL } from "./widgets/types";
+import { WIDGET_LABEL, isActionableWidget } from "./widgets/types";
 import { validateWidgetIntent } from "./widgets/validate";
 import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
 import { MASTERY_STAGES, MASTERY_STAGE_SPECS, isMasteryStage, nextStage, type MasteryStage } from "./mastery";
@@ -421,6 +421,81 @@ export function isNonInstructionalTutorMessage(message: string): boolean {
     /^(?:bye|goodbye|see you|see you later)$/,
     /^(?:how are you|how's it going|how is it going|what's up|nice to meet you)$/,
   ].some((pattern) => pattern.test(normalized));
+}
+
+/**
+ * Does this turn leave the learner with something to do?
+ *
+ * The standing policy is that the learner is never passive. A turn that adds
+ * only presentational blocks — a roadmap and nothing else, a wall of text, a
+ * diagram with no question attached — has explained AT the learner and then
+ * stopped, which is exactly the failure this guards.
+ *
+ * Deliberately generous about what counts. Any answerable widget qualifies, and
+ * so does an exploration widget the agent gave a `respond` prompt to. A turn
+ * that only edits or repairs existing blocks also qualifies: the learner's work
+ * is presumably already sitting on the board from an earlier turn.
+ */
+export function turnLeavesLearnerSomethingToDo(turn: TutorTurn): boolean {
+  let addedPresentationalContent = false;
+
+  for (const op of turn.boardOps) {
+    switch (op.op) {
+      case "place_widget":
+        if (isActionableWidget(op.intent)) return true;
+        addedPresentationalContent = true;
+        break;
+      case "update_widget":
+        // Reconfiguring a widget into an answerable state counts: this is how
+        // a hint gains a respond prompt or a mistake_check opens its repair.
+        if (isActionableWidget(op.intent)) return true;
+        break;
+      case "insert_after":
+      case "replace_block":
+        if (op.block.kind === "widget" && isActionableWidget(op.block.intent)) return true;
+        addedPresentationalContent = true;
+        break;
+      case "write_title":
+      case "write_text":
+      case "write_bullets":
+      case "write_latex":
+      case "write_callout":
+      case "visualize":
+        addedPresentationalContent = true;
+        break;
+      default:
+        // delete_block, revise_text, update_visualization, redraw_block and
+        // spawn_thread are housekeeping; they neither add passive content nor
+        // owe the learner a new action.
+        break;
+    }
+  }
+
+  return !addedPresentationalContent;
+}
+
+/**
+ * The learner-facing nudge appended when a teaching turn forgot to hand the
+ * work back. Speech, not a board op: inventing a question the agent did not
+ * author would put words in its mouth and could contradict the lesson.
+ */
+const PASSIVE_TURN_NUDGE =
+  "Before we go on — tell me what you already know about this, or ask me the first thing that looks unclear. I'll build the next step around your answer.";
+
+/**
+ * Enforce the never-passive policy.
+ *
+ * The prompt asks for this, but a prompt is guidance and this is policy, so it
+ * is also checked at runtime. We do NOT fabricate a widget: the agent chooses
+ * the pedagogical move, and a synthesized question would be content the tutor
+ * never wrote. Instead the turn is made to hand the work back in speech, which
+ * is always honest and always answerable.
+ */
+export function enforceLearnerAgency(turn: TutorTurn): TutorTurn {
+  if (turn.boardOps.length === 0) return turn;
+  if (turnLeavesLearnerSomethingToDo(turn)) return turn;
+  const speech = turn.speech.trim();
+  return { ...turn, speech: speech ? `${speech} ${PASSIVE_TURN_NUDGE}` : PASSIVE_TURN_NUDGE };
 }
 
 /** Hard safety net for turns where any board mutation is categorically noise. */
@@ -1752,6 +1827,7 @@ export function buildTutorUserPrompt(params: {
   parts.push(
     `GLOBAL BEHAVIOR: The chalkboard is the primary teaching surface and interactive lesson. Do not teach, explain the lesson, or ask instructional/content questions in speech. Put teaching steps, Socratic questions, checks for understanding, examples, definitions, and practice prompts onto the chalkboard using board_ops. Speech must stay to a brief acknowledgement or transition (for example, “I put that on the board”). Only use speech for a direct learner clarification when no board content is needed. ` +
     `First decide whether changing the board is pedagogically necessary for this exact turn. Greetings, thanks, acknowledgements, social chat, navigation questions, and replies that are already clear in short speech MUST return board_ops exactly []. Do not create an equation, graph, diagram, chart, text block, callout, widget, or thread merely because a chalkboard is available. ` +
+    `THE LEARNER IS NEVER PASSIVE: every turn that teaches must leave the learner holding a task. If your board_ops add only presentational content (roadmap, concept card, text, bullets, diagram, worked example), you have explained AT the learner and stopped — pair it with the widget that hands the work back. Placing a roadmap alone is a forbidden turn: place it together with the question, scratchpad or reveal that opens its first step. Never close a turn with "let me know when you're ready" or "does that make sense?"; ask the question that starts the work instead. ` +
     `When teaching IS happening, the study widgets are your teaching vocabulary, not a set of optional features. Prefer the widget that matches your pedagogical move over plain text: a check for understanding is a question widget, not a sentence; a worked example is an example widget with a reason on every step; a learner error is a mistake_check that diagnoses it; the learner's turn to work is a scratchpad. A turn that teaches with paragraphs where a widget exists for the move is a worse turn. ` +
     `Use a board operation only when the learner explicitly requests a board rendering/edit or when a specific visual/formal representation materially improves understanding and cannot be conveyed as clearly in the spoken response alone. If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
     `For every substantive explanation, layer simple plain-language intuition first, then precise terminology, assumptions, rigorous reasoning, and meaningful equations or worked steps; define jargon and connect formal details back to the intuitive idea. ` +
@@ -2134,9 +2210,11 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   });
   const result: StructuredCallResult<TutorTurn> = {
     ...rawResult,
-    value: enforceTutorBoardNecessity(
-      enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
-      req.learnerMessage
+    value: enforceLearnerAgency(
+      enforceTutorBoardNecessity(
+        enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
+        req.learnerMessage
+      )
     ),
   };
 

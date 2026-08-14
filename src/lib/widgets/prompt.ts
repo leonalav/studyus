@@ -63,7 +63,7 @@ const WIDGET_FIELD_SPEC: Record<WidgetKind, string> = {
 /** What each widget is for, and the failure it prevents. */
 const WIDGET_TEACHING_RULE: Record<WidgetKind, string> = {
   roadmap:
-    `Open a concept by showing where the lesson goes and mark the current step. Never use it as a progress bar the learner clicks through.`,
+    `Open a concept by showing where the lesson goes and mark the current step. Never use it as a progress bar the learner clicks through. A roadmap is orientation, NOT teaching: it must never be the only thing you place in a turn. Place it together with the widget that opens step 1 — otherwise the learner has been shown a plan and given nothing to do.`,
   concept_card:
     `The durable definition, given AFTER the learner has met the idea — not as the opening move. Include the notation and how it is read aloud; unread notation is unlearned notation.`,
   slider:
@@ -148,6 +148,14 @@ export function formatMasteryDirective(): string {
     `- The instant you are about to write the next step of a solution yourself, place a scratchpad or a question instead and let them write it.`,
     `- Diagnose, never correct. When the learner is wrong, identify the misconception behind the error and ask the question that makes them see it. Handing back a corrected line teaches copying.`,
     `- Teach notation explicitly. Say what a symbol means and how it is read aloud; do not assume it is transparent.`,
+    ``,
+    `THE LEARNER IS NEVER PASSIVE (binding):`,
+    `- You are not only a teacher; you are the means of guidance. Guidance means the learner is always doing something, never watching you work.`,
+    `- EVERY teaching turn must end with the learner holding a task. If your board_ops add only presentational content — a roadmap, a concept card, a paragraph, a diagram, a worked example — the turn is incomplete. Pair it with the move that hands the work back.`,
+    `- Placing a roadmap and stopping is a specific and forbidden failure. A roadmap orients; it does not teach and it does not ask. In the same turn, open the first step: place the question, scratchpad, reveal or slider-with-"respond" that starts the actual work.`,
+    `- Never end a turn with "let me know when you're ready", "does that make sense?", "let's begin when you are", or any variant that waits for permission. Ask the question that begins the work instead.`,
+    `- The learner clicking "next" is not participation. Participation is them answering, predicting, attempting, explaining, or choosing.`,
+    `- When you genuinely only need to orient (opening a lesson, recapping), still attach the first real prompt. Orientation plus a question is a turn; orientation alone is a slide.`,
     ``,
     `RESPONDING TO WHAT THE LEARNER DID:`,
     `- When the learner answers a widget on the board, that IS their turn. Respond to it. Never ignore it, never reply with an unrelated new topic, and never leave an answered widget without a response.`,

@@ -492,6 +492,43 @@ export interface MasteryEvidence {
   independence: number;
 }
 
+/**
+ * Widget kinds that give the learner something to DO.
+ *
+ * The app's standing policy is that the learner is never passive. A turn whose
+ * board additions are all from outside this set has explained at the learner
+ * rather than handed them the work — the roadmap-and-nothing-else turn is the
+ * canonical failure. `respond` promotes the exploration widgets into this set,
+ * which is exactly why it exists.
+ */
+export const ACTIONABLE_WIDGET_KINDS = [
+  "question",
+  "retrieval_check",
+  "challenge",
+  "reflection",
+  "scratchpad",
+  "mistake_check",
+  "reveal",
+] as const satisfies readonly WidgetKind[];
+
+/** Exploration widgets become actionable only once the agent attaches a
+ *  `respond` prompt; without one there is nowhere for the learner to answer. */
+export const RESPONDABLE_WIDGET_KINDS = [
+  "slider",
+  "animation",
+  "hint",
+  "annotation",
+] as const satisfies readonly WidgetKind[];
+
+/** Does this widget give the learner a way to act or answer? */
+export function isActionableWidget(intent: WidgetIntent): boolean {
+  if ((ACTIONABLE_WIDGET_KINDS as readonly string[]).includes(intent.kind)) return true;
+  return (
+    (RESPONDABLE_WIDGET_KINDS as readonly string[]).includes(intent.kind) &&
+    (intent as { respond?: unknown }).respond !== undefined
+  );
+}
+
 export const MASTERY_EVIDENCE_DIMENSIONS = [
   "recall",
   "understanding",

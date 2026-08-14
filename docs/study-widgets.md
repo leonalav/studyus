@@ -215,6 +215,45 @@ a signal whose turn fails is released for retry.
 
 ---
 
+## The learner is never passive
+
+The reported failure: the tutor placed a Roadmap, said *"I've put the roadmap
+for this lesson on the board"*, and stopped. The learner was shown a plan and
+handed nothing to do. That is a slide, not a lesson.
+
+Enforced at two layers, because a prompt is guidance and this is policy.
+
+**Prompt.** A binding `THE LEARNER IS NEVER PASSIVE` section states that the
+agent is not only a teacher but *the means of guidance*, names the roadmap-only
+turn as a specific forbidden failure, and bans the permission-seeking sign-offs
+(`"let me know when you're ready"`, `"does that make sense?"`) that end a turn
+without a task. The Roadmap's own teaching rule now says it is orientation, not
+teaching, and must be placed alongside the widget that opens step 1.
+
+**Runtime.** `enforceLearnerAgency` runs in the turn pipeline after the tool and
+necessity filters. A turn whose board ops add only presentational content —
+roadmap, concept card, text, bullets, latex, callout, diagram — has its speech
+extended with a question that hands the work back.
+
+Three deliberate limits on that backstop:
+
+- **It never fabricates a board op.** Synthesizing a question would put words in
+  the tutor's mouth and could contradict the lesson being taught. The agent
+  chooses the pedagogical move; the backstop only guarantees the learner is
+  asked *something*.
+- **Housekeeping turns are exempt.** `redraw_block`, `delete_block`,
+  `revise_text` and friends owe no new task — the learner's work is already on
+  the board from an earlier turn.
+- **Speech-only turns are exempt.** A greeting or a clarification has no board
+  ops and no obligation.
+
+What counts as "something to do" is `isActionableWidget`: any of the seven
+answerable widgets, or an exploration widget the agent gave a `respond` prompt
+to. This is the payoff of the previous round — `respond` is what promotes a
+slider from a thing to watch into a thing to answer.
+
+---
+
 ## Response affordances on exploration widgets
 
 Seven widgets give the learner somewhere to answer: **Question**, **Retrieval

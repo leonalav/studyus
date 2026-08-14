@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildTutorUserPrompt } from "./tutor";
+import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
 import type { Domain } from "../data/boards";
 
 /**
@@ -200,5 +201,26 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     for (const kind of ["point", "line", "segment", "circle", "polygon", "angle", "label", "text"]) {
       expect(prompt).toContain(kind);
     }
+  });
+});
+
+describe("the never-passive policy reaches the model", () => {
+  it("forbids the roadmap-only turn by name", () => {
+    // Naming the exact failure matters: a general "be interactive" instruction
+    // is the kind of guidance a model satisfies with a rhetorical question.
+    const directive = formatMasteryDirective();
+    expect(directive).toMatch(/THE LEARNER IS NEVER PASSIVE/);
+    expect(directive).toMatch(/roadmap and stopping is a specific and forbidden failure/i);
+    expect(directive).toMatch(/means of guidance/i);
+  });
+
+  it("bans the permission-seeking sign-offs that end a turn without a task", () => {
+    const directive = formatMasteryDirective();
+    expect(directive).toMatch(/let me know when you're ready/i);
+    expect(directive).toMatch(/does that make sense/i);
+  });
+
+  it("tells the agent a roadmap must be placed alongside the move that opens step 1", () => {
+    expect(formatWidgetCatalog()).toMatch(/roadmap is orientation, NOT teaching/i);
   });
 });

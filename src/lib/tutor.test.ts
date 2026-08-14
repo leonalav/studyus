@@ -35,6 +35,8 @@ import {
   askTutorTurn,
   type BoardOp,
   type TutorTurn,
+  enforceLearnerAgency,
+  turnLeavesLearnerSomethingToDo,
 } from "./tutor";
 import { DEFAULT_TUTOR } from "./preferences";
 import { bindModelRole, defaultCapabilities } from "./llm";
@@ -1023,5 +1025,110 @@ describe("Guide to Mastery stage advancement", () => {
       stage: "understand",
       evidence: "",
     });
+  });
+});
+
+describe("the learner is never passive", () => {
+  /**
+   * The reported failure: the tutor placed a roadmap, said "I've put the
+   * roadmap for this lesson on the board", and stopped. The learner was shown a
+   * plan and handed nothing to do. Policy is enforced at runtime as well as in
+   * the prompt, because a prompt is guidance and this is policy.
+   */
+  const roadmap = {
+    op: "place_widget" as const,
+    intent: {
+      kind: "roadmap" as const,
+      heading: "Today's Path: Approximating Areas",
+      steps: [
+        { id: "s1", label: "Encounter", state: "current" as const },
+        { id: "s2", label: "Understand", state: "upcoming" as const },
+      ],
+    },
+  };
+  const question = {
+    op: "place_widget" as const,
+    intent: {
+      kind: "question" as const,
+      format: "multiple_choice" as const,
+      prompt: "Why rectangles?",
+      options: [
+        { id: "a", label: "They tile without gaps", correct: true },
+        { id: "b", label: "They are easier to draw", misconception: "Convenience over structure" },
+      ],
+    },
+  };
+
+  const turn = (boardOps: unknown[], speech = "Here is the plan.") =>
+    ({ speech, boardOps, evidenceRefs: [] }) as unknown as Parameters<typeof enforceLearnerAgency>[0];
+
+  it("flags a roadmap-only turn as leaving the learner nothing to do", () => {
+    expect(turnLeavesLearnerSomethingToDo(turn([roadmap]))).toBe(false);
+  });
+
+  it("accepts the same turn once it also opens the first step", () => {
+    expect(turnLeavesLearnerSomethingToDo(turn([roadmap, question]))).toBe(true);
+  });
+
+  it("treats other presentational-only turns the same way", () => {
+    const presentational = [
+      { op: "write_text", text: "A Riemann sum approximates area." },
+      { op: "write_bullets", items: ["left endpoint", "right endpoint"] },
+      { op: "write_latex", tex: "\\sum f(x_i)\\Delta x" },
+      { op: "write_callout", text: "Watch the width." },
+      { op: "place_widget", intent: { kind: "concept_card", term: "Riemann sum", definition: "A sum of rectangle areas." } },
+    ];
+    for (const op of presentational) {
+      expect(turnLeavesLearnerSomethingToDo(turn([op])), `${op.op} should not count as a task`).toBe(false);
+    }
+  });
+
+  it("counts an exploration widget only once it has a respond prompt", () => {
+    const bare = { op: "place_widget", intent: { kind: "slider", label: "Rectangles n", parameter: "n", min: 1, max: 50, value: 4 } };
+    expect(turnLeavesLearnerSomethingToDo(turn([bare]))).toBe(false);
+
+    const asked = {
+      op: "place_widget",
+      intent: { ...bare.intent, respond: { prompt: "What happens to the error as n grows?" } },
+    };
+    expect(turnLeavesLearnerSomethingToDo(turn([asked]))).toBe(true);
+  });
+
+  it("does not demand a new task from housekeeping-only turns", () => {
+    // Repairing or tidying the board owes the learner nothing new; their work
+    // is already sitting there from an earlier turn.
+    for (const op of [
+      { op: "redraw_block", targetAnchor: "agent-w1" },
+      { op: "delete_block", targetIndex: 0 },
+      { op: "revise_text", targetIndex: 0, find: "a", replace: "b" },
+    ]) {
+      expect(turnLeavesLearnerSomethingToDo(turn([op])), `${op.op}`).toBe(true);
+    }
+  });
+
+  it("hands the work back in speech when the agent forgot to", () => {
+    const fixed = enforceLearnerAgency(turn([roadmap]));
+    expect(fixed.speech).toContain("Here is the plan.");
+    // The nudge must be answerable, not another "does that make sense?".
+    expect(fixed.speech).toMatch(/tell me what you already know|ask me the first thing/i);
+  });
+
+  it("never fabricates a board op the agent did not author", () => {
+    // Synthesizing a question would put words in the tutor's mouth and could
+    // contradict the lesson it is actually teaching.
+    const fixed = enforceLearnerAgency(turn([roadmap]));
+    expect(fixed.boardOps).toHaveLength(1);
+    expect(fixed.boardOps[0]).toEqual(roadmap);
+  });
+
+  it("leaves a compliant turn completely untouched", () => {
+    const compliant = turn([roadmap, question]);
+    expect(enforceLearnerAgency(compliant)).toBe(compliant);
+  });
+
+  it("leaves speech-only turns alone", () => {
+    // A greeting or clarification has no board ops and owes no task.
+    const speechOnly = turn([], "Yes, that link is in Threads.");
+    expect(enforceLearnerAgency(speechOnly)).toBe(speechOnly);
   });
 });
