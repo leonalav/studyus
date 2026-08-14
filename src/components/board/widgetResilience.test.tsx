@@ -295,3 +295,72 @@ describe("response affordance on exploration widgets", () => {
     expect(html).toMatch(/disabled/);
   });
 });
+
+describe("cluster affordances on the widget card", () => {
+  const clustered = {
+    kind: "question" as const,
+    format: "multiple_choice" as const,
+    prompt: "Which integral matches?",
+    options: [
+      { id: "a", label: "First", correct: true },
+      { id: "b", label: "Second", misconception: "Reads structure as difficulty" },
+    ],
+  };
+
+  it("marks the card as part of a set before anything is answered", () => {
+    // The badge has to be visible up front, or the delayed reply reads as a bug.
+    const html = renderToStaticMarkup(
+      <WidgetSurface
+        intent={clustered}
+        chalk="#fff"
+        accent="#7dd3fc"
+        cluster={{ answered: 0, required: 3, position: 1, label: "Check yourself", progressText: "0 of 3 answered · 3 more before your tutor replies" }}
+      />
+    );
+    expect(html).toContain("Set 1/3");
+  });
+
+  it("tells the learner how many answers are still outstanding", () => {
+    const html = renderToStaticMarkup(
+      <WidgetSurface
+        intent={clustered}
+        chalk="#fff"
+        accent="#7dd3fc"
+        cluster={{ answered: 2, required: 3, position: 2, progressText: "2 of 3 answered · 1 more before your tutor replies" }}
+      />
+    );
+    expect(html).toContain("2 of 3 answered");
+  });
+
+  it("shows no cluster chrome at all for a standalone widget", () => {
+    const html = renderToStaticMarkup(<WidgetSurface intent={clustered} chalk="#fff" accent="#7dd3fc" />);
+    expect(html).not.toContain("Set ");
+    expect(html).not.toMatch(/before your tutor replies/);
+  });
+
+  it("shows no cluster chrome for a group of one", () => {
+    // A one-widget cluster behaves like a standalone widget; badging it would
+    // promise a set that does not exist.
+    const html = renderToStaticMarkup(
+      <WidgetSurface
+        intent={clustered}
+        chalk="#fff"
+        accent="#7dd3fc"
+        cluster={{ answered: 0, required: 1, position: 1, progressText: "" }}
+      />
+    );
+    expect(html).not.toContain("Set ");
+  });
+
+  it("still renders the widget body when cluster info is malformed", () => {
+    const html = renderToStaticMarkup(
+      <WidgetSurface
+        intent={clustered}
+        chalk="#fff"
+        accent="#7dd3fc"
+        cluster={{ answered: Number.NaN, required: Number.NaN } as never}
+      />
+    );
+    expect(html).toContain("Which integral matches?");
+  });
+});

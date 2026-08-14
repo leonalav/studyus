@@ -215,6 +215,47 @@ a signal whose turn fails is released for retry.
 
 ---
 
+## Widget cluster groups
+
+The agent often places several widgets that are really ONE piece of work: three
+questions probing the same idea, or a scratchpad feeding the challenge below it.
+Signalling the tutor after the first is answered is wrong twice over — it
+interrupts a learner who is mid-task, and it hands the agent a fragment of the
+evidence it needs.
+
+Widgets sharing a `group.id` are one unit:
+
+```ts
+group?: { id: string; label?: string; size?: number }
+```
+
+The learner must answer every **answerable** widget in the group; only then is
+the tutor signalled, once, with all the answers in a single turn.
+
+**Membership is agent-declared, not inferred from the turn.** Two questions
+placed together are not necessarily one task — the agent may want a quick check
+answered now and a deeper one left for later, and only it knows which. Inferring
+from the turn boundary would silently withhold the signal from a widget meant to
+stand alone.
+
+**Only answerable widgets gate the cluster.** A concept card between two
+questions is context, not work. Counting it would deadlock the group, because
+nothing can ever answer a concept card. `size` guards the opposite failure: if
+the agent declares three and only two render, completing both must not report
+the set as finished.
+
+**The learner can see the gate.** Each card carries a `Set n/N` badge before
+anything is answered and a progress footer after — otherwise an answered
+question that produces no reply reads as a broken app.
+
+**The combined turn is the point.** Three answers judged together tell a story
+none tells alone: two right and one wrong is a locatable gap, whereas three
+separate turns get diagnosed three times and re-taught three times. The message
+states the contrast explicitly — all wrong routes the agent upstream to the one
+misconception behind them; all right is evidence to test for luck, not proof.
+
+---
+
 ## The learner is never passive
 
 The reported failure: the tutor placed a Roadmap, said *"I've put the roadmap

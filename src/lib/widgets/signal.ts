@@ -316,3 +316,66 @@ export function buildWidgetSignal(
     correct: typeof next.correct === "boolean" ? next.correct : undefined,
   };
 }
+
+/**
+ * Compose one tutor turn from a completed cluster.
+ *
+ * The whole point of a cluster is that the agent judges the answers *together*.
+ * Three questions probing one idea tell a story no single answer does: two
+ * right and one wrong is a specific, locatable gap, whereas the same three
+ * delivered as three separate turns would be diagnosed three times in isolation
+ * and probably "corrected" three times too.
+ *
+ * So the message stacks each member's own pedagogical message and closes with a
+ * directive to respond to the SET. Ordering follows board order, which is the
+ * order the learner met them in.
+ */
+export function buildClusterSignalMessage(
+  members: { intent: WidgetIntent; state: WidgetState }[],
+  stage: MasteryStage,
+  label?: string
+): string {
+  const spec = MASTERY_STAGE_SPECS[stage];
+  const lines: string[] = [];
+
+  const heading = label?.trim()
+    ? `I finished "${label.trim()}" on the board — ${members.length} activities that go together.`
+    : `I finished a set of ${members.length} activities on the board that go together.`;
+  lines.push(heading, "");
+
+  members.forEach((member, index) => {
+    lines.push(`(${index + 1}/${members.length}) ${buildWidgetSignalMessage(member.intent, member.state, stage)}`);
+    lines.push("");
+  });
+
+  const graded = members.filter((member) => typeof member.state.correct === "boolean");
+  const wrong = graded.filter((member) => member.state.correct === false).length;
+  const right = graded.length - wrong;
+
+  if (graded.length > 0) {
+    lines.push(
+      wrong === 0
+        ? `[All ${graded.length} graded answers are right. Do NOT just celebrate — check whether the reasoning was sound rather than lucky, and treat this as evidence toward the stage's exit condition, not proof of it.]`
+        : right === 0
+          ? `[All ${graded.length} graded answers are wrong. Something upstream is missing: find the single misconception that explains ALL of them rather than diagnosing each answer separately, and repair that.]`
+          : `[${right} of ${graded.length} graded answers are right and ${wrong} wrong. The contrast is the diagnosis: work out what the wrong ones share that the right ones do not, and repair that specific gap. Do not re-teach what they already got right.]`
+    );
+  }
+
+  lines.push(
+    `[Respond to this set as a whole, in ONE reply. Do not answer each activity separately. Judge these answers together against this stage's exit condition: ${spec.exitCondition}]`
+  );
+
+  return lines.filter((line, index, all) => !(line === "" && all[index + 1] === "")).join("\n").trim();
+}
+
+/** Learner-facing transcript line for a completed cluster. Never reveals
+ *  correctness — that is the tutor's to deliver, in context. */
+export function buildClusterSignalDisplayText(
+  members: { intent: WidgetIntent; state: WidgetState }[],
+  label?: string
+): string {
+  return label?.trim()
+    ? `I completed "${label.trim()}" (${members.length} activities)`
+    : `I completed a set of ${members.length} activities on the board`;
+}

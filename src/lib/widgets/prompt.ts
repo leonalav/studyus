@@ -111,8 +111,18 @@ const RESPOND_SPEC_DOC =
   `need evidence rather than activity; omit it when the widget is genuinely there to illustrate. Ask for a claim about ` +
   `what the widget showed ("What happens to the slope as h shrinks?"), never "did you understand?".`;
 
+const GROUP_SPEC_DOC =
+  `GroupRef = { "id": string, "label"?: string, "size"?: number }  — every widget accepts an optional "group".\n` +
+  `  Widgets sharing a group.id are ONE piece of work. The learner must answer every answerable widget in the group ` +
+  `before you are signalled, and you then receive all of their answers in a single turn. Use it whenever you place ` +
+  `several activities that only make sense judged together — three questions probing one idea, a scratchpad feeding ` +
+  `the challenge below it. Set "size" to the number of answerable widgets you are placing so an incomplete render ` +
+  `cannot signal you early, and "label" to name the set for the learner ("Check yourself"). ` +
+  `Omit "group" for a widget you want answered on its own: a standalone widget signals you immediately, as always. ` +
+  `Do NOT group widgets merely because you placed them in the same turn — group them because the answers belong together.`;
+
 export function formatWidgetCatalog(): string {
-  return `${RESPOND_SPEC_DOC}\n` + WIDGET_KINDS.map((kind) => {
+  return `${RESPOND_SPEC_DOC}\n\n${GROUP_SPEC_DOC}\n` + WIDGET_KINDS.map((kind) => {
     const stages = stagesForWidget(kind)
       .map((stage) => MASTERY_STAGE_SPECS[stage].label)
       .join("/");
@@ -156,6 +166,11 @@ export function formatMasteryDirective(): string {
     `- Never end a turn with "let me know when you're ready", "does that make sense?", "let's begin when you are", or any variant that waits for permission. Ask the question that begins the work instead.`,
     `- The learner clicking "next" is not participation. Participation is them answering, predicting, attempting, explaining, or choosing.`,
     `- When you genuinely only need to orient (opening a lesson, recapping), still attach the first real prompt. Orientation plus a question is a turn; orientation alone is a slide.`,
+    ``,
+    `PLACING SEVERAL ACTIVITIES AT ONCE:`,
+    `- If you place two or more activities that form one piece of work, give them a shared "group" so they are answered as a set and you are woken once with all the answers. Two questions probing the same idea, judged separately, get diagnosed twice and re-taught twice.`,
+    `- Grouping is a pedagogical claim, not a layout convenience. Group when the answers only mean something together; leave a widget ungrouped when you want it answered on its own.`,
+    `- When a grouped set arrives, respond to the SET in one reply. The pattern across the answers IS the diagnosis: what the wrong ones share and the right ones do not is the gap to repair.`,
     ``,
     `RESPONDING TO WHAT THE LEARNER DID:`,
     `- When the learner answers a widget on the board, that IS their turn. Respond to it. Never ignore it, never reply with an unrelated new topic, and never leave an answered widget without a response.`,

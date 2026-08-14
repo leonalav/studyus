@@ -15,7 +15,13 @@ import { buildSubBoard, boardToMarkdown, DOMAIN_META, type BoardDoc } from "../.
 import { validateVisualizationIntent } from "../../lib/visualization/validate";
 import type { VisualizationIntent, VisualizationState } from "../../lib/visualization/types";
 import { sanitizeWidgetState, validateWidgetIntent } from "../../lib/widgets/validate";
-import { buildWidgetSignal, shouldSignalTutor } from "../../lib/widgets/signal";
+import {
+  buildClusterSignalDisplayText,
+  buildClusterSignalMessage,
+  buildWidgetSignal,
+  shouldSignalTutor,
+} from "../../lib/widgets/signal";
+import { clusterAllowsSignal, type ClusterMember } from "../../lib/widgets/cluster";
 import { getSessionMasteryStage } from "../../lib/tutor";
 import { WIDGET_LABEL, type WidgetIntent, type WidgetState } from "../../lib/widgets/types";
 import {
@@ -380,16 +386,54 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         // synchronously so a double click cannot slip two turns through the
         // await below.
         if (!shouldSignalTutor(widget.intent, widget.state, safe)) return;
-        if (signalledWidgets.current.has(blockId)) return;
-        signalledWidgets.current.add(blockId);
+
+        // Cluster gate. When the agent grouped this widget with others, the
+        // tutor is owed ONE turn covering the whole set, not a turn per answer.
+        // Built from the board as it will be after this save, since setBoards
+        // above has not flushed yet.
+        const members: ClusterMember[] = (boardsRef.current.find((b) => b.id === activeId)?.blocks ?? [])
+          .flatMap((blk) =>
+            blk.kind === "widget"
+              ? [{ blockId: blk.id, intent: blk.intent, state: blk.id === blockId ? safe : blk.state }]
+              : []
+          );
+        const { allowed, cluster } = clusterAllowsSignal(members, blockId);
+        if (!allowed) return;
+
+        // A completed cluster is claimed under its group id so that whichever
+        // member finished it, the tutor is woken exactly once.
+        const signalKey = cluster ? `group:${cluster.groupId}` : blockId;
+        if (signalledWidgets.current.has(signalKey)) return;
+        signalledWidgets.current.add(signalKey);
 
         const previousState = widget.state;
         void (async () => {
           try {
             const { stage } = await getSessionMasteryStage(sessionId);
+
+            if (cluster) {
+              // Answers are read in board order — the order the learner met
+              // them in — so the agent sees the set as it was worked.
+              const answered = cluster.answerable.map((member) => ({
+                intent: member.intent,
+                state: member.blockId === blockId ? safe : (member.state ?? {}),
+              }));
+              void handleSendRef.current?.(
+                buildClusterSignalMessage(answered, stage, cluster.label),
+                undefined,
+                false,
+                {
+                  kind: "widget",
+                  displayText: buildClusterSignalDisplayText(answered, cluster.label),
+                  signalKey,
+                }
+              );
+              return;
+            }
+
             const signal = buildWidgetSignal(blockId, widget.intent, previousState, safe, stage);
             if (!signal) {
-              signalledWidgets.current.delete(blockId);
+              signalledWidgets.current.delete(signalKey);
               return;
             }
             // Routed through the normal turn path so the full tutor contract
@@ -404,7 +448,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
             // Release the dedupe claim, or this widget could never wake the tutor
             // again for the rest of the session — a silent dead end far worse
             // than one failed turn. The answer itself is already saved above.
-            signalledWidgets.current.delete(blockId);
+            // Must be the same key that was claimed: releasing `blockId` when a
+            // cluster claimed `group:…` would strand the whole cluster.
+            signalledWidgets.current.delete(signalKey);
             console.error("[widget] failed to signal the tutor", error);
             notify("Your answer was saved, but the tutor could not be reached");
           }

@@ -1,12 +1,18 @@
-import { memo, useEffect, useRef, useState, useCallback } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Minus, Plus } from "lucide-react";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
 import { Latex, ChalkStrong } from "./Visuals";
 import { VisualizationSurface } from "./VisualizationSurface";
-import { WidgetSurface } from "./WidgetSurface";
+import { WidgetSurface, type WidgetClusterInfo } from "./WidgetSurface";
 import type { VisualizationState } from "../../lib/visualization/types";
 import { WIDGET_LABEL, type WidgetState } from "../../lib/widgets/types";
+import {
+  clusterProgressText,
+  collectClusters,
+  groupIdOf,
+  type ClusterMember,
+} from "../../lib/widgets/cluster";
 import { ErrorBoundary } from "../ErrorBoundary";
 
 export interface BoardTheme {
@@ -133,6 +139,51 @@ export function Chalkboard({
 }: Props) {
   const [view, setView] = useState<BoardView>(initialView ?? { x: 48, y: 36, s: 1 });
   const [revealed, setRevealed] = useState(writing ? 0 : board.blocks.length);
+
+  /**
+   * Cluster progress per widget block.
+   *
+   * Computed once for the whole board rather than inside each widget, because a
+   * widget cannot see its siblings — and cluster membership is precisely a
+   * statement about siblings. Rows are walked too, so a clustered widget placed
+   * inside a two-column row still counts.
+   */
+  const clusterInfo = useMemo(() => {
+    const members: ClusterMember[] = [];
+    const walk = (blocks: Block[]) => {
+      for (const blk of blocks) {
+        if (blk.kind === "widget") members.push({ blockId: blk.id, intent: blk.intent, state: blk.state });
+        else if (blk.kind === "row") walk(blk.children);
+      }
+    };
+    walk(board.blocks);
+
+    const map: Record<string, WidgetClusterInfo> = {};
+    for (const cluster of collectClusters(members)) {
+      const progressText = clusterProgressText(cluster);
+      cluster.answerable.forEach((member, index) => {
+        map[member.blockId] = {
+          answered: cluster.answered,
+          required: cluster.required,
+          position: index + 1,
+          label: cluster.label,
+          progressText,
+        };
+      });
+      // Presentational members of the cluster get the badge but no position:
+      // they are context inside the set, not one of the things to answer.
+      for (const member of members) {
+        if (groupIdOf(member.intent) !== cluster.groupId || map[member.blockId]) continue;
+        map[member.blockId] = {
+          answered: cluster.answered,
+          required: cluster.required,
+          label: cluster.label,
+          progressText,
+        };
+      }
+    }
+    return map;
+  }, [board.blocks]);
   const [panning, setPanning] = useState(false);
   const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null);
   const [askOpen, setAskOpen] = useState(false);
@@ -450,7 +501,7 @@ export function Chalkboard({
                   contain it here so every other block the tutor drew survives
                   and the session stays usable. */}
               <ErrorBoundary label={blockLabel(b)} resetKey={b.id}>
-                <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={b.id} readOnly={readOnly} />
+                <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={b.id} readOnly={readOnly} cluster={clusterInfo[b.id]} clusterInfo={clusterInfo} />
               </ErrorBoundary>
             </div>
           ))}
@@ -604,6 +655,8 @@ const BlockView = memo(function BlockView({
   onWidgetStateChange,
   blockId,
   readOnly = false,
+  cluster,
+  clusterInfo,
 }: {
   block: Block;
   chalk: string;
@@ -614,6 +667,9 @@ const BlockView = memo(function BlockView({
   onWidgetStateChange?: (blockId: string, state: WidgetState) => void;
   blockId: string;
   readOnly?: boolean;
+  cluster?: WidgetClusterInfo;
+  /** Forwarded so a row can hand each child its own cluster slice. */
+  clusterInfo?: Record<string, WidgetClusterInfo>;
 }) {
   const handleVisualizationState = useCallback(
     (next: VisualizationState) => onBlockStateChange?.(blockId, next),
@@ -690,6 +746,7 @@ const BlockView = memo(function BlockView({
           accent={accent}
           scale={scale}
           readOnly={readOnly}
+          cluster={cluster}
           onState={onWidgetStateChange ? handleWidgetState : undefined}
         />
       );
@@ -708,7 +765,7 @@ const BlockView = memo(function BlockView({
           {block.children.map((child) => (
             <div key={child.id} data-block className="min-w-0">
               <ErrorBoundary label={blockLabel(child)} resetKey={child.id}>
-              <BlockView block={child} chalk={chalk} accent={accent} scale={scale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={child.id} readOnly={readOnly} />
+              <BlockView block={child} chalk={chalk} accent={accent} scale={scale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={child.id} readOnly={readOnly} cluster={clusterInfo?.[child.id]} clusterInfo={clusterInfo} />
               </ErrorBoundary>
             </div>
           ))}

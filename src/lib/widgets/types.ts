@@ -116,6 +116,41 @@ export interface WidgetBase {
   /** One-line teaching purpose. Rendered as the widget's footer rationale and
    *  echoed back to the agent so it can see why it placed the widget. */
   note?: string;
+  /**
+   * Cluster membership.
+   *
+   * When the agent places several widgets that form ONE piece of work — three
+   * questions probing the same idea, a scratchpad plus the challenge it feeds —
+   * it gives them a shared `group.id`. The tutor is then signalled once, after
+   * the learner has answered every answerable widget in the group, instead of
+   * being woken by each one in turn.
+   *
+   * Omitted means standalone: the widget signals on its own exactly as before.
+   */
+  group?: WidgetGroupRef;
+}
+
+/**
+ * A widget's membership in a cluster.
+ *
+ * Deliberately agent-declared rather than inferred from the turn boundary. Two
+ * questions placed together are not necessarily one task — the agent may want a
+ * quick check answered immediately and a deeper one left for later — and only
+ * the agent knows which. Inferring from the turn would silently withhold the
+ * signal for a widget it wanted answered on its own.
+ */
+export interface WidgetGroupRef {
+  /** Shared identifier. Widgets carrying the same id form one cluster. */
+  id: string;
+  /** Optional learner-facing heading for the cluster, e.g. "Check yourself". */
+  label?: string;
+  /**
+   * Optional count of answerable widgets the agent intends this cluster to
+   * hold. When set, the cluster stays incomplete until at least this many
+   * answers exist, which protects against signalling early if part of the
+   * cluster failed to render or arrives in a later turn.
+   */
+  size?: number;
 }
 
 /* ── 1 · Roadmap — "where this lesson goes" ── */

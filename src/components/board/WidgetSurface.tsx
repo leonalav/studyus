@@ -21,6 +21,19 @@ import { assessMastery, MASTERY_DIMENSION_LABEL, MASTERY_THRESHOLD } from "../..
 import { MASTERY_EVIDENCE_DIMENSIONS } from "../../lib/widgets/types";
 import { ErrorBoundary } from "../ErrorBoundary";
 
+/** What a widget needs to know about the cluster it belongs to. */
+export interface WidgetClusterInfo {
+  /** Answers committed across the whole cluster. */
+  answered: number;
+  /** Answers needed before the tutor is signalled. */
+  required: number;
+  /** This widget's 1-based position among the cluster's answerable members. */
+  position?: number;
+  label?: string;
+  /** Preformatted progress line; empty string hides the footer. */
+  progressText?: string;
+}
+
 export interface WidgetSurfaceProps {
   intent: WidgetIntent;
   state?: WidgetState;
@@ -29,6 +42,9 @@ export interface WidgetSurfaceProps {
   scale?: number;
   /** Past Notes and thread previews render widgets without interaction. */
   readOnly?: boolean;
+  /** Cluster progress, when this widget belongs to a group. Supplied by the
+   *  board rather than computed here: only the board can see its siblings. */
+  cluster?: WidgetClusterInfo;
   onState?: (next: WidgetState) => void;
 }
 
@@ -104,12 +120,14 @@ function WidgetShell({
   chalk,
   accent,
   scale,
+  cluster,
   children,
 }: {
   intent: WidgetIntent;
   chalk: string;
   accent: string;
   scale: number;
+  cluster?: WidgetClusterInfo;
   children: React.ReactNode;
 }) {
   const title = intent.title?.trim() || WIDGET_LABEL[intent.kind];
@@ -145,11 +163,44 @@ function WidgetShell({
           </svg>
         </span>
         <span className="flex-1 truncate text-[11.5px] font-semibold tracking-[0.01em] opacity-90">{title}</span>
+        {cluster && cluster.required > 1 ? (
+          // Marks the card as part of a set BEFORE the learner answers, so the
+          // delayed reply is expected rather than experienced as a bug.
+          <span
+            className="flex-none rounded-full px-2 py-[3px] font-mono text-[8px] uppercase tracking-[0.06em]"
+            style={{ background: `${accent}1f`, color: accent }}
+            title={cluster.label ? `Part of "${cluster.label}"` : "Part of a set"}
+          >
+            {cluster.position && cluster.position > 0
+              ? `Set ${cluster.position}/${cluster.required}`
+              : `Set of ${cluster.required}`}
+          </span>
+        ) : null}
         <span className="rounded-full px-2 py-[3px] font-mono text-[8px] uppercase tracking-[0.06em] opacity-55" style={{ background: "rgba(255,255,255,0.07)" }}>
           {tag}
         </span>
       </header>
       <div className="px-3 py-3">{children}</div>
+      {cluster && cluster.required > 1 && cluster.progressText ? (
+        <div
+          className="flex items-center gap-2 border-t px-3 py-1.5 text-[9.5px]"
+          style={{ borderColor: `${accent}18`, background: `${accent}0d` }}
+        >
+          <span className="flex flex-none items-center gap-1" aria-hidden>
+            {Array.from({ length: Math.min(cluster.required, 8) }).map((_, index) => (
+              <span
+                key={index}
+                className="block h-[5px] w-[5px] rounded-full"
+                style={{
+                  background: index < cluster.answered ? accent : "currentColor",
+                  opacity: index < cluster.answered ? 0.9 : 0.25,
+                }}
+              />
+            ))}
+          </span>
+          <span className="min-w-0 flex-1 truncate opacity-70">{cluster.progressText}</span>
+        </div>
+      ) : null}
       {intent.note ? (
         <div className="border-t px-3 py-1.5 text-[9.5px] italic opacity-50" style={{ borderColor: `${accent}18` }}>
           {intent.note}
@@ -168,6 +219,7 @@ export const WidgetSurface = memo(function WidgetSurface({
   accent,
   scale = 1,
   readOnly = false,
+  cluster,
   onState,
 }: WidgetSurfaceProps) {
   const emit = useCallback(
@@ -190,7 +242,7 @@ export const WidgetSurface = memo(function WidgetSurface({
   const shared = { chalk, accent, state: state ?? {}, emit, readOnly };
 
   return (
-    <WidgetShell intent={intent} chalk={chalk} accent={accent} scale={scale}>
+    <WidgetShell intent={intent} chalk={chalk} accent={accent} scale={scale} cluster={cluster}>
       {/* The shell (title, tag, chalk mark) renders outside this boundary, so a
           body that fails still leaves an identifiable card on the board rather
           than a hole the learner cannot connect to anything. */}

@@ -224,3 +224,21 @@ describe("the never-passive policy reaches the model", () => {
     expect(formatWidgetCatalog()).toMatch(/roadmap is orientation, NOT teaching/i);
   });
 });
+
+describe("widget cluster groups reach the model", () => {
+  it("documents the group shape in the widget catalog", () => {
+    const catalog = formatWidgetCatalog();
+    expect(catalog).toMatch(/GroupRef = \{ "id": string/);
+    expect(catalog).toMatch(/answer every answerable widget in the group/i);
+  });
+
+  it("warns against grouping by turn rather than by meaning", () => {
+    // The failure to avoid: the agent grouping everything it happens to place
+    // together, which would withhold signals from independent widgets.
+    expect(formatWidgetCatalog()).toMatch(/NOT group widgets merely because you placed them in the same turn/i);
+  });
+
+  it("tells the agent to answer a completed set in one reply", () => {
+    expect(formatMasteryDirective()).toMatch(/respond to the SET in one reply/i);
+  });
+});

@@ -33,6 +33,9 @@ export const MAX_MARKS = 8;
 export const MAX_READOUTS = 4;
 export const MAX_EXPRESSION_LENGTH = 200;
 export const MAX_ID_LENGTH = 64;
+/** Upper bound on a declared cluster size. A cluster gates the tutor signal, so
+ *  an absurd size would silence the tutor for the rest of the session. */
+export const MAX_CLUSTER_SIZE = 8;
 const NUMBER_MIN = -1e9;
 const NUMBER_MAX = 1e9;
 
@@ -120,6 +123,31 @@ function validateBase(intent: Record<string, unknown>): ValidationResult {
   if (!optionalText(intent.title, MAX_SHORT_TEXT_LENGTH)) return fail("Widget title is empty or too long");
   if (!optionalText(intent.tag, 40)) return fail("Widget tag is empty or too long");
   if (!optionalText(intent.note, MAX_TEXT_LENGTH)) return fail("Widget note is empty or too long");
+  return validateGroup(intent.group);
+}
+
+/**
+ * Cluster membership.
+ *
+ * `size` is bounded by MAX_CLUSTER_SIZE because it gates the tutor signal: an
+ * agent that declares a 500-widget cluster would silence the tutor for the rest
+ * of the session, since the cluster could never complete.
+ */
+function validateGroup(value: unknown): ValidationResult {
+  if (value === undefined || value === null) return ok;
+  if (!isPlainObject(value)) return fail("Widget group must be an object");
+  if (!identifier(value.id)) {
+    return fail(`Widget group needs an id of at most ${MAX_ID_LENGTH} characters`);
+  }
+  if (!optionalText(value.label, MAX_SHORT_TEXT_LENGTH)) return fail("Widget group label is empty or too long");
+  if (value.size !== undefined && value.size !== null) {
+    if (!Number.isInteger(value.size) || (value.size as number) < 1) {
+      return fail("Widget group size must be a positive whole number");
+    }
+    if ((value.size as number) > MAX_CLUSTER_SIZE) {
+      return fail(`Widget group size cannot exceed ${MAX_CLUSTER_SIZE}`);
+    }
+  }
   return ok;
 }
 
