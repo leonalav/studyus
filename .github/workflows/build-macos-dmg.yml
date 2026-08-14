@@ -1,0 +1,74 @@
+name: Build macOS DMG
+
+# Produces a macOS installer (.dmg) on GitHub's macOS runner:
+#   macOS runner  ->  Node.js + pnpm  ->  Rust (stable)  ->  pnpm tauri:build
+# The finished .dmg is uploaded as a workflow artifact (Actions -> run -> summary).
+
+on:
+  workflow_dispatch: # manual: "Run workflow" in the Actions tab
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/build-macos-dmg.yml"
+
+concurrency:
+  group: macos-dmg-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    name: Build Studyus .dmg
+    runs-on: macos-latest # Apple Silicon (arm64); Intel builds can use macos-13
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.21.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Build the macOS app (pnpm tauri:build)
+        run: pnpm tauri:build
+
+      - name: List bundle output
+        run: |
+          ls -lh src-tauri/target/release/bundle/dmg/
+          ls -lh src-tauri/target/release/bundle/macos/
+
+      - name: Upload the .dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: studyus-macos-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 30
