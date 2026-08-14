@@ -890,30 +890,35 @@ export function ChatDock({
               return (
                 <div key={m.id} className="anim-msg space-y-1">
                   <div className="text-right text-[8.5px] uppercase tracking-[0.12em] text-white/30">You</div>
-                  <div className="ml-auto max-w-[90%] rounded bg-white/[0.07] px-2 py-1.5 text-[10.5px] leading-relaxed text-white/82">
-                    <div>{m.text}</div>
-                    {m.imageData && (
-                      <img
-                        src={m.imageData}
-                        alt="User uploaded attachment"
-                        className="mt-2 max-h-[160px] max-w-full rounded-md border border-white/10 object-contain"
-                      />
-                    )}
-                    <div className="mt-1 flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setVal(m.text);
-                          onRevertMessage(m.id);
-                        }}
-                        disabled={rewinding}
-                        aria-label="Revert to this message"
-                        title="Revert to this message"
-                        className="grid h-5 w-5 place-items-center rounded text-white/35 transition-colors hover:bg-white/10 hover:text-white/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#7dd3fc]/70 disabled:cursor-wait disabled:opacity-35"
-                      >
-                        <Undo2 size={11} aria-hidden="true" />
-                      </button>
+                  {/*  The bubble shrink-wraps its content (`w-fit`) so a short
+                   *  message stays a short bubble, and the revert control sits
+                   *  INLINE with the text rather than on its own row below it.
+                   *  Both together keep "Okay. Where is it?" to a single line
+                   *  instead of a mostly-empty box with a stranded arrow. */}
+                  <div className="ml-auto flex w-fit max-w-[90%] items-start gap-1.5 rounded bg-white/[0.07] py-1.5 pl-2 pr-1.5 text-[10.5px] leading-relaxed text-white/82">
+                    <div className="min-w-0 flex-1">
+                      <div className="whitespace-pre-wrap break-words">{m.text}</div>
+                      {m.imageData && (
+                        <img
+                          src={m.imageData}
+                          alt="User uploaded attachment"
+                          className="mt-2 max-h-[160px] max-w-full rounded-md border border-white/10 object-contain"
+                        />
+                      )}
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVal(m.text);
+                        onRevertMessage(m.id);
+                      }}
+                      disabled={rewinding}
+                      aria-label="Revert to this message"
+                      title="Revert to this message"
+                      className="-mr-0.5 grid h-4 w-4 flex-none place-items-center rounded text-white/35 transition-colors hover:bg-white/10 hover:text-white/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#7dd3fc]/70 disabled:cursor-wait disabled:opacity-35"
+                    >
+                      <Undo2 size={11} aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
               );
