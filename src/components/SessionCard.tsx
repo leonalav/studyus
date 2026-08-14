@@ -24,7 +24,6 @@ import {
   type OnboardingQuestion,
 } from "../data/tutor";
 import { generateOnboardingQuestions, transcribeNode } from "../api";
-import { countBoundAgents } from "../lib/agentRuntime";
 import { SUBJECT_LIST, type SubjectKey } from "../data/curriculum";
 import { startLiveDictation, type LiveDictation } from "../lib/voice";
 import { useCurricula, type StoredCurriculum } from "../state/curriculumStore";
@@ -47,10 +46,11 @@ type OnboardingStage = "idle" | "generating" | "asking" | "preparing" | "done";
 
 interface PendingOnboarding {
   concept: string;
-  agentCount: number;
   boundNodes: string[];
   prompt: string;
   questions: OnboardingQuestion[];
+  /** The counsellor's own hand-off line, shown when the learner replies. */
+  handoff?: string;
 }
 
 type Depth = "auto" | "simple" | "detailed";
@@ -288,18 +288,19 @@ export function SessionCard({
       ctxSubsection,
       selectedSection?.label.trim() || prompt
     );
-    const agentCount = await safeAgentCount();
-
     setOnboardingStage("generating");
     setTyping(true);
     try {
-      const { intro, questions } = await generateOnboardingQuestions({
+      const { intro, questions, closing, handoff } = await generateOnboardingQuestions({
         concept,
         boundNodes,
-        agentCount,
       });
-      const script = renderOnboardingQuestions(intro, questions, agentCount);
-      setPendingOnboarding({ concept, agentCount, boundNodes, prompt, questions });
+      // The counsellor writes its own opener and its own invitation to answer.
+      // The app contributes only the numbering.
+      const script = [renderOnboardingQuestions(intro, questions), closing]
+        .filter(Boolean)
+        .join("\n\n");
+      setPendingOnboarding({ concept, boundNodes, prompt, questions, handoff });
       setOnboardingStage("asking");
       setTyping(false);
       setMessages((m) => [...m, { id: ++idRef.current, role: "tutor", text: script }]);
@@ -329,17 +330,16 @@ export function SessionCard({
    * passes through in a tick.
    */
   async function runPreparation(pending: PendingOnboarding, answers: OnboardingAnswers) {
-    const { prompt, boundNodes, concept } = pending;
+    const { prompt, boundNodes, concept, handoff } = pending;
     setOnboardingStage("preparing");
     setPendingOnboarding(null);
-    // The tutor explicitly acknowledges the intake before any preparation
-    // begins. This also makes the hand-off clear when the learner skipped all
-    // five questions.
-    setMessages((m) => [...m, {
-      id: ++idRef.current,
-      role: "tutor",
-      text: "Okay, got it. Stay tuned as we'll be loading up the right environment for our study session!",
-    }]);
+    // The counsellor acknowledges the intake in its own words, written for this
+    // learner and this concept when the interview was generated. When the model
+    // gave us none, say nothing rather than falling back to a canned line — a
+    // fixed sentence here was the same greeting every session, forever.
+    if (handoff) {
+      setMessages((m) => [...m, { id: ++idRef.current, role: "tutor", text: handoff }]);
+    }
     setPrep({ pct: 0, stage: "Waiting for the tutor hand-off…" });
     await new Promise<void>((resolve) => window.setTimeout(resolve, 450));
     setPrep({ pct: 4, stage: "Reading your answers…" });
@@ -1225,14 +1225,6 @@ function resolveConcept(
     if (doc) return doc.name.replace(/\.pdf$/i, "");
   }
   return prompt.trim() || "this section";
-}
-
-async function safeAgentCount(): Promise<number> {
-  try {
-    return await countBoundAgents();
-  } catch {
-    return 0;
-  }
 }
 
 /** Collect the curriculum node ids the tutor should ground on for a study turn.

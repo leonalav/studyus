@@ -7,6 +7,8 @@ import { ActivityList } from "./components/ActivityList";
 import { Toasts, type ToastItem } from "./components/Toasts";
 import { SearchModal } from "./components/SearchModal";
 import { SettingsModal } from "./components/SettingsModal";
+import { HelpModal } from "./components/HelpModal";
+import { MarketplaceModal } from "./components/MarketplaceModal";
 import { TabContent, type TestParams } from "./components/TabContent";
 import { decodeTestTabId, encodeTestTabId } from "./components/testTabIds";
 import { StudyRoom } from "./components/board/StudyRoom";
@@ -64,6 +66,8 @@ export default function App() {
   const [pendingOnboarding, setPendingOnboarding] = useState<OnboardingAnswers | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [marketplaceOpen, setMarketplaceOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<
     "root" | "about" | "appearance" | "tutor" | "notifications" | "models"
   >("root");
@@ -470,6 +474,8 @@ export default function App() {
             onNotify={notify}
             onOpenSearch={() => setSearchOpen(true)}
             onOpenSettings={openSettingsRoot}
+        onOpenHelp={() => setHelpOpen(true)}
+        onOpenMarketplace={() => setMarketplaceOpen(true)}
             onOpenTab={openTab}
             onPastNoteDeleted={(id) => removeResourceTabs("note", `note-${id}`)}
             onPastNoteRenamed={(id, title) => renameResourceTabs("note", `note-${id}`, title)}
@@ -490,7 +496,23 @@ export default function App() {
 
         <div className="relative flex-1 overflow-y-auto">
           <div className="sticky top-0 z-20 bg-ink/85 backdrop-blur-sm">
-            <Toolbar title={activeTab.title} onNotify={notify} />
+            <Toolbar
+              title={activeTab.title}
+              onNotify={notify}
+              onDuplicateTab={() => handleTabContextAction("duplicate_tab", { tab: activeTab })}
+              onDeleteTab={() => closeTab(activeTab.id)}
+              // Closing the last tab would leave the shell with nothing to
+              // render, so the item is disabled rather than silently ignored.
+              canDeleteTab={tabs.length > 1}
+              starred={activeTab.starred === true}
+              onToggleStar={() =>
+                setTabs((current) =>
+                  current.map((tab) =>
+                    tab.id === activeTab.id ? { ...tab, starred: !tab.starred } : tab
+                  )
+                )
+              }
+            />
           </div>
 
           {isBoardTab ? (
@@ -583,6 +605,10 @@ export default function App() {
         onNotify={notify}
         initialSection={settingsSection}
       />
+
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
+
+      <MarketplaceModal open={marketplaceOpen} onClose={() => setMarketplaceOpen(false)} />
 
       <ContextMenu
         target={shellContextMenu}

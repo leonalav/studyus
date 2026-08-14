@@ -1,5 +1,5 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { PanelLeft, ChevronLeft, ChevronRight, Plus, Minus, Square, X, Pin } from "lucide-react";
+import { PanelLeft, ChevronLeft, ChevronRight, Plus, Minus, Square, X, Pin, Star } from "lucide-react";
 import { isTauriRuntime } from "../lib/tauri";
 
 export interface Tab {
@@ -10,6 +10,9 @@ export interface Tab {
   pinned?: boolean;
   /** Stable content identity used when a tab is duplicated under a new tab id. */
   contentId?: string;
+  /** Favourited from the toolbar star. Replaces the tab's colour dot with a
+   *  filled star, so the strip shows at a glance which sessions matter. */
+  starred?: boolean;
 }
 
 interface Props {
@@ -103,8 +106,18 @@ export function TopBar({
                 }`}
                 title={tab.title}
               >
+                {/* A favourited tab shows a filled star IN PLACE OF the colour
+                    dot, sized to the dot's footprint so the strip's rhythm does
+                    not shift. Pinning still wins: it changes where the tab
+                    lives, which is the more structural fact. */}
                 {tab.pinned ? (
                   <Pin size={11} className="shrink-0 text-accent" aria-label="Pinned tab" />
+                ) : tab.starred ? (
+                  <Star
+                    size={11}
+                    className="shrink-0 fill-[#e2b73f] text-[#e2b73f]"
+                    aria-label="Favorited tab"
+                  />
                 ) : (
                   <span className={`h-2 w-2 shrink-0 rounded-full ${dotColor}`} />
                 )}

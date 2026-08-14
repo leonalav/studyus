@@ -4,7 +4,6 @@ import {
   clusterProgressText,
   collectClusters,
   groupIdOf,
-  isAnswered,
   summarizeCluster,
   type ClusterMember,
 } from "./cluster";

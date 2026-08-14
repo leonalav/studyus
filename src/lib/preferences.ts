@@ -1,3 +1,4 @@
+import { ensureStudyusModels } from "./studyusModels";
 export const PREFERENCES_STORAGE_KEY = "studyus.preferences.v1";
 export const PREFERENCES_CHANGED_EVENT = "studyus:preferences-changed";
 
@@ -725,7 +726,10 @@ export function sanitizePreferences(value: unknown): StudyusPreferences {
       email: textValue(profile.email, DEFAULT_PREFERENCES.profile.email, 320),
       timezone: textValue(profile.timezone, DEFAULT_PREFERENCES.profile.timezone, 120),
     },
-    modelEndpoints: endpoints,
+    // The three app-provided models are always present: they are part of the
+    // product, not a user setting, so seeding here covers every load path
+    // (fresh install, restored JSON, corrupted blob) with one line.
+    modelEndpoints: ensureStudyusModels(endpoints),
   };
 }
 

@@ -2286,6 +2286,14 @@ export interface GeneratedOnboarding {
   /** Short opener the agent writes before the questions. */
   intro: string;
   questions: OnboardingQuestion[];
+  /** The counsellor's own invitation to answer, replacing what used to be a
+   *  fixed app-authored sign-off. Optional: an older cached payload has none,
+   *  and the UI simply shows nothing rather than substituting a canned line. */
+  closing?: string;
+  /** What the counsellor says the moment the learner replies, while their
+   *  materials are prepared. Must read correctly whether they answered
+   *  everything or skipped it all. */
+  handoff?: string;
 }
 
 function validateOnboardingPayload(payload: unknown): ValidationResult<GeneratedOnboarding> {
@@ -2321,8 +2329,14 @@ function validateOnboardingPayload(payload: unknown): ValidationResult<Generated
     if (text) questions.push({ id: `q${i + 1}`, question: text.trim() });
   });
 
+  // closing/handoff are optional so a model that omits them degrades to silence
+  // rather than failing the whole interview — but when present they must be
+  // real sentences, not empty strings that would render as a blank line.
+  const closing = typeof rec.closing === "string" && rec.closing.trim() ? rec.closing.trim() : undefined;
+  const handoff = typeof rec.handoff === "string" && rec.handoff.trim() ? rec.handoff.trim() : undefined;
+
   if (errors.length > 0) return invalid(...errors);
-  return { ok: true, value: { intro, questions } };
+  return { ok: true, value: { intro, questions, closing, handoff } };
 }
 
 /**
@@ -2338,7 +2352,9 @@ function validateOnboardingPayload(payload: unknown): ValidationResult<Generated
 export async function generateOnboardingQuestions(req: {
   concept: string;
   boundNodes?: string[];
-  agentCount: number;
+  /** @deprecated The counsellor no longer mentions bound agents. Accepted so
+   *  existing callers keep compiling; ignored when building the prompt. */
+  agentCount?: number;
   signal?: AbortSignal;
   endpoint?: ResolvedRoleEndpoint;
 }): Promise<GeneratedOnboarding> {
@@ -2359,24 +2375,25 @@ export async function generateOnboardingQuestions(req: {
     : `\n\nNo transcribed curriculum evidence is available for this concept yet — use only the concept and page-range metadata and do not invent specific section contents.`);
 
   const system =
-    `You are the Socratic tutor's intake interviewer. Before a study session begins you write a short set of onboarding questions ` +
-    `that let the tutor calibrate to this learner on this specific concept.\n\n` +
+    `You are the learner's study counsellor. Before a study session begins you sit down with them and find out who you are ` +
+    `about to teach — their footing on this concept, what they expect to find hard, and how they want to work — so the tutor ` +
+    `can calibrate to this person rather than teaching a generic lesson.\n\n` +
     `Rules:\n` +
-    `- Write between ${MIN_ONBOARDING_QUESTIONS} and ${MAX_ONBOARDING_QUESTIONS} questions, tailored to the concept and the evidence you are given.\n` +
+    `- Ask AT MOST ${MAX_ONBOARDING_QUESTIONS} questions, and no fewer than ${MIN_ONBOARDING_QUESTIONS}. Ask fewer when fewer will do; do not pad to reach the maximum.\n` +
     `- Probe what actually matters for teaching this material: current grasp, which sub-parts they expect to struggle with, prior background the concept depends on, pace/deadline pressure, and how they want to be taught.\n` +
     `- Ask about the learner, never quiz them on the content — this is calibration, not assessment.\n` +
     `- Each question must be answerable in one short line, since the learner replies with one line per question.\n` +
     `- Be specific to the concept. Do not emit generic filler that would fit any subject.\n` +
-    `- Do not number the questions; numbering is added by the app.\n\n` +
-    `Return JSON only: {"intro": string, "questions": [{"question": string}, ...]}. ` +
-    `"intro" is one or two sentences welcoming the learner and saying why you are asking. No prose outside the JSON, no code fences.`;
+    `- Do not number the questions; numbering is added by the app.\n` +
+    `- Write as a counsellor talking to a person, not a form being filled in.\n\n` +
+    `Return JSON only: {"intro": string, "questions": [{"question": string}, ...], "closing": string, "handoff": string}.\n` +
+    `- "intro": one or two sentences in your own voice, welcoming this learner to THIS concept and saying why you are asking.\n` +
+    `- "closing": one sentence inviting them to answer, and making clear they may skip any or all of the questions. Your words, not a fixed formula.\n` +
+    `- "handoff": one sentence you will say the moment they reply, while their materials are being prepared. It must work whether they answered every question or skipped them all. Do not promise anything specific about what the board will contain.\n` +
+    `No prose outside the JSON, no code fences.`;
 
   const user =
-    `Concept for this session: ${req.concept}\n` +
-    `Tutor agents currently bound and @-mentionable: ${req.agentCount}` +
-    (req.agentCount > 0
-      ? ` (you may ask which one they want, but the app already tells them the count — do not repeat the number).`
-      : ` (no agents are bound yet — do not ask them to choose one).`) +
+    `Concept for this session: ${req.concept}` +
     evidenceBlock;
 
   const result = await callStructuredAgent({

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { formatCredits, studyusModelSpec } from "../lib/studyusModels";
 import {
   ArrowLeft,
   Check,
@@ -6,10 +7,10 @@ import {
   ChevronRight,
   ChevronUp,
   CornerDownLeft,
+  Crown,
   LockKeyhole,
   MonitorSmartphone,
   Moon,
-  Plus,
   Settings,
   Sun,
   Trash2,
@@ -670,6 +671,19 @@ function Notifications({ preferences, updatePreferences, onNotify }: {
 
 /* ── Model configuration ──────────────────────────────────── */
 
+/** Pro marker. The tooltip carries the explanation, so the icon stays quiet. */
+function ProCrown() {
+  return (
+    <span
+      title="Reserved for Studyus Pro subscriptions"
+      className="grid h-3.5 w-3.5 place-items-center text-[#e2b73f]"
+      aria-label="Reserved for Studyus Pro subscriptions"
+    >
+      <Crown size={11} />
+    </span>
+  );
+}
+
 const EMPTY_ENDPOINT: SavedModelEndpoint = {
   id: "",
   label: "",
@@ -962,9 +976,10 @@ function Models({ preferences, updatePreferences, onNotify }: {
         </button>
         <button
           onClick={() => setCategory("custom")}
-          className={`rounded px-2 py-1.5 text-[11.5px] transition-colors ${category === "custom" ? "bg-white/[0.14] text-fg" : "text-dim hover:text-mut"}`}
+          className={`flex items-center justify-center gap-1.5 rounded px-2 py-1.5 text-[11.5px] transition-colors ${category === "custom" ? "bg-white/[0.14] text-fg" : "text-dim hover:text-mut"}`}
         >
           Custom endpoints · {customEndpoints.length}
+          <ProCrown />
         </button>
       </div>
 
@@ -990,8 +1005,23 @@ function Models({ preferences, updatePreferences, onNotify }: {
                     <span className="truncate text-[12.5px] font-medium text-fg">{endpoint.label}</span>
                     {endpoint.active && <span className="rounded-full bg-accent/20 px-1.5 py-[1px] text-[9.5px] font-medium text-accent">Active</span>}
                     {endpoint.vision && <span className="rounded-full bg-[#7dd3fc]/15 px-1.5 py-[1px] text-[9.5px] text-[#7dd3fc]">Vision</span>}
+                    {endpoint.provider === "studyus" && studyusModelSpec(endpoint.id) && (
+                      <span className="rounded-full bg-white/[0.08] px-1.5 py-[1px] font-mono text-[9.5px] text-mut" title="Credits used per request">
+                        {formatCredits(studyusModelSpec(endpoint.id)!.credits)}
+                      </span>
+                    )}
                   </div>
-                  <div className="truncate font-mono text-[10px] text-dim">{endpoint.model} · {endpoint.baseUrl} · key: {endpoint.keyMasked}</div>
+                  {endpoint.provider === "studyus" ? (
+                    // The routed model id and the key are Studyus's, not the
+                    // learner's: showing the id leaks which vendor backs each
+                    // tier, and a key field they must leave blank reads as a
+                    // broken form. The credit price is the fact that matters.
+                    <div className="truncate text-[10.5px] text-dim">
+                      {studyusModelSpec(endpoint.id)?.blurb ?? "Provided by Studyus."}
+                    </div>
+                  ) : (
+                    <div className="truncate font-mono text-[10px] text-dim">{endpoint.model} · {endpoint.baseUrl} · key: {endpoint.keyMasked}</div>
+                  )}
                 </div>
                 <button disabled={testingId === endpoint.id} onClick={() => { void testEndpoint(endpoint); }} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[10.5px] text-mut hover:bg-white/[0.12] hover:text-fg disabled:opacity-50">{testingId === endpoint.id ? "Testing…" : "Test"}</button>
                 {endpoint.provider !== "studyus" && (
@@ -1057,8 +1087,26 @@ function Models({ preferences, updatePreferences, onNotify }: {
         })}
       </div>
 
+      {category === "custom" && (
+        <div className="mb-2 flex items-start gap-2 rounded-md border border-[#e2b73f]/25 bg-[#e2b73f]/[0.06] px-2.5 py-2">
+          <Crown size={12} className="mt-[2px] shrink-0 text-[#e2b73f]" />
+          <p className="text-[11.5px] leading-relaxed text-mut">
+            <span className="font-medium text-fg">Custom endpoints are a Pro feature.</span>{" "}
+            Bring your own OpenAI-compatible model and key. Endpoints you already saved keep
+            working — you can test, assign and remove them.
+          </p>
+        </div>
+      )}
+
       {category === "custom" && (!showAdd ? (
-        <button onClick={() => setShowAdd(true)} className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-white/12 py-2 text-[12px] text-mut transition-colors hover:border-white/20 hover:text-fg"><Plus size={12} />Add OpenAI-compatible endpoint</button>
+        <button
+          onClick={() => onNotify("Custom endpoints are reserved for Studyus Pro")}
+          title="Reserved for Studyus Pro"
+          className="mb-2 flex w-full cursor-not-allowed items-center justify-center gap-1.5 rounded-md border border-dashed border-white/12 py-2 text-[12px] text-dim transition-colors hover:border-[#e2b73f]/30"
+        >
+          <Crown size={12} className="text-[#e2b73f]" />
+          Add OpenAI-compatible endpoint
+        </button>
       ) : (
         <div className="mb-2 space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-3">
           <div className="mb-1 flex items-center justify-between"><span className="text-[11.5px] font-medium text-fg">New custom endpoint</span><button onClick={() => setShowAdd(false)} className="grid h-5 w-5 place-items-center rounded text-dim hover:bg-white/[0.07] hover:text-fg"><X size={11} /></button></div>

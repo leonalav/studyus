@@ -4,13 +4,32 @@ import { Lock, Globe, ChevronDown, Link2, Star, MoreHorizontal, Check } from "lu
 interface Props {
   title: string;
   onNotify: (text: string) => void;
+  /** Duplicate the active tab. Wired to the same handler the tab context menu
+   *  uses, so both entry points behave identically. */
+  onDuplicateTab?: () => void;
+  /** Close the active tab. Absent or `canDeleteTab === false` disables the item. */
+  onDeleteTab?: () => void;
+  /** False when this is the only tab: closing it would leave no tab at all. */
+  canDeleteTab?: boolean;
+  /** Favourite state, owned by the app so the tab strip can render the star. */
+  starred?: boolean;
+  onToggleStar?: () => void;
 }
 
-export function Toolbar({ title, onNotify }: Props) {
+export function Toolbar({
+  title,
+  onNotify,
+  onDuplicateTab,
+  onDeleteTab,
+  canDeleteTab = true,
+  starred: starredProp,
+  onToggleStar,
+}: Props) {
   const [privacyOpen, setPrivacyOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [shared, setShared] = useState(false);
-  const [starred, setStarred] = useState(false);
+  const [starredLocal, setStarredLocal] = useState(false);
+  const starred = starredProp ?? starredLocal;
   const [edited, setEdited] = useState("Edited just now");
   const privacyRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
@@ -93,7 +112,8 @@ export function Toolbar({ title, onNotify }: Props) {
           className={ghostBtn}
           aria-label="Favorite"
           onClick={() => {
-            setStarred((s) => !s);
+            if (onToggleStar) onToggleStar();
+            else setStarredLocal((value) => !value);
             onNotify(starred ? "Removed from favorites" : "Added to favorites");
           }}
         >
@@ -105,20 +125,32 @@ export function Toolbar({ title, onNotify }: Props) {
           </button>
           {moreOpen && (
             <div className="anim-toast absolute right-0 top-9 z-30 w-48 rounded-md border border-edge bg-raise p-1 shadow-[0_10px_30px_rgba(0,0,0,0.5)]">
-              {["Duplicate session", "Export as Markdown", "Move to archive", "Delete"].map((label, i) => (
-                <button
-                  key={label}
-                  onClick={() => {
-                    setMoreOpen(false);
-                    onNotify(i === 3 ? "Too destructive for a demo — kept." : `${label} — done`);
-                  }}
-                  className={`block w-full rounded px-2.5 py-1.5 text-left text-[13px] transition-colors hover:bg-white/[0.06] ${
-                    i === 3 ? "text-[#d66a5a]" : "text-fg"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
+              {/* "Export as Markdown" and "Move to archive" used to live here.
+                  Both are Past Notes operations — a live session has nothing to
+                  archive and its transcript is exported from the note itself —
+                  and both were no-op toasts, so they promised work that never
+                  happened. */}
+              <button
+                onClick={() => {
+                  setMoreOpen(false);
+                  onDuplicateTab?.();
+                }}
+                className="block w-full rounded px-2.5 py-1.5 text-left text-[13px] text-fg transition-colors hover:bg-white/[0.06]"
+              >
+                Duplicate session
+              </button>
+              <button
+                onClick={() => {
+                  if (!canDeleteTab) return;
+                  setMoreOpen(false);
+                  onDeleteTab?.();
+                }}
+                disabled={!canDeleteTab}
+                title={canDeleteTab ? undefined : "This is your only tab"}
+                className="block w-full rounded px-2.5 py-1.5 text-left text-[13px] text-[#d66a5a] transition-colors hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:text-[#d66a5a]/35 disabled:hover:bg-transparent"
+              >
+                Delete this tab
+              </button>
             </div>
           )}
         </div>

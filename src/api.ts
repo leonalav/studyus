@@ -220,7 +220,6 @@ export async function askTutorTurn(req: TutorTurnRequest) {
 export async function generateOnboardingQuestions(req: {
   concept: string;
   boundNodes?: string[];
-  agentCount: number;
   signal?: AbortSignal;
 }): Promise<GeneratedOnboarding> {
   return backendGenerateOnboardingQuestions(req);

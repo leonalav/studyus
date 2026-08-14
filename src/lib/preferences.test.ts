@@ -103,7 +103,14 @@ describe("persisted Studyus preferences", () => {
     expect(parsed.tutor.sessionLength).toBe(10);
     expect(parsed.tutor.breakEvery).toBe(60);
     expect(parsed.tutor.difficulty).toBe("adaptive");
-    expect(parsed.modelEndpoints).toEqual([]);
+    // The three app-provided models are part of the product, not a user
+    // setting, so they are seeded even from an empty/garbage blob.
+    expect(parsed.modelEndpoints.map((endpoint) => endpoint.id)).toEqual([
+      "studyus-model-1",
+      "studyus-model-2",
+      "studyus-model-3",
+    ]);
+    expect(parsed.modelEndpoints.every((endpoint) => endpoint.provider === "studyus")).toBe(true);
   });
 
   it("preserves the original Inter font and honest email channel choices", () => {
@@ -184,10 +191,13 @@ describe("persisted Studyus preferences", () => {
       ],
     });
 
+    const custom = parsed.modelEndpoints.filter((endpoint) => endpoint.provider !== "studyus");
     expect(parsed.modelEndpoints.filter((endpoint) => endpoint.active)).toHaveLength(1);
-    expect(parsed.modelEndpoints[0]).not.toHaveProperty("apiKey");
-    expect(parsed.modelEndpoints[0].vision).toBe(true);
-    expect(parsed.modelEndpoints[1].vision).toBe(false);
+    expect(custom[0]).not.toHaveProperty("apiKey");
+    expect(custom[0].vision).toBe(true);
+    expect(custom[1].vision).toBe(false);
+    // Seeding app models must never drop what the learner saved.
+    expect(custom.map((endpoint) => endpoint.id)).toEqual(["a", "b"]);
   });
 
   it("builds a concrete tutor-agent reminder from the active saved style", () => {
