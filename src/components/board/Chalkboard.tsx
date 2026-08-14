@@ -1,10 +1,19 @@
-import { memo, useEffect, useRef, useState, useCallback } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Minus, Plus } from "lucide-react";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
 import { Latex, ChalkStrong } from "./Visuals";
 import { VisualizationSurface } from "./VisualizationSurface";
+import { WidgetSurface, type WidgetClusterInfo } from "./WidgetSurface";
 import type { VisualizationState } from "../../lib/visualization/types";
+import { WIDGET_LABEL, type WidgetState } from "../../lib/widgets/types";
+import {
+  clusterProgressText,
+  collectClusters,
+  groupIdOf,
+  type ClusterMember,
+} from "../../lib/widgets/cluster";
+import { ErrorBoundary } from "../ErrorBoundary";
 
 export interface BoardTheme {
   id: "classic" | "blueprint" | "carbon";
@@ -42,6 +51,12 @@ export const THEMES: BoardTheme[] = [
   },
 ];
 
+/** Block kinds that render at a bounded width, so their wrapper can shrink to
+ *  the content and leave the surrounding board draggable. "visualization" and
+ *  "row" are deliberately absent: both stretch to the content stream by design.
+ */
+const SHRINK_WRAP_BLOCKS = new Set<Block["kind"]>(["title", "text", "bullets", "latex", "callout", "widget"]);
+
 export const FONTS = [
   { id: "gloria", label: "Gloria Hallelujah", css: "'Gloria Hallelujah', cursive" },
   { id: "playwrite", label: "Playwrite NZ", css: "'Playwrite NZ', cursive" },
@@ -71,6 +86,10 @@ interface Props {
   /** Persist a visualization block's interactive state (e.g. dragged point
    * positions) back into the board so it survives a session reopen. */
   onBlockStateChange?: (blockId: string, state: VisualizationState) => void;
+  /** Persist a study widget's learner interaction (answers, slider position,
+   * revealed steps) back into the board so it survives a session reopen and
+   * reaches the tutor on the next turn. */
+  onWidgetStateChange?: (blockId: string, state: WidgetState) => void;
   /** Render the canonical board without mutation, pan, zoom, or selection UI. */
   readOnly?: boolean;
 }
@@ -115,10 +134,56 @@ export function Chalkboard({
   initialStrokes,
   onStrokesChange,
   onBlockStateChange,
+  onWidgetStateChange,
   readOnly = false,
 }: Props) {
   const [view, setView] = useState<BoardView>(initialView ?? { x: 48, y: 36, s: 1 });
   const [revealed, setRevealed] = useState(writing ? 0 : board.blocks.length);
+
+  /**
+   * Cluster progress per widget block.
+   *
+   * Computed once for the whole board rather than inside each widget, because a
+   * widget cannot see its siblings — and cluster membership is precisely a
+   * statement about siblings. Rows are walked too, so a clustered widget placed
+   * inside a two-column row still counts.
+   */
+  const clusterInfo = useMemo(() => {
+    const members: ClusterMember[] = [];
+    const walk = (blocks: Block[]) => {
+      for (const blk of blocks) {
+        if (blk.kind === "widget") members.push({ blockId: blk.id, intent: blk.intent, state: blk.state });
+        else if (blk.kind === "row") walk(blk.children);
+      }
+    };
+    walk(board.blocks);
+
+    const map: Record<string, WidgetClusterInfo> = {};
+    for (const cluster of collectClusters(members)) {
+      const progressText = clusterProgressText(cluster);
+      cluster.answerable.forEach((member, index) => {
+        map[member.blockId] = {
+          answered: cluster.answered,
+          required: cluster.required,
+          position: index + 1,
+          label: cluster.label,
+          progressText,
+        };
+      });
+      // Presentational members of the cluster get the badge but no position:
+      // they are context inside the set, not one of the things to answer.
+      for (const member of members) {
+        if (groupIdOf(member.intent) !== cluster.groupId || map[member.blockId]) continue;
+        map[member.blockId] = {
+          answered: cluster.answered,
+          required: cluster.required,
+          label: cluster.label,
+          progressText,
+        };
+      }
+    }
+    return map;
+  }, [board.blocks]);
   const [panning, setPanning] = useState(false);
   const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null);
   const [askOpen, setAskOpen] = useState(false);
@@ -189,7 +254,14 @@ export function Chalkboard({
     const t = e.target as HTMLElement;
     if (e.button !== 0 && e.button !== 1) return;
     if (t.closest("[data-nopan]")) return;
-    if (e.button === 0 && t.closest("[data-block]")) return;
+    // Left-drag over block CONTENT selects text instead of panning. But a
+    // block's wrapper is full-width, so a click far to the right of a narrow
+    // widget or paragraph still lands inside [data-block] with nothing to
+    // select — that dead zone made the board feel unpannable. When the click
+    // landed on the wrapper itself rather than any rendered child, it is empty
+    // margin: pan.
+    const block = e.button === 0 ? t.closest("[data-block]") : null;
+    if (block && block !== t) return;
     dragRef.current = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
     setPanning(true);
   };
@@ -413,10 +485,24 @@ export function Chalkboard({
             <div
               key={b.id}
               data-block
-              className={`${readOnly ? "" : containsVisualization(b) ? "anim-chalk-visual" : "anim-chalk"} ${readOnly ? "cursor-default" : "cursor-text select-text"}`}
+              /* Shrink-wrap blocks that render at a bounded width — widgets are
+                 fixed-width instruments, prose and equations cap themselves —
+                 so the empty board beside them stays board: draggable, with a
+                 grab cursor rather than an I-beam. Without this the wrapper
+                 spans the whole 920px stream and swallows left-drags landing
+                 hundreds of pixels away from anything visible. Rows and
+                 visualizations keep the full-width wrapper because their
+                 internal layout depends on it; onDown covers their margins. */
+              className={`${readOnly ? "" : containsVisualization(b) ? "anim-chalk-visual" : "anim-chalk"} ${readOnly ? "cursor-default" : "board-block select-text"} ${SHRINK_WRAP_BLOCKS.has(b.kind) ? "w-fit max-w-full" : ""}`}
               style={{ animationDelay: `${Math.min(i, 4) * 40}ms` }}
             >
-              <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} blockId={b.id} />
+              {/* One malformed block must never blank the board. A widget with
+                  a truncated payload, a visualization with impossible bounds:
+                  contain it here so every other block the tutor drew survives
+                  and the session stays usable. */}
+              <ErrorBoundary label={blockLabel(b)} resetKey={b.id}>
+                <BlockView block={b} chalk={theme.chalk} accent={accent} scale={fontScale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={b.id} readOnly={readOnly} cluster={clusterInfo[b.id]} clusterInfo={clusterInfo} />
+              </ErrorBoundary>
             </div>
           ))}
 
@@ -550,12 +636,9 @@ export function Chalkboard({
       <div className="pointer-events-none absolute bottom-3 left-[138px] rounded-md bg-black/40 px-2 py-1 font-mono text-[9.5px] text-white/55 backdrop-blur-sm">
         drag empty space to pan · ⌘/ctrl + scroll to zoom
       </div>
-<<<<<<< HEAD
       <div className="pointer-events-none absolute bottom-3 right-3 max-w-[34%] truncate rounded-md bg-black/40 px-2 py-1 text-right font-mono text-[9.5px] text-white/55 backdrop-blur-sm" title={board.title}>
         {board.title}
       </div>
-=======
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
         </>
       )}
     </div>
@@ -569,7 +652,11 @@ const BlockView = memo(function BlockView({
   scale,
   latex,
   onBlockStateChange,
+  onWidgetStateChange,
   blockId,
+  readOnly = false,
+  cluster,
+  clusterInfo,
 }: {
   block: Block;
   chalk: string;
@@ -577,11 +664,20 @@ const BlockView = memo(function BlockView({
   scale: number;
   latex: boolean;
   onBlockStateChange?: (blockId: string, state: VisualizationState) => void;
+  onWidgetStateChange?: (blockId: string, state: WidgetState) => void;
   blockId: string;
+  readOnly?: boolean;
+  cluster?: WidgetClusterInfo;
+  /** Forwarded so a row can hand each child its own cluster slice. */
+  clusterInfo?: Record<string, WidgetClusterInfo>;
 }) {
   const handleVisualizationState = useCallback(
     (next: VisualizationState) => onBlockStateChange?.(blockId, next),
     [blockId, onBlockStateChange]
+  );
+  const handleWidgetState = useCallback(
+    (next: WidgetState) => onWidgetStateChange?.(blockId, next),
+    [blockId, onWidgetStateChange]
   );
 
   switch (block.kind) {
@@ -641,6 +737,19 @@ const BlockView = memo(function BlockView({
           onState={onBlockStateChange ? handleVisualizationState : undefined}
         />
       );
+    case "widget":
+      return (
+        <WidgetSurface
+          intent={block.intent}
+          state={block.state}
+          chalk={chalk}
+          accent={accent}
+          scale={scale}
+          readOnly={readOnly}
+          cluster={cluster}
+          onState={onWidgetStateChange ? handleWidgetState : undefined}
+        />
+      );
     case "callout":
       return (
         <div
@@ -655,7 +764,9 @@ const BlockView = memo(function BlockView({
         <div className="grid grid-cols-1 gap-8 md:grid-cols-2 md:items-start">
           {block.children.map((child) => (
             <div key={child.id} data-block className="min-w-0">
-              <BlockView block={child} chalk={chalk} accent={accent} scale={scale} latex={latex} onBlockStateChange={onBlockStateChange} blockId={child.id} />
+              <ErrorBoundary label={blockLabel(child)} resetKey={child.id}>
+              <BlockView block={child} chalk={chalk} accent={accent} scale={scale} latex={latex} onBlockStateChange={onBlockStateChange} onWidgetStateChange={onWidgetStateChange} blockId={child.id} readOnly={readOnly} cluster={clusterInfo?.[child.id]} clusterInfo={clusterInfo} />
+              </ErrorBoundary>
             </div>
           ))}
         </div>
@@ -665,8 +776,17 @@ const BlockView = memo(function BlockView({
   }
 });
 
+/** Name a block for an error message the learner can actually act on. */
+function blockLabel(block: Block): string {
+  if (block.kind === "widget") return `${WIDGET_LABEL[block.intent.kind]} widget`;
+  if (block.kind === "visualization") return "Visualization";
+  return "Board block";
+}
+
 function containsVisualization(block: Block): boolean {
-  return block.kind === "visualization" || (block.kind === "row" && block.children.some(containsVisualization));
+  return block.kind === "visualization"
+    || block.kind === "widget"
+    || (block.kind === "row" && block.children.some(containsVisualization));
 }
 
 /* `**bold**` and `*em*` markers become yellow-strong text in chalk. */

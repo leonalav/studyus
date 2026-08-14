@@ -81,3 +81,34 @@ describe("persisted tab sessions", () => {
     });
   });
 });
+
+describe("tab kinds and flags survive a reload", () => {
+  it("keeps a marketplace tab", () => {
+    // A kind missing from the guard is silently dropped on reload, which reads
+    // as the tab closing itself.
+    const restored = sanitizeTabSession({
+      tabs: [{ id: "marketplace", title: "Marketplace", kind: "marketplace" }],
+      activeTabId: "marketplace",
+      closedTabs: [],
+    });
+    expect(restored.tabs.map((tab) => tab.kind)).toEqual(["marketplace"]);
+  });
+
+  it("keeps a favourited tab starred", () => {
+    const restored = sanitizeTabSession({
+      tabs: [{ id: "home", title: "Study", kind: "board", starred: true }],
+      activeTabId: "home",
+      closedTabs: [],
+    });
+    expect(restored.tabs[0].starred).toBe(true);
+  });
+
+  it("still rejects a genuinely unknown kind", () => {
+    const restored = sanitizeTabSession({
+      tabs: [{ id: "x", title: "X", kind: "wormhole" }],
+      activeTabId: "x",
+      closedTabs: [],
+    });
+    expect(restored.tabs.every((tab) => tab.kind !== ("wormhole" as never))).toBe(true);
+  });
+});

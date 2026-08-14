@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  BookOpen,
+  ShoppingCart,
   ChevronDown,
   FileText,
   GraduationCap,
@@ -10,7 +10,6 @@ import {
   Plus,
   Search,
   Settings,
-  Sparkles,
   Target,
   Trash2,
 } from "lucide-react";
@@ -32,6 +31,8 @@ interface Props {
   onNotify: (text: string) => void;
   onOpenSearch: () => void;
   onOpenSettings: () => void;
+  onOpenHelp: () => void;
+  onOpenMarketplace: () => void;
   onOpenTab: (tab: { id: string; title: string; kind: "curriculum" | "test" | "note" }) => void;
   onPastNoteDeleted?: (id: string) => void;
   onPastNoteRenamed?: (id: string, title: string) => void;
@@ -50,6 +51,8 @@ export function Sidebar({
   onNotify,
   onOpenSearch,
   onOpenSettings,
+  onOpenHelp,
+  onOpenMarketplace,
   onOpenTab,
   onPastNoteDeleted,
   onPastNoteRenamed,
@@ -208,7 +211,7 @@ export function Sidebar({
               onClick={() => onOpenTab({ id: "test-take", title: "Take a test", kind: "test" })}
               className="flex w-full items-center gap-2 rounded-[4px] px-2 py-[5px] text-left text-[13px] text-mut transition-colors hover:bg-white/[0.055] hover:text-fg"
             >
-              <Sparkles size={14} />
+              <FileText size={14} />
               Take a test
             </button>
             {testingItems.map((item) => (
@@ -348,7 +351,7 @@ export function Sidebar({
           <span className="ml-auto font-mono text-[10px] text-dim">⌘,</span>
         </button>
         <button
-          onClick={() => onNotify("Help documentation opened")}
+          onClick={onOpenHelp}
           className="flex w-full items-center gap-2 rounded-[4px] px-2 py-[5px] text-left text-[13px] text-mut transition-colors hover:bg-white/[0.055] hover:text-fg"
         >
           <HelpCircle size={14} />
@@ -358,11 +361,11 @@ export function Sidebar({
 
       <div className="border-t border-edge-soft px-2 py-2">
         <button
-          onClick={() => onNotify("Library opened")}
+          onClick={onOpenMarketplace}
           className="flex w-full items-center gap-2 rounded-[4px] px-2 py-[5px] text-left text-[13px] text-mut transition-colors hover:bg-white/[0.055] hover:text-fg"
         >
-          <BookOpen size={14} />
-          Library
+          <ShoppingCart size={14} />
+          Marketplace
         </button>
       </div>
 

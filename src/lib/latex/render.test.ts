@@ -43,7 +43,10 @@ describe("renderMath ladder", () => {
     const r = renderMath("\\begin{unknownenv} x \\end{unknownenv}", false);
     expect(r.failed).toBe(true);
     expect(r.tier).toBe("raw");
-    expect(r.html).toContain("raw LaTeX");
+    expect(r.html).toContain("unrendered maths");
+    // Never leak the phrase "raw LaTeX" onto the board: the learner reads it
+    // as broken plumbing rather than as maths the app could not typeset.
+    expect(r.html).not.toContain("raw LaTeX");
   });
 
   it("rung 3 HTML-escapes the raw source (no injection)", () => {
@@ -86,5 +89,43 @@ describe("renderMixed", () => {
       renderProse: (p) => p.replace(/\n/g, br),
     });
     expect(html).toContain(br);
+  });
+});
+
+describe("multi-line environments (KaTeX mutates the macro map)", () => {
+  /**
+   * KaTeX WRITES into the `macros` option while expanding a multi-line
+   * environment — it defines `\cr` there. The shared config object was frozen,
+   * so every one of these threw "Cannot add property \cr, object is not
+   * extensible" and fell straight through to the raw-source fallback. A
+   * Concept Card's `\begin{cases}` definition rendered on the board as the
+   * literal text "raw LaTeX\begin{cases}...", which is leaked plumbing.
+   */
+  const environments: Record<string, string> = {
+    cases: "\\begin{cases} x = f(t) \\\\ y = g(t) \\end{cases}",
+    aligned: "\\begin{aligned} x &= 1 \\\\ y &= 2 \\end{aligned}",
+    matrix: "\\begin{matrix} 1 \\\\ 2 \\end{matrix}",
+    pmatrix: "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}",
+    bmatrix: "\\begin{bmatrix} 1 \\\\ 2 \\end{bmatrix}",
+    array: "\\begin{array}{cc} 1 & 2 \\\\ 3 & 4 \\end{array}",
+  };
+
+  for (const [name, tex] of Object.entries(environments)) {
+    it(`typesets \\begin{${name}} instead of leaking its source`, () => {
+      const r = renderMath(tex, true);
+      expect(r.failed, `${name} fell back: ${r.error}`).toBe(false);
+      expect(r.tier).toBe("normalized");
+      expect(r.html).toContain("katex");
+      expect(r.html).not.toContain("latex-raw");
+    });
+  }
+
+  it("does not leak macro definitions between renders", () => {
+    // A shared mutable map would accumulate \cr from the first call. Each
+    // render must get its own copy.
+    const tex = environments.cases;
+    expect(renderMath(tex, true).failed).toBe(false);
+    expect(renderMath(tex, true).failed).toBe(false);
+    expect(renderMath("\\RR", false).failed).toBe(false);
   });
 });

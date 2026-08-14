@@ -1,5 +1,5 @@
 import katex from 'katex'
-import { KATEX_OPTIONS, mathDelimiterRegex } from './katexConfig'
+import { KATEX_OPTIONS, freshMacros, mathDelimiterRegex } from './katexConfig'
 import { normalize, extractSegments } from './normalize'
 import { validate } from './validate'
 
@@ -94,7 +94,7 @@ export function renderMath(
   const first = validate(tex, displayMode)
   if (first.ok) {
     return {
-      html: katex.renderToString(tex, { ...KATEX_OPTIONS, displayMode }),
+      html: katex.renderToString(tex, { ...KATEX_OPTIONS, macros: freshMacros(), displayMode }),
       tier: 'normalized',
       failed: false,
     }
@@ -104,7 +104,7 @@ export function renderMath(
   const stripped = stripUnknownMacros(tex)
   if (stripped !== tex && validate(stripped, displayMode).ok) {
     return {
-      html: katex.renderToString(stripped, { ...KATEX_OPTIONS, displayMode }),
+      html: katex.renderToString(stripped, { ...KATEX_OPTIONS, macros: freshMacros(), displayMode }),
       tier: 'stripped',
       failed: false,
     }
@@ -118,9 +118,14 @@ export function renderMath(
     displayMode,
     error: errMsg,
   })
+  // The learner is not the audience for a parser failure. Label it as maths we
+  // could not typeset, not as "raw LaTeX" — which reads like leaked plumbing —
+  // and keep the source visible but visually demoted so the surrounding lesson
+  // still reads as a lesson.
   const html =
-    `<code class="latex-raw" data-latex-raw="1" title="LaTeX failed to render">` +
-    `<span class="latex-raw-label">raw LaTeX</span>${escapeHtml(src)}</code>`
+    `<code class="latex-raw" data-latex-raw="1" title="This expression could not be typeset">` +
+    `<span class="latex-raw-label">unrendered maths</span>` +
+    `<span class="latex-raw-src">${escapeHtml(src)}</span></code>`
   return { html, tier: 'raw', failed: true, error: errMsg }
 }
 

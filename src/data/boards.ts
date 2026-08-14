@@ -1,4 +1,6 @@
 import type { VisualizationIntent, VisualizationState } from "../lib/visualization/types";
+import type { WidgetIntent, WidgetState } from "../lib/widgets/types";
+import { WIDGET_LABEL } from "../lib/widgets/types";
 
 export type Domain = "math" | "physics" | "chemistry" | "biology" | "programming";
 
@@ -29,6 +31,10 @@ export type Block =
   | { id: string; kind: "bullets"; items: string[] }
   | { id: string; kind: "latex"; tex: string; caption?: string }
   | { id: string; kind: "visualization"; intent: VisualizationIntent; state?: VisualizationState }
+  /** One of the 17 official chalkboard study widgets. `intent` is the agent's
+   *  configuration; `state` is the learner's interaction with it, which
+   *  round-trips through the saved session and back into the tutor prompt. */
+  | { id: string; kind: "widget"; intent: WidgetIntent; state?: WidgetState }
   | { id: string; kind: "callout"; text: string }
   | { id: string; kind: "row"; children: Block[] };
 
@@ -154,6 +160,132 @@ function visualizationCaption(intent: VisualizationIntent): string {
 }
 
 /**
+ * Export a study widget to Markdown for session notes.
+ *
+ * Notes are the learner's durable artifact, so a widget must export the
+ * teaching content it carried — a bare "[Question]" placeholder would silently
+ * drop most of the lesson from an exported session.
+ */
+function widgetToMarkdown(intent: WidgetIntent, state?: WidgetState): string[] {
+  const heading = `**[${intent.title?.trim() || WIDGET_LABEL[intent.kind]}]**`;
+  const lines: string[] = [heading];
+  const bullet = (items: readonly string[] | undefined, prefix = "- ") => {
+    for (const item of items ?? []) lines.push(`${prefix}${item}`);
+  };
+
+  switch (intent.kind) {
+    case "roadmap":
+      if (intent.heading) lines.push(intent.heading);
+      for (const step of intent.steps) {
+        const marker = step.state === "done" ? "x" : " ";
+        lines.push(`- [${marker}] ${step.label}${step.state === "current" ? "  ← current" : ""}`);
+      }
+      break;
+    case "concept_card":
+      lines.push(`**${intent.term}** — ${intent.definition}`);
+      if (intent.definitionLatex) lines.push("$$", intent.definitionLatex, "$$");
+      bullet(intent.facets);
+      break;
+    case "slider":
+      lines.push(`${intent.label}: ${state?.sliderValue ?? intent.value}${intent.unit ?? ""} (range ${intent.min}–${intent.max})`);
+      if (intent.observe) lines.push(`_${intent.observe}_`);
+      break;
+    case "animation":
+      if (intent.predictPrompt) lines.push(`_Predict:_ ${intent.predictPrompt}`);
+      intent.frames.forEach((frame, index) => lines.push(`${index + 1}. ${frame.caption}`));
+      break;
+    case "comparison":
+      if (intent.rows?.length) {
+        lines.push(`| | ${intent.columns.map((column) => column.title).join(" | ")} |`);
+        lines.push(`| --- | ${intent.columns.map(() => "---").join(" | ")} |`);
+        for (const row of intent.rows) lines.push(`| ${row.label} | ${row.cells.join(" | ")} |`);
+      } else {
+        for (const column of intent.columns) {
+          lines.push(`_${column.title}_`);
+          bullet(column.items);
+        }
+      }
+      if (intent.takeaway) lines.push(intent.takeaway);
+      break;
+    case "question":
+    case "retrieval_check": {
+      lines.push(intent.prompt);
+      if (intent.promptLatex) lines.push("$$", intent.promptLatex, "$$");
+      for (const option of intent.options ?? []) {
+        lines.push(`- ${option.correct ? "**" : ""}${option.label}${option.correct ? "**" : ""}`);
+      }
+      if (state?.responseText) lines.push(`_Your answer:_ ${state.responseText}`);
+      if (state?.correct !== undefined) lines.push(`_Result:_ ${state.correct ? "correct" : "not correct"}`);
+      if (intent.explanation) lines.push(intent.explanation);
+      break;
+    }
+    case "hint":
+      for (const step of [...intent.steps].sort((a, b) => a.level - b.level)) {
+        lines.push(`${step.level}. ${step.label} — ${step.body}`);
+      }
+      break;
+    case "scratchpad":
+      if (intent.prompt) lines.push(intent.prompt);
+      if (state?.responseText || intent.starter) lines.push("```", state?.responseText ?? intent.starter ?? "", "```");
+      break;
+    case "annotation":
+      if (intent.targetLabel) lines.push(`_On: ${intent.targetLabel}_`);
+      for (const mark of intent.marks) lines.push(`- \`${mark.target}\` — ${mark.note}`);
+      break;
+    case "reveal":
+      if (intent.prompt) lines.push(intent.prompt);
+      for (const item of intent.items) lines.push(`- ${item.label}: ${item.contentLatex ?? item.content}`);
+      break;
+    case "example":
+      if (intent.problem) lines.push(intent.problem);
+      if (intent.problemLatex) lines.push("$$", intent.problemLatex, "$$");
+      intent.steps.forEach((step, index) => {
+        lines.push(`${index + 1}. ${step.latex ? `$${step.latex}$` : step.expression ?? ""} — ${step.why}`);
+      });
+      if (intent.conclusion) lines.push(intent.conclusion);
+      break;
+    case "mistake_check":
+      for (const line of intent.lines) {
+        lines.push(`- ${line.status === "error" ? "~~" : ""}${line.content}${line.status === "error" ? "~~" : ""}${line.diagnosis ? ` — ${line.diagnosis}` : ""}`);
+      }
+      if (intent.misconception) lines.push(`_Misconception:_ ${intent.misconception}`);
+      if (intent.correction) lines.push(`_Correct:_ ${intent.correction}`);
+      break;
+    case "memory_hook":
+      lines.push(`> ${intent.hook.replace(/\n/g, "\n> ")}`);
+      if (intent.elaboration) lines.push(intent.elaboration);
+      break;
+    case "challenge":
+      lines.push(intent.prompt);
+      if (intent.promptLatex) lines.push("$$", intent.promptLatex, "$$");
+      for (const part of intent.parts ?? []) lines.push(`- ${part.prompt}`);
+      bullet(intent.successCriteria);
+      if (state?.responseText) lines.push(`_Your solution:_ ${state.responseText}`);
+      break;
+    case "reflection":
+      lines.push(intent.prompt);
+      bullet(intent.guidance);
+      if (state?.responseText) lines.push(`_Your explanation:_ ${state.responseText}`);
+      break;
+    case "mastery_card": {
+      lines.push(`### ${intent.concept}`);
+      for (const [dimension, score] of Object.entries(intent.evidence)) {
+        lines.push(`- ${dimension}: ${Math.round(score)}%`);
+      }
+      if (intent.understands?.length) { lines.push("_Understands_"); bullet(intent.understands); }
+      if (intent.canDo?.length) { lines.push("_Can do_"); bullet(intent.canDo); }
+      if (intent.recalls?.length) { lines.push("_Recall_"); bullet(intent.recalls); }
+      if (intent.watch?.length) { lines.push("_Watch_"); bullet(intent.watch, "- △ "); }
+      if (intent.next) lines.push(`_Next:_ ${intent.next}`);
+      break;
+    }
+  }
+
+  if (intent.note) lines.push(`_${intent.note}_`);
+  return lines;
+}
+
+/**
  * Placeholder prep steps for the SessionCard animated "loading" sequence.
  * These are being replaced with a real curriculum transcription pipeline that
  * shows "Preparing curriculum..." with a progress bar. For now, returns empty
@@ -189,6 +321,9 @@ export function boardToMarkdown(board: BoardDoc): string {
           lines.push(caption ? `**[${visualizationLabel(b.intent)}]** ${caption}` : `**[${visualizationLabel(b.intent)}]**`, "");
           break;
         }
+        case "widget":
+          lines.push(...widgetToMarkdown(b.intent, b.state), "");
+          break;
         case "row":
           walk(b.children);
           break;

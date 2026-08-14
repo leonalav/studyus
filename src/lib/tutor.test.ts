@@ -14,6 +14,9 @@ import {
   replaceSessionTranscript,
   setSessionHintLevel,
   getSessionHintLevel,
+  getSessionMasteryStage,
+  setSessionMasteryStage,
+  resolveNextMasteryStage,
   MAX_HINT_LEVEL,
   MAX_BOARD_OPS_PER_TURN,
   MAX_THREAD_INITIAL_BLOCKS,
@@ -32,6 +35,8 @@ import {
   askTutorTurn,
   type BoardOp,
   type TutorTurn,
+  enforceLearnerAgency,
+  turnLeavesLearnerSomethingToDo,
 } from "./tutor";
 import { DEFAULT_TUTOR } from "./preferences";
 import { bindModelRole, defaultCapabilities } from "./llm";
@@ -126,6 +131,24 @@ describe("Tutor turn schema validation", () => {
     if (res.ok) expect(res.value.boardOps).toHaveLength(turns.length);
   });
 
+  it("accepts redraw_block, the 'I cannot see it' repair", () => {
+    // Content-preserving: it carries no payload beyond the target, because a
+    // redraw must never quietly change what the block says.
+    const res = validateTutorPayload(
+      validTurn({ board_ops: [{ op: "redraw_block", targetAnchor: "agent-vis-1" }] }),
+      EVIDENCE
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value.boardOps[0]).toEqual({ op: "redraw_block", targetAnchor: "agent-vis-1" });
+  });
+
+  it("requires a target for redraw_block", () => {
+    // Without a target there is no way to know what the learner cannot see,
+    // and redrawing an arbitrary block would look like a random glitch.
+    const res = validateTutorPayload(validTurn({ board_ops: [{ op: "redraw_block" }] }), EVIDENCE);
+    expect(res.ok).toBe(false);
+  });
+
   it("accepts and normalizes a bounded agent thread operation", () => {
     const res = validateTutorPayload(validTurn({
       board_ops: [{
@@ -206,6 +229,104 @@ describe("Tutor turn schema validation", () => {
   it("rejects a turn with no speech", () => {
     const res = validateTutorPayload(validTurn({ speech: "   " }), EVIDENCE);
     expect(res.ok).toBe(false);
+  });
+
+  it("accepts the widget board operations and validates the widget intent", () => {
+    const res = validateTutorPayload(validTurn({
+      board_ops: [
+        {
+          op: "place_widget",
+          intent: {
+            kind: "question",
+            prompt: "As h shrinks toward 0, what is the secant line becoming?",
+            format: "multiple_choice",
+            options: [
+              { id: "a", label: "The tangent line at that point", correct: true },
+              { id: "b", label: "A vertical line", misconception: "reads h → 0 as the run becoming the whole graph" },
+            ],
+          },
+        },
+        {
+          op: "update_widget",
+          targetAnchor: "agent-widget-1",
+          intent: {
+            kind: "roadmap",
+            steps: [
+              { id: "s1", label: "Encounter", state: "done" },
+              { id: "s2", label: "Understand", state: "current" },
+            ],
+          },
+        },
+      ],
+    }), EVIDENCE);
+
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value.boardOps.map((op) => op.op)).toEqual(["place_widget", "update_widget"]);
+    }
+  });
+
+  it("rejects a widget whose pedagogical contract is broken", () => {
+    // Structurally a question, but no option is marked correct, so it can never
+    // diagnose anything. It must fail at the protocol boundary.
+    const res = validateTutorPayload(validTurn({
+      board_ops: [{
+        op: "place_widget",
+        intent: {
+          kind: "question",
+          prompt: "Which is the derivative?",
+          format: "multiple_choice",
+          options: [{ id: "a", label: "2x" }, { id: "b", label: "x^2" }],
+        },
+      }],
+    }), EVIDENCE);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.errors.join(" ")).toMatch(/board_ops\[0\]\.intent/);
+  });
+
+  it("accepts a widget block inside replace_block and spawn_thread specs", () => {
+    const res = validateTutorPayload(validTurn({
+      board_ops: [{
+        op: "replace_block",
+        targetIndex: 0,
+        block: {
+          kind: "widget",
+          intent: { kind: "memory_hook", hook: "Derivative = slope of the tangent = limit of the secant." },
+        },
+      }],
+    }), EVIDENCE);
+    expect(res.ok).toBe(true);
+  });
+
+  it("records the mastery stage and requires evidence before advancing", () => {
+    const withStage = validateTutorPayload(validTurn({
+      stage: "construct",
+      stage_advance: { ready: true, evidence: "Solved the second difference quotient unaided after one level-1 hint." },
+    }), EVIDENCE);
+    expect(withStage.ok).toBe(true);
+    if (withStage.ok) {
+      expect(withStage.value.stage).toBe("construct");
+      expect(withStage.value.stageAdvance?.ready).toBe(true);
+    }
+
+    // Advancement without evidence is exactly the click-through failure mode.
+    const unevidenced = validateTutorPayload(validTurn({
+      stage: "construct",
+      stage_advance: { ready: true },
+    }), EVIDENCE);
+    expect(unevidenced.ok).toBe(false);
+    if (!unevidenced.ok) expect(unevidenced.errors.join(" ")).toMatch(/stage_advance\.ready=true requires/);
+
+    // Declining to advance needs no evidence.
+    const notReady = validateTutorPayload(validTurn({
+      stage: "apply",
+      stage_advance: { ready: false, evidence: "Still leaning on hints for the chain rule." },
+    }), EVIDENCE);
+    expect(notReady.ok).toBe(true);
+
+    const badStage = validateTutorPayload(validTurn({ stage: "graduated" }), EVIDENCE);
+    expect(badStage.ok).toBe(false);
   });
 
   it("validates the optional diagnosis object", () => {
@@ -415,6 +536,50 @@ describe("Tutor Studio runtime policy", () => {
       expect(result.boardOps).toHaveLength(mappings.length - 1);
       expect(result.boardOps).not.toContainEqual({ op: "visualize", intent: blockedIntent });
     }
+  });
+
+  it("gates study widgets behind their own permission", () => {
+    const widgetIntent = { kind: "scratchpad" as const, prompt: "Your turn. Expand (x+h)^2." };
+    const turn: TutorTurn = {
+      speech: "Widgets",
+      evidenceRefs: [],
+      boardOps: [
+        { op: "place_widget", intent: widgetIntent },
+        { op: "update_widget", targetIndex: 0, intent: widgetIntent },
+        { op: "write_text", text: "still allowed" },
+      ],
+    };
+
+    expect(enforceTutorToolPolicy(turn, DEFAULT_TUTOR.tools).boardOps).toHaveLength(3);
+
+    const noWidgets = enforceTutorToolPolicy(turn, { ...DEFAULT_TUTOR.tools, studyWidgets: false });
+    expect(noWidgets.boardOps).toEqual([{ op: "write_text", text: "still allowed" }]);
+
+    // Updating a widget also needs board editing, since it rewrites a block.
+    const noEditing = enforceTutorToolPolicy(turn, { ...DEFAULT_TUTOR.tools, boardEditing: false });
+    expect(noEditing.boardOps.map((op) => op.op)).toEqual(["place_widget", "write_text"]);
+  });
+
+  it("strips widget blocks from thread specs when widgets are disabled", () => {
+    const turn: TutorTurn = {
+      speech: "Thread",
+      evidenceRefs: [],
+      boardOps: [{
+        op: "spawn_thread",
+        title: "Chain rule detour",
+        reason: "Separable investigation",
+        initialBlocks: [
+          { kind: "title", text: "Chain rule detour" },
+          { kind: "widget", intent: { kind: "concept_card", term: "Chain rule", definition: "Differentiate the outside, then multiply by the derivative of the inside." } },
+        ],
+      }],
+    };
+
+    const allowed = enforceTutorToolPolicy(turn, DEFAULT_TUTOR.tools).boardOps[0];
+    expect(allowed.op === "spawn_thread" && allowed.initialBlocks).toHaveLength(2);
+
+    const blocked = enforceTutorToolPolicy(turn, { ...DEFAULT_TUTOR.tools, studyWidgets: false }).boardOps[0];
+    expect(blocked.op === "spawn_thread" && blocked.initialBlocks).toHaveLength(1);
   });
 
   it("sends at most three valid images only when tool, privacy, and vision gates all permit it", () => {
@@ -797,5 +962,173 @@ describe("Tutor session hint level persistence", () => {
 
     await setSessionHintLevel("session-tutor-test", 99);
     expect(await getSessionHintLevel("session-tutor-test")).toBe(MAX_HINT_LEVEL);
+  });
+});
+
+describe("Guide to Mastery stage persistence", () => {
+  const SESSION_ID = "session-mastery-stage-test";
+
+  beforeEach(async () => {
+    const db = await getDb();
+    db.run("DELETE FROM chalkboard_sessions WHERE id = ?;", [SESSION_ID]);
+  });
+
+  it("starts every session at Encounter", async () => {
+    await ensureChalkboardSession({ id: SESSION_ID, title: "Derivatives", domain: "math" });
+    expect(await getSessionMasteryStage(SESSION_ID)).toEqual({ stage: "encounter", evidence: "" });
+  });
+
+  it("round-trips the stage and the evidence that justified it", async () => {
+    await ensureChalkboardSession({ id: SESSION_ID, title: "Derivatives", domain: "math" });
+    await setSessionMasteryStage(SESSION_ID, "construct", "Wrote the difference quotient unaided.");
+
+    const stored = await getSessionMasteryStage(SESSION_ID);
+    expect(stored.stage).toBe("construct");
+    expect(stored.evidence).toBe("Wrote the difference quotient unaided.");
+  });
+});
+
+describe("Guide to Mastery stage advancement", () => {
+  it("advances exactly one stage, and only with evidence", () => {
+    expect(resolveNextMasteryStage("encounter", {
+      stage: "encounter",
+      stageAdvance: { ready: true, evidence: "Described the tangent-line picture in their own words." },
+    })).toEqual({ stage: "understand", evidence: "Described the tangent-line picture in their own words." });
+
+    // No advancement claimed.
+    expect(resolveNextMasteryStage("encounter", { stage: "encounter" })).toBeNull();
+    expect(resolveNextMasteryStage("encounter", {
+      stage: "encounter",
+      stageAdvance: { ready: false, evidence: "Still guessing." },
+    })).toBeNull();
+  });
+
+  it("refuses to skip stages no matter what the model reports", () => {
+    // The model claims it is already at Master. It still only moves one rung.
+    expect(resolveNextMasteryStage("encounter", {
+      stage: "master",
+      stageAdvance: { ready: true, evidence: "They seem to have it." },
+    })?.stage).toBe("understand");
+  });
+
+  it("cannot advance past the final stage", () => {
+    expect(resolveNextMasteryStage("master", {
+      stage: "master",
+      stageAdvance: { ready: true, evidence: "All five dimensions are strong." },
+    })).toBeNull();
+  });
+
+  it("honours an observed regression immediately and without evidence", () => {
+    // Diagnosing that the learner is actually behind must never be harder than
+    // promoting them.
+    expect(resolveNextMasteryStage("apply", { stage: "understand" })).toEqual({
+      stage: "understand",
+      evidence: "",
+    });
+  });
+});
+
+describe("the learner is never passive", () => {
+  /**
+   * The reported failure: the tutor placed a roadmap, said "I've put the
+   * roadmap for this lesson on the board", and stopped. The learner was shown a
+   * plan and handed nothing to do. Policy is enforced at runtime as well as in
+   * the prompt, because a prompt is guidance and this is policy.
+   */
+  const roadmap = {
+    op: "place_widget" as const,
+    intent: {
+      kind: "roadmap" as const,
+      heading: "Today's Path: Approximating Areas",
+      steps: [
+        { id: "s1", label: "Encounter", state: "current" as const },
+        { id: "s2", label: "Understand", state: "upcoming" as const },
+      ],
+    },
+  };
+  const question = {
+    op: "place_widget" as const,
+    intent: {
+      kind: "question" as const,
+      format: "multiple_choice" as const,
+      prompt: "Why rectangles?",
+      options: [
+        { id: "a", label: "They tile without gaps", correct: true },
+        { id: "b", label: "They are easier to draw", misconception: "Convenience over structure" },
+      ],
+    },
+  };
+
+  const turn = (boardOps: unknown[], speech = "Here is the plan.") =>
+    ({ speech, boardOps, evidenceRefs: [] }) as unknown as Parameters<typeof enforceLearnerAgency>[0];
+
+  it("flags a roadmap-only turn as leaving the learner nothing to do", () => {
+    expect(turnLeavesLearnerSomethingToDo(turn([roadmap]))).toBe(false);
+  });
+
+  it("accepts the same turn once it also opens the first step", () => {
+    expect(turnLeavesLearnerSomethingToDo(turn([roadmap, question]))).toBe(true);
+  });
+
+  it("treats other presentational-only turns the same way", () => {
+    const presentational = [
+      { op: "write_text", text: "A Riemann sum approximates area." },
+      { op: "write_bullets", items: ["left endpoint", "right endpoint"] },
+      { op: "write_latex", tex: "\\sum f(x_i)\\Delta x" },
+      { op: "write_callout", text: "Watch the width." },
+      { op: "place_widget", intent: { kind: "concept_card", term: "Riemann sum", definition: "A sum of rectangle areas." } },
+    ];
+    for (const op of presentational) {
+      expect(turnLeavesLearnerSomethingToDo(turn([op])), `${op.op} should not count as a task`).toBe(false);
+    }
+  });
+
+  it("counts an exploration widget only once it has a respond prompt", () => {
+    const bare = { op: "place_widget", intent: { kind: "slider", label: "Rectangles n", parameter: "n", min: 1, max: 50, value: 4 } };
+    expect(turnLeavesLearnerSomethingToDo(turn([bare]))).toBe(false);
+
+    const asked = {
+      op: "place_widget",
+      intent: { ...bare.intent, respond: { prompt: "What happens to the error as n grows?" } },
+    };
+    expect(turnLeavesLearnerSomethingToDo(turn([asked]))).toBe(true);
+  });
+
+  it("does not demand a new task from housekeeping-only turns", () => {
+    // Repairing or tidying the board owes the learner nothing new; their work
+    // is already sitting there from an earlier turn.
+    for (const op of [
+      { op: "redraw_block", targetAnchor: "agent-w1" },
+      { op: "delete_block", targetIndex: 0 },
+      { op: "revise_text", targetIndex: 0, find: "a", replace: "b" },
+    ]) {
+      expect(turnLeavesLearnerSomethingToDo(turn([op])), `${op.op}`).toBe(true);
+    }
+  });
+
+  it("hands the work back in speech when the agent forgot to", () => {
+    const fixed = enforceLearnerAgency(turn([roadmap]));
+    expect(fixed.speech).toContain("Here is the plan.");
+    // The nudge must be answerable, not another "does that make sense?".
+    expect(fixed.speech).toMatch(/tell me what you already know|ask me the first thing/i);
+  });
+
+  it("never fabricates a board op the agent did not author", () => {
+    // Synthesizing a question would put words in the tutor's mouth and could
+    // contradict the lesson it is actually teaching.
+    const fixed = enforceLearnerAgency(turn([roadmap]));
+    expect(fixed.boardOps).toHaveLength(1);
+    expect(fixed.boardOps[0]).toEqual(roadmap);
+  });
+
+  it("leaves a compliant turn completely untouched", () => {
+    const compliant = turn([roadmap, question]);
+    expect(enforceLearnerAgency(compliant)).toBe(compliant);
+  });
+
+  it("leaves speech-only turns alone", () => {
+    // A greeting or clarification has no board ops and owes no task.
+    const speechOnly = turn([], "Yes, that link is in Threads.");
+    expect(enforceLearnerAgency(speechOnly)).toBe(speechOnly);
   });
 });

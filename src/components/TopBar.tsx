@@ -1,15 +1,18 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { PanelLeft, ChevronLeft, ChevronRight, Plus, Minus, Square, X, Pin } from "lucide-react";
+import { PanelLeft, ChevronLeft, ChevronRight, Plus, Minus, Square, X, Pin, Star } from "lucide-react";
 import { isTauriRuntime } from "../lib/tauri";
 
 export interface Tab {
   id: string;
   title: string;
-  kind: "board" | "curriculum" | "test" | "note";
+  kind: "board" | "curriculum" | "test" | "note" | "marketplace";
   /** Pinned tabs are kept at the start of the strip and restored on restart. */
   pinned?: boolean;
   /** Stable content identity used when a tab is duplicated under a new tab id. */
   contentId?: string;
+  /** Favourited from the toolbar star. Replaces the tab's colour dot with a
+   *  filled star, so the strip shows at a glance which sessions matter. */
+  starred?: boolean;
 }
 
 interface Props {
@@ -84,6 +87,8 @@ export function TopBar({
                 ? "bg-[#a5b4fc]"
                 : tab.kind === "note"
                 ? "bg-[#86efac]"
+                : tab.kind === "marketplace"
+                ? "bg-[#f0abfc]"
                 : "bg-accent";
             return (
               <div
@@ -103,8 +108,18 @@ export function TopBar({
                 }`}
                 title={tab.title}
               >
+                {/* A favourited tab shows a filled star IN PLACE OF the colour
+                    dot, sized to the dot's footprint so the strip's rhythm does
+                    not shift. Pinning still wins: it changes where the tab
+                    lives, which is the more structural fact. */}
                 {tab.pinned ? (
                   <Pin size={11} className="shrink-0 text-accent" aria-label="Pinned tab" />
+                ) : tab.starred ? (
+                  <Star
+                    size={11}
+                    className="shrink-0 fill-[#e2b73f] text-[#e2b73f]"
+                    aria-label="Favorited tab"
+                  />
                 ) : (
                   <span className={`h-2 w-2 shrink-0 rounded-full ${dotColor}`} />
                 )}

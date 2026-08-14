@@ -13,6 +13,8 @@ import {
   Mic,
   AtSign,
   X,
+  AlertTriangle,
+  Upload,
 } from "lucide-react";
 import {
   renderOnboardingQuestions,
@@ -22,7 +24,6 @@ import {
   type OnboardingQuestion,
 } from "../data/tutor";
 import { generateOnboardingQuestions, transcribeNode } from "../api";
-import { countBoundAgents } from "../lib/agentRuntime";
 import { SUBJECT_LIST, type SubjectKey } from "../data/curriculum";
 import { startLiveDictation, type LiveDictation } from "../lib/voice";
 import { useCurricula, type StoredCurriculum } from "../state/curriculumStore";
@@ -45,10 +46,11 @@ type OnboardingStage = "idle" | "generating" | "asking" | "preparing" | "done";
 
 interface PendingOnboarding {
   concept: string;
-  agentCount: number;
   boundNodes: string[];
   prompt: string;
   questions: OnboardingQuestion[];
+  /** The counsellor's own hand-off line, shown when the learner replies. */
+  handoff?: string;
 }
 
 type Depth = "auto" | "simple" | "detailed";
@@ -83,8 +85,35 @@ export function SessionCard({
   selectedSection = null,
   onSelectedSectionChange,
 }: Props) {
-  const { curricula } = useCurricula();
+  const { curricula, addFiles } = useCurricula();
   const [started, setStarted] = useState(false);
+  const curriculumRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
+  /** Dismissed for this visit only — deliberately not persisted. The notice is
+   *  advice, and a learner who dismisses it today should still be told next
+   *  session that the tutor is working without source material. */
+  const [noticeDismissed, setNoticeDismissed] = useState(false);
+  const hasCurriculum = curricula.length > 0;
+  const showCurriculumNotice = !hasCurriculum && !noticeDismissed;
+
+  /** Import straight from the notice. Sending the learner to hunt for the
+   *  sidebar's "+" is how a warning becomes an obstacle instead of a fix. */
+  const importCurriculum = async (files: FileList | null) => {
+    if (!files?.length || importing) return;
+    setImporting(true);
+    try {
+      const added = await addFiles(files);
+      notify(
+        added.length > 0
+          ? `Imported ${added.length} curriculum PDF${added.length === 1 ? "" : "s"} — pick a concept to ground this session`
+          : "That file could not be read as a curriculum PDF"
+      );
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Curriculum import failed");
+    } finally {
+      setImporting(false);
+    }
+  };
   const [messages, setMessages] = useState<Msg[]>([]);
   const [typing, setTyping] = useState(false);
   const [input, setInput] = useState("");
@@ -259,18 +288,19 @@ export function SessionCard({
       ctxSubsection,
       selectedSection?.label.trim() || prompt
     );
-    const agentCount = await safeAgentCount();
-
     setOnboardingStage("generating");
     setTyping(true);
     try {
-      const { intro, questions } = await generateOnboardingQuestions({
+      const { intro, questions, closing, handoff } = await generateOnboardingQuestions({
         concept,
         boundNodes,
-        agentCount,
       });
-      const script = renderOnboardingQuestions(intro, questions, agentCount);
-      setPendingOnboarding({ concept, agentCount, boundNodes, prompt, questions });
+      // The counsellor writes its own opener and its own invitation to answer.
+      // The app contributes only the numbering.
+      const script = [renderOnboardingQuestions(intro, questions), closing]
+        .filter(Boolean)
+        .join("\n\n");
+      setPendingOnboarding({ concept, boundNodes, prompt, questions, handoff });
       setOnboardingStage("asking");
       setTyping(false);
       setMessages((m) => [...m, { id: ++idRef.current, role: "tutor", text: script }]);
@@ -300,17 +330,16 @@ export function SessionCard({
    * passes through in a tick.
    */
   async function runPreparation(pending: PendingOnboarding, answers: OnboardingAnswers) {
-    const { prompt, boundNodes, concept } = pending;
+    const { prompt, boundNodes, concept, handoff } = pending;
     setOnboardingStage("preparing");
     setPendingOnboarding(null);
-    // The tutor explicitly acknowledges the intake before any preparation
-    // begins. This also makes the hand-off clear when the learner skipped all
-    // five questions.
-    setMessages((m) => [...m, {
-      id: ++idRef.current,
-      role: "tutor",
-      text: "Okay, got it. Stay tuned as we'll be loading up the right environment for our study session!",
-    }]);
+    // The counsellor acknowledges the intake in its own words, written for this
+    // learner and this concept when the interview was generated. When the model
+    // gave us none, say nothing rather than falling back to a canned line — a
+    // fixed sentence here was the same greeting every session, forever.
+    if (handoff) {
+      setMessages((m) => [...m, { id: ++idRef.current, role: "tutor", text: handoff }]);
+    }
     setPrep({ pct: 0, stage: "Waiting for the tutor hand-off…" });
     await new Promise<void>((resolve) => window.setTimeout(resolve, 450));
     setPrep({ pct: 4, stage: "Reading your answers…" });
@@ -464,6 +493,58 @@ export function SessionCard({
 
       {/* The main surface is the composer, not a second narrow chat bar. */}
       <div className="px-4 pb-4 pt-3">
+        {/* No curriculum imported. The tutor still works, but it is teaching
+            from general knowledge rather than the learner's own material — it
+            cannot cite their textbook, follow its ordering, or ground a mastery
+            verdict in the syllabus they are actually assessed on. Say that
+            plainly and make importing a one-click fix, rather than blocking a
+            learner who genuinely wants free study. */}
+        {showCurriculumNotice && (
+          <div className="anim-fade-up mb-3 rounded-lg border border-warn/35 bg-warn/[0.07] px-3 py-2.5">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle size={14} className="mt-[2px] flex-none text-warn" />
+              <div className="min-w-0 flex-1">
+                <p className="text-[12.5px] font-medium text-fg">No curriculum imported</p>
+                <p className="mt-0.5 text-[11.5px] leading-relaxed text-mut">
+                  You can still chat, but Studyus will teach from general knowledge instead of your
+                  own material — it can&rsquo;t follow your syllabus, quote your textbook, or judge
+                  mastery against what you&rsquo;re actually assessed on.
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <input
+                    ref={curriculumRef}
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      void importCurriculum(e.target.files);
+                      if (curriculumRef.current) curriculumRef.current.value = "";
+                    }}
+                  />
+                  <button
+                    onClick={() => curriculumRef.current?.click()}
+                    disabled={importing}
+                    className="flex items-center gap-1.5 rounded-md bg-warn/15 px-2.5 py-1.5 text-[12px] font-medium text-warn transition-colors hover:bg-warn/25 disabled:cursor-wait disabled:opacity-60"
+                  >
+                    <Upload size={12} />
+                    {importing ? "Importing…" : "Import curriculum PDF"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setNoticeDismissed(true);
+                      notify("Studying without a curriculum");
+                    }}
+                    className="rounded-md px-2.5 py-1.5 text-[12px] text-dim transition-colors hover:bg-white/[0.06] hover:text-fg"
+                  >
+                    Continue without one
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {started && messages.length > 0 && (
           <div ref={scrollRef} className="mb-3 max-h-[220px] space-y-4 overflow-y-auto pr-1">
             {messages.map((m) =>
@@ -535,6 +616,11 @@ export function SessionCard({
                   : started
                     ? "Your next prompt"
                     : "Write to Studyus"}
+            {!hasCurriculum && onboardingStage === "idle" ? (
+              <span className="ml-1.5 normal-case tracking-normal text-warn/80" title="Studyus is answering from general knowledge, not your material">
+                · no curriculum
+              </span>
+            ) : null}
           </div>
           <textarea
             ref={inputRef}
@@ -863,11 +949,7 @@ function ContextPicker({
   // The picker's title is the chosen subconcept — that is what replaces
   // "Add context" once a concept is picked from the PDF's bookmarks.
   const label = selectedNode
-<<<<<<< HEAD
     ? formatNodeLabel(selectedNode)
-=======
-    ? [selectedNode.sectionNumber, selectedNode.title].filter(Boolean).join(" ")
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
     : docName ?? meta?.label ?? externalSelection?.label ?? "Add context";
 
   return (
@@ -1013,13 +1095,7 @@ function ContextPicker({
                       })
                     }
                     onPick={(picked) => {
-<<<<<<< HEAD
                       const pickedLabel = formatNodeLabel(picked);
-=======
-                      const pickedLabel = [picked.sectionNumber, picked.title]
-                        .filter(Boolean)
-                        .join(" ");
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
                       setSubsection(picked.id);
                       onSelectionChange?.({ sourceId: doc!, nodeId: picked.id, label: pickedLabel });
                       setOpen(false);
@@ -1142,25 +1218,13 @@ function resolveConcept(
   if (subsectionId) {
     const doc = curricula.find((c) => c.id === docId);
     const node = doc ? findNodeDeep(doc.nodes, subsectionId) : null;
-<<<<<<< HEAD
     if (node) return formatNodeLabel(node);
-=======
-    if (node) return [node.sectionNumber, node.title].filter(Boolean).join(" ") || node.title;
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
   }
   if (docId) {
     const doc = curricula.find((c) => c.id === docId);
     if (doc) return doc.name.replace(/\.pdf$/i, "");
   }
   return prompt.trim() || "this section";
-}
-
-async function safeAgentCount(): Promise<number> {
-  try {
-    return await countBoundAgents();
-  } catch {
-    return 0;
-  }
 }
 
 /** Collect the curriculum node ids the tutor should ground on for a study turn.
