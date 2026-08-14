@@ -198,3 +198,100 @@ describe("error boundary containment", () => {
     expect(ErrorBoundary.getDerivedStateFromError(new Error("x")).error).toBeInstanceOf(Error);
   });
 });
+
+describe("response affordance on exploration widgets", () => {
+  /**
+   * Slider, Animation, Hint and Annotation are watch-only by default. When the
+   * agent authors a `respond` block they gain somewhere for the learner to
+   * answer — which is what converts exploration into evidence the mastery loop
+   * can assess.
+   */
+  const respond = {
+    prompt: "What happens to the slope as h shrinks?",
+    placeholder: "In your own words…",
+    submitLabel: "Send",
+  };
+
+  const explorers: Record<string, unknown> = {
+    slider: { kind: "slider", label: "Spacing h", parameter: "h", min: 0, max: 1, value: 0.5 },
+    animation: { kind: "animation", frames: [{ id: "f1", caption: "The secant pivots" }] },
+    hint: { kind: "hint", steps: [{ level: 1, label: "Nudge", body: "Look at the denominator." }] },
+    annotation: { kind: "annotation", marks: [{ id: "m1", target: "h", note: "This does the work." }] },
+  };
+
+  for (const [kind, intent] of Object.entries(explorers)) {
+    it(`renders no input on a ${kind} the agent did not attach one to`, () => {
+      // A widget placed purely to illustrate must not grow a stray text box.
+      const html = renderToStaticMarkup(
+        <WidgetSurface intent={intent as WidgetIntent} chalk="#e8e8ea" accent="#7dd3fc" />
+      );
+      expect(html).not.toContain("<textarea");
+      expect(html).not.toContain("Your turn");
+    });
+
+    it(`renders the agent's own prompt and labels on a ${kind}`, () => {
+      const html = renderToStaticMarkup(
+        <WidgetSurface intent={{ ...(intent as object), respond } as WidgetIntent} chalk="#e8e8ea" accent="#7dd3fc" />
+      );
+      expect(html).toContain("<textarea");
+      // Fully agent-configured: the prompt, placeholder and button text are the
+      // agent's, never a hardcoded default.
+      expect(html).toContain("What happens to the slope as h shrinks?");
+      expect(html).toContain("In your own words…");
+      expect(html).toContain("Send");
+    });
+  }
+
+  it("locks the input after submitting so an answer cannot be silently rewritten", () => {
+    const html = renderToStaticMarkup(
+      <WidgetSurface
+        intent={{ ...(explorers.slider as object), respond } as WidgetIntent}
+        state={{ responseText: "It flattens out", submitted: true }}
+        chalk="#e8e8ea"
+        accent="#7dd3fc"
+      />
+    );
+    expect(html).toContain("It flattens out");
+    expect(html).toMatch(/disabled/);
+    expect(html).toMatch(/tutor will respond/);
+  });
+
+  it("uses the agent's acknowledgement when it wrote one", () => {
+    const html = renderToStaticMarkup(
+      <WidgetSurface
+        intent={{ ...(explorers.hint as object), respond: { ...respond, acknowledgement: "Noted — checking that now." } } as WidgetIntent}
+        state={{ submitted: true, responseText: "x" }}
+        chalk="#e8e8ea"
+        accent="#7dd3fc"
+      />
+    );
+    expect(html).toContain("Noted — checking that now.");
+  });
+
+  it("keeps the widget's own content alongside the new input", () => {
+    // The affordance is additive: it must not displace what the widget teaches.
+    const html = renderToStaticMarkup(
+      <WidgetSurface
+        intent={{ ...(explorers.annotation as object), respond } as WidgetIntent}
+        chalk="#e8e8ea"
+        accent="#7dd3fc"
+      />
+    );
+    expect(html).toContain("This does the work.");
+    expect(html).toContain("<textarea");
+  });
+
+  it("hides the input in a read-only snapshot", () => {
+    const html = renderToStaticMarkup(
+      <WidgetSurface
+        intent={{ ...(explorers.slider as object), respond } as WidgetIntent}
+        chalk="#e8e8ea"
+        accent="#7dd3fc"
+        readOnly
+      />
+    );
+    // Still visible for context, but not answerable from a Past Note.
+    expect(html).toContain("What happens to the slope as h shrinks?");
+    expect(html).toMatch(/disabled/);
+  });
+});

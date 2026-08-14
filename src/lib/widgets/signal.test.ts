@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { buildWidgetSignal, buildWidgetSignalMessage, shouldSignalTutor } from "./signal";
+import { buildWidgetSignal, buildWidgetSignalMessage, shouldSignalTutor,
+  buildWidgetSignalDisplayText,
+} from "./signal";
 import { isNonInstructionalTutorMessage } from "../tutor";
 import type { WidgetIntent } from "./types";
 
@@ -174,5 +176,97 @@ describe("the composed signal", () => {
       expect(signal).not.toBeNull();
       expect(isNonInstructionalTutorMessage(signal!.message)).toBe(false);
     }
+  });
+});
+
+describe("exploration widgets signal only when the agent asked for a response", () => {
+  /**
+   * Slider, Animation, Hint and Annotation teach by exploration, which on its
+   * own is not evidence: a learner who understood the sweep and one who dragged
+   * the handle look identical. A `respond` prompt turns the exploration into a
+   * claim — and only then is interacting with the widget a turn the tutor owes
+   * an answer to. Without it these must stay silent, or the tutor interrupts on
+   * every slider pixel.
+   */
+  const respond = { prompt: "What happens as h shrinks?" };
+
+  const bare: Record<string, WidgetIntent> = {
+    slider: { kind: "slider", label: "Spacing h", parameter: "h", min: 0, max: 1, value: 0.5 },
+    animation: { kind: "animation", frames: [{ id: "f1", caption: "The secant pivots" }] },
+    hint: { kind: "hint", steps: [{ level: 1, label: "Nudge", body: "Look at the denominator." }] },
+    annotation: { kind: "annotation", marks: [{ id: "m1", target: "h → 0", note: "This does the work." }] },
+  };
+
+  for (const [kind, intent] of Object.entries(bare)) {
+    it(`stays silent for a ${kind} with no respond prompt`, () => {
+      // Exploration must never wake the tutor on its own.
+      expect(shouldSignalTutor(intent, {}, { submitted: true, responseText: "x" })).toBe(false);
+      expect(shouldSignalTutor(intent, undefined, { sliderValue: 0.2 })).toBe(false);
+      expect(shouldSignalTutor(intent, undefined, { animationProgress: 1 })).toBe(false);
+      expect(shouldSignalTutor(intent, undefined, { hintLevelOpened: 3 })).toBe(false);
+    });
+
+    it(`signals once for a ${kind} that has one, only on a fresh commit`, () => {
+      const asked = { ...intent, respond } as WidgetIntent;
+      // Exploring it still says nothing...
+      expect(shouldSignalTutor(asked, undefined, { sliderValue: 0.2 })).toBe(false);
+      expect(shouldSignalTutor(asked, undefined, { hintLevelOpened: 2 })).toBe(false);
+      // ...committing an answer does.
+      expect(shouldSignalTutor(asked, {}, { submitted: true, responseText: "It shrinks" })).toBe(true);
+      // ...and re-rendering an already-answered widget does not signal twice.
+      expect(
+        shouldSignalTutor(asked, { submitted: true }, { submitted: true, responseText: "It shrinks" })
+      ).toBe(false);
+    });
+  }
+
+  it("tells the tutor a slider answer is about the relationship, not the number", () => {
+    const intent: WidgetIntent = {
+      kind: "slider", label: "Spacing h", parameter: "h", min: 0, max: 1, value: 0.5, respond,
+    };
+    const message = buildWidgetSignalMessage(intent, { sliderValue: 0.05, responseText: "The slope settles", submitted: true }, "understand");
+    expect(message).toContain("The slope settles");
+    expect(message).toMatch(/RELATIONSHIP/);
+    expect(message).toMatch(/h = 0\.05/);
+  });
+
+  it("treats a prediction as evidence only because it was committed before watching", () => {
+    const intent: WidgetIntent = {
+      kind: "animation",
+      frames: [{ id: "f1", caption: "Projectile arcs" }],
+      predictPrompt: "Where will it land?",
+      respond,
+    };
+    const message = buildWidgetSignalMessage(intent, { responseText: "Past the marker", submitted: true }, "apply");
+    expect(message).toContain("Past the marker");
+    expect(message).toContain("Where will it land?");
+    expect(message).toMatch(/committed before watching/);
+  });
+
+  it("reports the hint level used as independence evidence", () => {
+    const intent: WidgetIntent = {
+      kind: "hint",
+      steps: [
+        { level: 1, label: "Nudge", body: "a" },
+        { level: 2, label: "Lead", body: "b" },
+        { level: 3, label: "Reveal", body: "c" },
+      ],
+      respond,
+    };
+    const deep = buildWidgetSignalMessage(intent, { hintLevelOpened: 3, responseText: "Got it", submitted: true }, "construct");
+    expect(deep).toMatch(/LOW independence/);
+    // The deepest hint must not be quietly treated as a clean solve.
+    expect(deep).toMatch(/unscaffolded retry/);
+
+    const light = buildWidgetSignalMessage(intent, { hintLevelOpened: 1, responseText: "Got it", submitted: true }, "construct");
+    expect(light).toMatch(/hint level 1 of 3/);
+    expect(light).not.toMatch(/LOW independence/);
+  });
+
+  it("never reveals correctness in the learner-facing transcript line", () => {
+    const intent: WidgetIntent = { ...bare.slider, respond } as WidgetIntent;
+    const text = buildWidgetSignalDisplayText(intent, { responseText: "It approaches the tangent", submitted: true, correct: false });
+    expect(text).toContain("It approaches the tangent");
+    expect(text).not.toMatch(/wrong|incorrect|✗/i);
   });
 });

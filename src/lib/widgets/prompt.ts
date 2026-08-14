@@ -29,19 +29,19 @@ const WIDGET_FIELD_SPEC: Record<WidgetKind, string> = {
   concept_card:
     `{ "kind":"concept_card", "term": string, "pronunciation"?: string, "classification"?: string, "definition": string, "definitionLatex"?: string, "facets"?: string[] }`,
   slider:
-    `{ "kind":"slider", "label": string, "parameter": string, "min": number, "max": number, "step"?: number, "value": number, "unit"?: string, "ticks"?: [{ "value": number, "label": string }], "readouts"?: [{ "id": string, "label": string, "expression": string, "precision"?: number, "unit"?: string }], "observe"?: string } — min<max, value within range; readout expressions are arithmetic in "parameter" only (e.g. "0.5*g*t^2"), max 4 readouts.`,
+    `{ "kind":"slider", "label": string, "parameter": string, "min": number, "max": number, "step"?: number, "value": number, "unit"?: string, "ticks"?: [{ "value": number, "label": string }], "readouts"?: [{ "id": string, "label": string, "expression": string, "precision"?: number, "unit"?: string }], "observe"?: string, "respond"?: RespondSpec } — min<max, value within range; readout expressions are arithmetic in "parameter" only (e.g. "0.5*g*t^2"), max 4 readouts.`,
   animation:
-    `{ "kind":"animation", "frames": [ { "id": string, "caption": string, "latex"?: string } ], "motion"?: { "xExpression": string, "yExpression": string, "tDomain": [number,number], "trace"?: boolean, "guideXExpression"?: string, "guideYExpression"?: string }, "durationMs"?: number, "loop"?: boolean, "predictPrompt"?: string } — 1–12 frames; motion expressions are arithmetic in "t".`,
+    `{ "kind":"animation", "frames": [ { "id": string, "caption": string, "latex"?: string } ], "motion"?: { "xExpression": string, "yExpression": string, "tDomain": [number,number], "trace"?: boolean, "guideXExpression"?: string, "guideYExpression"?: string }, "durationMs"?: number, "loop"?: boolean, "predictPrompt"?: string, "respond"?: RespondSpec } — 1–12 frames; motion expressions are arithmetic in "t".`,
   comparison:
     `{ "kind":"comparison", "columns": [ { "id": string, "title": string, "items"?: string[], "accent"?: "cyan"|"amber"|"violet"|"ember"|"neutral" } ], "rows"?: [ { "id": string, "label": string, "cells": string[] } ], "takeaway"?: string } — 2–4 columns; every row's "cells" length must equal the column count; each column needs "items" unless "rows" is supplied.`,
   question:
     `{ "kind":"question", "prompt": string, "promptLatex"?: string, "format": "multiple_choice"|"short_answer"|"numeric", "options"?: [ { "id": string, "label": string, "correct"?: boolean, "misconception"?: string } ], "acceptedAnswers"?: string[], "numericAnswer"?: { "value": number, "tolerance"?: number, "unit"?: string }, "explanation"?: string, "placeholder"?: string } — multiple_choice needs 2–6 options with EXACTLY ONE correct; short_answer needs acceptedAnswers; numeric needs numericAnswer.`,
   hint:
-    `{ "kind":"hint", "steps": [ { "level": 1|2|3, "label": string, "body": string } ] } — levels must start at 1 and be gapless (1, or 1&2, or 1&2&3). Level 1 nudges, 2 leads, 3 reveals the idea — never the final answer.`,
+    `{ "kind":"hint", "steps": [ { "level": 1|2|3, "label": string, "body": string } ], "respond"?: RespondSpec } — levels must start at 1 and be gapless (1, or 1&2, or 1&2&3). Level 1 nudges, 2 leads, 3 reveals the idea — never the final answer.`,
   scratchpad:
     `{ "kind":"scratchpad", "prompt"?: string, "starter"?: string, "placeholder"?: string, "lines"?: number, "mode"?: "text"|"math" }`,
   annotation:
-    `{ "kind":"annotation", "targetAnchor"?: string, "targetLabel"?: string, "marks": [ { "id": string, "target": string, "note": string, "emphasis"?: "circle"|"underline"|"arrow"|"strike" } ] } — 1–8 marks; "target" is the exact fragment being pointed at.`,
+    `{ "kind":"annotation", "targetAnchor"?: string, "targetLabel"?: string, "marks": [ { "id": string, "target": string, "note": string, "emphasis"?: "circle"|"underline"|"arrow"|"strike" } ], "respond"?: RespondSpec } — 1–8 marks; "target" is the exact fragment being pointed at.`,
   reveal:
     `{ "kind":"reveal", "prompt"?: string, "items": [ { "id": string, "label": string, "content": string, "contentLatex"?: string } ], "actionLabel"?: string } — 1–12 items, each hidden until the learner opens it.`,
   example:
@@ -67,19 +67,19 @@ const WIDGET_TEACHING_RULE: Record<WidgetKind, string> = {
   concept_card:
     `The durable definition, given AFTER the learner has met the idea — not as the opening move. Include the notation and how it is read aloud; unread notation is unlearned notation.`,
   slider:
-    `Let the learner move one parameter and watch what changes. Always set "observe" so the drag has a question attached to it.`,
+    `Let the learner move one parameter and watch what changes. Always set "observe" so the drag has a question attached to it. Attach "respond" whenever you need to know what they concluded — dragging a handle proves nothing on its own.`,
   animation:
-    `Show a process across time. Set "predictPrompt" so the learner commits to a prediction before pressing play; an animation watched passively teaches nothing.`,
+    `Show a process across time. Set "predictPrompt" so the learner commits to a prediction before pressing play; an animation watched passively teaches nothing. Pair it with "respond" so the prediction is actually written down and can be checked against what happened.`,
   comparison:
     `Put two ideas side by side when the learner is confusing them. State the "takeaway" — the single distinction the comparison exists to make land.`,
   question:
     `A check for understanding placed on the board, never asked in speech. Every distractor must carry the "misconception" it detects, so a wrong choice becomes a diagnosis instead of a red mark.`,
   hint:
-    `Progressive disclosure the learner opens themselves. Respect the unlocked hint level. Level 3 reveals the idea, never the final answer.`,
+    `Progressive disclosure the learner opens themselves. Respect the unlocked hint level. Level 3 reveals the idea, never the final answer. Attach "respond" so the learner must apply the hint; a hint read but never used is not evidence the block was cleared, and the level they needed is your independence measure.`,
   scratchpad:
     `Hand the work to the learner. Use it the moment you would otherwise have written the next algebraic step yourself.`,
   annotation:
-    `Point at a specific fragment of something already on the board and say what to notice about it. Use it to teach notation ("this h → 0 is doing the real work"), not to restate the content.`,
+    `Point at a specific fragment of something already on the board and say what to notice about it. Use it to teach notation ("this h → 0 is doing the real work"), not to restate the content. Attach "respond" when you need to confirm the learner saw the thing you pointed at rather than the general area.`,
   reveal:
     `Hide a definition, an answer, or a next step behind the learner's own decision to look. Use before an explanation so the learner tries first.`,
   example:
@@ -99,8 +99,20 @@ const WIDGET_TEACHING_RULE: Record<WidgetKind, string> = {
 };
 
 /** Compact catalog for the per-turn prompt: contract + purpose + stage homes. */
+/**
+ * The shared response affordance, documented once rather than inlined into
+ * every widget that accepts it.
+ */
+const RESPOND_SPEC_DOC =
+  `RespondSpec = { "prompt": string, "placeholder"?: string, "submitLabel"?: string, "acknowledgement"?: string }\n` +
+  `  Widgets marked "respond"?: RespondSpec (slider, animation, hint, annotation) are exploration widgets: the learner ` +
+  `can move, play, open or read them without telling you anything. Adding "respond" gives them a place to commit an ` +
+  `answer, and ONLY then does interacting with that widget become a turn you must respond to. Attach it whenever you ` +
+  `need evidence rather than activity; omit it when the widget is genuinely there to illustrate. Ask for a claim about ` +
+  `what the widget showed ("What happens to the slope as h shrinks?"), never "did you understand?".`;
+
 export function formatWidgetCatalog(): string {
-  return WIDGET_KINDS.map((kind) => {
+  return `${RESPOND_SPEC_DOC}\n` + WIDGET_KINDS.map((kind) => {
     const stages = stagesForWidget(kind)
       .map((stage) => MASTERY_STAGE_SPECS[stage].label)
       .join("/");

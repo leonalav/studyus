@@ -215,6 +215,49 @@ a signal whose turn fails is released for retry.
 
 ---
 
+## Response affordances on exploration widgets
+
+Seven widgets give the learner somewhere to answer: **Question**, **Retrieval
+Check**, **Challenge** (built in from the start), and now **Slider**,
+**Animation**, **Hint** and **Annotation**.
+
+Those four teach by exploration, and exploration alone is not evidence — a
+learner who understood the sweep and one who dragged the handle and moved on
+look identical to the tutor. An optional agent-authored `respond` block turns
+the exploration into a claim the learner commits to:
+
+```ts
+respond?: {
+  prompt: string;            // "What happens to the slope as h shrinks?"
+  placeholder?: string;
+  submitLabel?: string;
+  acknowledgement?: string;
+}
+```
+
+**It is optional on purpose.** A tutor may legitimately place a slider purely to
+illustrate; without `respond` the widget stays watch-only and silent, exactly as
+before. Only when the agent attaches one does interacting become a turn the
+tutor owes an answer to — `shouldSignalTutor` gates on `intent.respond !==
+undefined` *and* a fresh commit, so moving a control still never wakes the
+tutor.
+
+Each widget's signal names the evidence its answer actually provides, so the
+tutor cannot treat it as small talk:
+
+| Widget | What the tutor is told to assess |
+| --- | --- |
+| Slider | Whether the learner described the **relationship** or just read off a number |
+| Animation | A prediction committed **before** watching is a mental model; agreeing afterwards is not |
+| Hint | The level opened is the **independence** measure; level 3 demands an unscaffolded retry |
+| Annotation | Whether the answer engages with the **marked fragment** or the surrounding idea |
+
+The remaining ten (Roadmap, Concept Card, Comparison, Scratchpad, Reveal,
+Example, Mistake Check, Memory Hook, Reflection, Mastery Card) are unchanged —
+they either present rather than ask, or already carry their own input.
+
+---
+
 ## Failure containment
 
 A white screen mid-session is the worst outcome this app can produce: the

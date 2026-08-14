@@ -16,7 +16,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { renderMath } from "../../lib/latex/render";
 import { gradeAnswerableWidget } from "../../lib/widgets/validate";
-import { WIDGET_LABEL, type WidgetIntent, type WidgetState, type WidgetKind } from "../../lib/widgets/types";
+import { WIDGET_LABEL, type WidgetIntent, type WidgetState, type WidgetKind, type WidgetRespondSpec } from "../../lib/widgets/types";
 import { assessMastery, MASTERY_DIMENSION_LABEL, MASTERY_THRESHOLD } from "../../lib/mastery";
 import { MASTERY_EVIDENCE_DIMENSIONS } from "../../lib/widgets/types";
 import { ErrorBoundary } from "../ErrorBoundary";
@@ -377,6 +377,70 @@ function renderBody(rawIntent: WidgetIntent, props: BodyProps) {
   }
 }
 
+/**
+ * The response affordance shared by the exploration widgets.
+ *
+ * Slider, Animation, Hint and Annotation teach by exploration, which on its own
+ * produces no evidence: a learner who understood the sweep and one who dragged
+ * the handle and moved on look identical to the tutor. This turns the
+ * exploration into a claim the learner commits to.
+ *
+ * Rendered only when the agent authored a `respond` block, so a widget placed
+ * purely to illustrate stays watch-only.
+ */
+function RespondBlock({
+  spec,
+  chalk,
+  accent,
+  state,
+  emit,
+  readOnly,
+}: {
+  spec: WidgetRespondSpec;
+  chalk: string;
+  accent: string;
+  state: WidgetState;
+  emit: (patch: WidgetState) => void;
+  readOnly: boolean;
+}) {
+  const [draft, setDraft] = useState(state.responseText ?? "");
+  const submitted = state.submitted === true;
+
+  return (
+    <div className="mt-2.5 border-t pt-2.5" style={{ borderColor: `${chalk}18` }}>
+      <p className="m-0 mb-1.5 text-[10.5px] opacity-85">
+        <span style={{ color: accent }}>Your turn: </span>
+        {spec.prompt}
+      </p>
+      <div className="flex items-start gap-2">
+        <textarea
+          value={draft}
+          disabled={readOnly || submitted}
+          rows={2}
+          placeholder={spec.placeholder ?? "Your answer…"}
+          onChange={(event) => setDraft(event.target.value)}
+          className="min-w-0 flex-1 resize-y rounded-md border bg-black/15 px-2.5 py-1.5 text-[10.5px] outline-none disabled:opacity-60"
+          style={{ borderColor: `${chalk}1f`, color: chalk }}
+        />
+        <button
+          type="button"
+          disabled={readOnly || submitted || !draft.trim()}
+          onClick={() => emit({ responseText: draft.trim(), submitted: true })}
+          className="flex-none rounded-md px-2.5 py-1.5 text-[10px] font-medium text-black disabled:opacity-30"
+          style={{ background: accent }}
+        >
+          {spec.submitLabel ?? "Submit"}
+        </button>
+      </div>
+      {submitted ? (
+        <div className="mt-1 text-[9.5px] opacity-55">
+          {spec.acknowledgement ?? "Submitted — the tutor will respond to this."}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /* ── 1 · Roadmap ── */
 
 function RoadmapBody({ intent, chalk, accent }: BodyProps & { intent: Extract<WidgetIntent, { kind: "roadmap" }> }) {
@@ -479,7 +543,7 @@ function evaluateReadout(expression: string, scope: Record<string, number>): num
   }
 }
 
-function SliderBody({ intent, accent, state, emit, readOnly }: BodyProps & { intent: Extract<WidgetIntent, { kind: "slider" }> }) {
+function SliderBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & { intent: Extract<WidgetIntent, { kind: "slider" }> }) {
   const value = typeof state.sliderValue === "number"
     ? Math.min(intent.max, Math.max(intent.min, state.sliderValue))
     : intent.value;
@@ -531,6 +595,10 @@ function SliderBody({ intent, accent, state, emit, readOnly }: BodyProps & { int
       ) : null}
 
       {intent.observe ? <p className="m-0 mt-2 text-[10px] italic opacity-60">{intent.observe}</p> : null}
+
+      {intent.respond ? (
+        <RespondBlock spec={intent.respond} chalk={chalk} accent={accent} state={state} emit={emit} readOnly={readOnly} />
+      ) : null}
     </div>
   );
 }
@@ -670,6 +738,10 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
         <p className="m-0 text-[10.5px] opacity-80">{frame.caption}</p>
         {frame.latex ? <div className="mt-1"><TexBlock tex={frame.latex} color={chalk} size={16} /></div> : null}
       </div>
+
+      {intent.respond ? (
+        <RespondBlock spec={intent.respond} chalk={chalk} accent={accent} state={state} emit={emit} readOnly={readOnly} />
+      ) : null}
     </div>
   );
 }
@@ -861,7 +933,8 @@ function HintBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & 
   const steps = [...intent.steps].sort((a, b) => a.level - b.level);
 
   return (
-    <div className="space-y-1">
+    <div>
+      <div className="space-y-1">
       {steps.map((step) => {
         const isOpen = opened >= step.level;
         // Progressive disclosure: level N is only reachable once N-1 is opened.
@@ -887,6 +960,11 @@ function HintBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & 
           </div>
         );
       })}
+      </div>
+
+      {intent.respond ? (
+        <RespondBlock spec={intent.respond} chalk={chalk} accent={accent} state={state} emit={emit} readOnly={readOnly} />
+      ) : null}
     </div>
   );
 }
@@ -947,7 +1025,7 @@ const EMPHASIS_MARK: Record<string, string> = {
   strike: "✕",
 };
 
-function AnnotationBody({ intent, accent }: BodyProps & { intent: Extract<WidgetIntent, { kind: "annotation" }> }) {
+function AnnotationBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & { intent: Extract<WidgetIntent, { kind: "annotation" }> }) {
   return (
     <div>
       {intent.targetLabel ? <Muted className="mb-2">On: {intent.targetLabel}</Muted> : null}
@@ -974,6 +1052,10 @@ function AnnotationBody({ intent, accent }: BodyProps & { intent: Extract<Widget
           </div>
         ))}
       </div>
+
+      {intent.respond ? (
+        <RespondBlock spec={intent.respond} chalk={chalk} accent={accent} state={state} emit={emit} readOnly={readOnly} />
+      ) : null}
     </div>
   );
 }

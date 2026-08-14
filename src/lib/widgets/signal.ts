@@ -65,16 +65,22 @@ export function shouldSignalTutor(
     case "scratchpad":
       return nowSubmitted && !wasSubmitted;
 
-    // Exploration. The learner is thinking, not reporting; the tutor responds
-    // when they say something, not when they move a control.
+    // Exploration widgets. Moving a slider, playing an animation, opening a
+    // hint or reading an annotation is thinking, not reporting, and must never
+    // wake the tutor on its own. But when the agent attached a `respond`
+    // prompt, committing an answer to it IS the learner's turn — the same
+    // commit-once rule as any other answerable widget.
     case "slider":
     case "animation":
     case "hint":
+    case "annotation":
+      return intent.respond !== undefined && nowSubmitted && !wasSubmitted;
+
+    // No response affordance by design: these present, they do not ask.
     case "reveal":
     case "roadmap":
     case "concept_card":
     case "comparison":
-    case "annotation":
     case "example":
     case "memory_hook":
     case "mastery_card":
@@ -166,6 +172,57 @@ export function buildWidgetSignalMessage(
       break;
     }
 
+    // The exploration widgets. What makes these worth a turn is not that the
+    // learner touched a control, but that they committed to a claim ABOUT what
+    // the control showed them. Each directive names the specific evidence the
+    // answer provides, so the tutor does not treat it as small talk.
+    case "slider": {
+      lines.push(`I explored the ${label.toLowerCase()} for ${intent.label}.`);
+      if (typeof state.sliderValue === "number") {
+        lines.push(`I left it at ${intent.parameter} = ${state.sliderValue}${intent.unit ?? ""}.`);
+      }
+      if (intent.respond) lines.push(`You asked: "${intent.respond.prompt}"`);
+      lines.push(`My answer: "${state.responseText?.trim() || "(blank)"}"`);
+      lines.push(
+        `[This is my account of what varying ${intent.parameter} does. Check whether I described the RELATIONSHIP or just read off a number — the second is not understanding. If I only reported values, ask what happens as ${intent.parameter} approaches its limits.]`
+      );
+      break;
+    }
+
+    case "animation": {
+      lines.push(`I responded to the ${label.toLowerCase()} on the board.`);
+      if (intent.predictPrompt) lines.push(`The prediction you asked for: "${intent.predictPrompt}"`);
+      else if (intent.respond) lines.push(`You asked: "${intent.respond.prompt}"`);
+      lines.push(`My answer: "${state.responseText?.trim() || "(blank)"}"`);
+      lines.push(
+        `[A prediction committed before watching is evidence of a mental model; agreeing with the animation afterwards is not. Tell me specifically where my prediction matched the motion and where it did not, and name the mechanism behind any mismatch.]`
+      );
+      break;
+    }
+
+    case "hint": {
+      const opened = state.hintLevelOpened ?? 0;
+      lines.push(`I opened ${opened === 0 ? "no hints" : `hint level ${opened}`} and then answered.`);
+      if (intent.respond) lines.push(`You asked: "${intent.respond.prompt}"`);
+      lines.push(`My answer: "${state.responseText?.trim() || "(blank)"}"`);
+      lines.push(
+        opened >= 3
+          ? `[I needed the deepest hint, so this is evidence of LOW independence on this step. Judge the answer, then plan an unscaffolded retry of the same idea before treating it as learned.]`
+          : `[I used hint level ${opened} of ${intent.steps.length}. Factor that into independence: the answer counts for less the more it was scaffolded. Do not offer a deeper hint unless my answer shows I am still stuck.]`
+      );
+      break;
+    }
+
+    case "annotation": {
+      lines.push(`I responded to the annotation${intent.targetLabel ? ` on ${intent.targetLabel}` : ""}.`);
+      if (intent.respond) lines.push(`You asked: "${intent.respond.prompt}"`);
+      lines.push(`My answer: "${state.responseText?.trim() || "(blank)"}"`);
+      lines.push(
+        `[You pointed at something specific; check whether my answer engages with THAT rather than restating the surrounding idea. If I missed the point being marked, re-mark it more narrowly instead of explaining it for me.]`
+      );
+      break;
+    }
+
     default:
       lines.push(`I interacted with the ${label.toLowerCase()} on the board.`);
       break;
@@ -225,6 +282,13 @@ export function buildWidgetSignalDisplayText(intent: WidgetIntent, state: Widget
       return state.responseText?.trim()
         ? `Worked through the mistake check: "${truncate(state.responseText.trim())}"`
         : `Worked through the mistake check.`;
+    case "slider":
+    case "animation":
+    case "hint":
+    case "annotation":
+      return state.responseText?.trim()
+        ? `Answered the ${label}: "${truncate(state.responseText.trim())}"`
+        : `Responded to the ${label}.`;
     default:
       return `Responded to the ${label}.`;
   }

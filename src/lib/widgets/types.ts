@@ -177,6 +177,9 @@ export interface SliderWidget extends WidgetBase {
   readouts?: { id: string; label: string; expression: string; precision?: number; unit?: string }[];
   /** What the learner should watch while dragging. */
   observe?: string;
+  /** Optional prompt so the learner can report what they observed. Without it
+   *  the slider is watch-only and yields no evidence of understanding. */
+  respond?: WidgetRespondSpec;
 }
 
 /* ── 7 · Animation — show the idea over time ── */
@@ -210,6 +213,9 @@ export interface AnimationWidget extends WidgetBase {
   loop?: boolean;
   /** The prediction the learner should make before pressing play. */
   predictPrompt?: string;
+  /** Optional prompt so the learner can commit that prediction in writing
+   *  before playing, which is the whole point of predicting. */
+  respond?: WidgetRespondSpec;
 }
 
 /* ── 8 · Comparison — put two ideas side by side ── */
@@ -273,6 +279,30 @@ export interface QuestionWidget extends WidgetBase {
 
 /* ── 10 · Hint — progressive, level-gated disclosure ── */
 
+/**
+ * An agent-authored prompt that gives the learner somewhere to answer inside a
+ * widget that would otherwise be watch-only.
+ *
+ * Slider, Animation, Hint and Annotation teach by exploration, and exploration
+ * alone produces no evidence: the tutor cannot tell a learner who understood
+ * the sweep from one who dragged the handle and moved on. This turns the
+ * exploration into a claim the learner commits to, which is what the mastery
+ * loop can actually assess.
+ *
+ * Optional on every widget — a tutor may legitimately place a slider purely to
+ * illustrate. When absent the widget stays watch-only, exactly as before.
+ */
+export interface WidgetRespondSpec {
+  /** The question put to the learner, e.g. "What happens to the area as h shrinks?" */
+  prompt: string;
+  /** Placeholder for the input. */
+  placeholder?: string;
+  /** Button label. Defaults to "Submit". */
+  submitLabel?: string;
+  /** Shown after submitting, before the tutor replies. */
+  acknowledgement?: string;
+}
+
 export interface HintStep {
   /** 1 = nudge, 2 = lead, 3 = reveal the idea. Never the final answer. */
   level: 1 | 2 | 3;
@@ -282,6 +312,9 @@ export interface HintStep {
 
 export interface HintWidget extends WidgetBase {
   kind: "hint";
+  /** Optional prompt so the learner can try again after opening a hint. A hint
+   *  read but never acted on is not evidence the block was cleared. */
+  respond?: WidgetRespondSpec;
   steps: HintStep[];
 }
 
@@ -317,6 +350,8 @@ export interface AnnotationWidget extends WidgetBase {
   /** Plain description of what is being annotated, for the header line. */
   targetLabel?: string;
   marks: AnnotationMark[];
+  /** Optional prompt so the learner can respond to what was pointed out. */
+  respond?: WidgetRespondSpec;
 }
 
 /* ── 13 · Reveal — hide, then show, on the learner's terms ── */

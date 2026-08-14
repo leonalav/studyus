@@ -200,6 +200,23 @@ function validateConceptCard(intent: Record<string, unknown>): ValidationResult 
   return ok;
 }
 
+/**
+ * Validate the optional response affordance shared by the exploration widgets.
+ *
+ * Absent is always valid: a tutor may place a slider purely to illustrate. But
+ * a `respond` block with no prompt would render an input the learner cannot
+ * interpret, so the prompt is required once the key is present at all.
+ */
+function validateRespond(value: unknown, label: string): ValidationResult {
+  if (value === undefined || value === null) return ok;
+  if (!isPlainObject(value)) return fail(`${label} respond must be an object`);
+  if (!text(value.prompt, MAX_SHORT_TEXT_LENGTH)) return fail(`${label} respond needs a prompt`);
+  if (!optionalText(value.placeholder, MAX_SHORT_TEXT_LENGTH)) return fail(`${label} respond placeholder is too long`);
+  if (!optionalText(value.submitLabel, 40)) return fail(`${label} respond submitLabel is too long`);
+  if (!optionalText(value.acknowledgement, MAX_SHORT_TEXT_LENGTH)) return fail(`${label} respond acknowledgement is too long`);
+  return ok;
+}
+
 function validateSlider(intent: Record<string, unknown>): ValidationResult {
   if (!text(intent.label, MAX_SHORT_TEXT_LENGTH)) return fail("Slider needs a label");
   if (typeof intent.parameter !== "string" || !/^[A-Za-z][A-Za-z0-9_]{0,23}$/.test(intent.parameter)) {
@@ -248,6 +265,8 @@ function validateSlider(intent: Record<string, unknown>): ValidationResult {
       if (!optionalText(readout.unit, 24)) return fail("Slider readout unit is too long");
     }
   }
+  const respond = validateRespond(intent.respond, "Slider");
+  if (!respond.valid) return respond;
   return ok;
 }
 
@@ -284,6 +303,8 @@ function validateAnimation(intent: Record<string, unknown>): ValidationResult {
     if ((domain[0] as number) >= (domain[1] as number)) return fail("Animation motion tDomain start must be less than end");
     if (!optionalBoolean(motion.trace)) return fail("Animation motion trace must be a boolean");
   }
+  const respond = validateRespond(intent.respond, "Animation");
+  if (!respond.valid) return respond;
   return ok;
 }
 
@@ -413,6 +434,8 @@ function validateHint(intent: Record<string, unknown>): ValidationResult {
   if (sorted.some((level, index) => level !== index + 1)) {
     return fail("Hint levels must start at 1 and increase without gaps");
   }
+  const respond = validateRespond(intent.respond, "Hint");
+  if (!respond.valid) return respond;
   return ok;
 }
 
@@ -449,6 +472,8 @@ function validateAnnotation(intent: Record<string, unknown>): ValidationResult {
       }
     }
   }
+  const respond = validateRespond(intent.respond, "Annotation");
+  if (!respond.valid) return respond;
   return ok;
 }
 
