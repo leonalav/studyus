@@ -66,15 +66,14 @@ export interface OnboardingAnswers {
  */
 export function renderOnboardingQuestions(
   intro: string,
-  questions: OnboardingQuestion[],
-  agentCount: number
+  questions: OnboardingQuestion[]
 ): string {
+  // Only the numbering is added by the app. The intro and the closing line are
+  // the counsellor's own words: a fixed "you have N agents bound" note and a
+  // fixed sign-off made every session open identically regardless of who the
+  // learner is or what they are about to study.
   const numbered = questions.map((q, i) => `${i + 1}. ${q.question}`).join("\n");
-  const agentNote =
-    agentCount > 0
-      ? `\n\nYou currently have ${agentCount} agent${agentCount === 1 ? "" : "s"} bound — @ mention one in your answers to pick your tutor for this session.`
-      : "";
-  return `${intro}\n\n${numbered}${agentNote}\n\nFeel free to skip any or all of these questions. Answer when ready — one answer per line — and we'll begin.`;
+  return `${intro}\n\n${numbered}`;
 }
 
 /**

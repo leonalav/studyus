@@ -3,6 +3,11 @@
 @theme {
   --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Space Mono", ui-monospace, monospace;
+  /* Study widgets are instruments, not handwriting. The board's chalk font is
+     deliberately cursive, which is fine for prose a tutor "writes" but hurts
+     the dense, scannable content widgets carry: options, tables, verdicts,
+     numbers. Widgets opt out of the chalk font and use this instead. */
+  --font-widget: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
 
   --color-ink: #191919;
   --color-panel: #202020;
@@ -54,6 +59,7 @@ html[data-font="mono"] {
 }
 html[data-font="dyslexic"] {
   --font-display: OpenDyslexic, Atkinson Hyperlegible, Verdana, system-ui, sans-serif;
+  --font-widget: OpenDyslexic, Atkinson Hyperlegible, Verdana, system-ui, sans-serif;
   letter-spacing: 0.015em;
   word-spacing: 0.04em;
 }
@@ -124,6 +130,46 @@ html[data-motion="reduced"] *::after {
 
 html[data-captions="off"] [data-tutor-caption] {
   display: none !important;
+}
+
+/* A LaTeX expression KaTeX could not parse. Shown rather than hidden — silently
+   dropping an equation is worse than showing it — but styled as a quiet inline
+   note instead of the bare unstyled code block that used to read like leaked
+   tool output. */
+.latex-raw {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 6px 8px;
+  border: 1px dashed color-mix(in srgb, currentColor 28%, transparent);
+  border-radius: 6px;
+  background: rgb(0 0 0 / 0.14);
+  font-size: 0.9em;
+}
+.latex-raw-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  opacity: 0.5;
+}
+.latex-raw-src {
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.82;
+}
+
+/* A block's wrapper is full-width, so the empty margin beside a narrow
+   paragraph or widget is really board, not text. Show the grab cursor there and
+   the I-beam only over the rendered content, matching what a click will do. */
+.board-block {
+  cursor: grab;
+}
+.board-block > * {
+  cursor: text;
 }
 
 body {

@@ -17,6 +17,7 @@ import {
 import type { SessionThreadLog } from "../../lib/tutor";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
+import { WIDGET_LABEL } from "../../lib/widgets/types";
 import { THEMES, FONTS, type BoardTheme } from "./Chalkboard";
 import { startLiveDictation, type LiveDictation } from "../../lib/voice";
 
@@ -192,6 +193,12 @@ function MiniBlock({ block }: { block: Block }) {
       const title = "title" in block.intent && block.intent.title ? block.intent.title : block.intent.type;
       return <div className="inline-block rounded-lg border border-current/50 px-3 py-2 text-[16px] opacity-80">∿ {title}</div>;
     }
+    case "widget": {
+      // Thread previews are static thumbnails, so a widget is summarized by its
+      // label rather than rendered interactively.
+      const title = block.intent.title ?? WIDGET_LABEL[block.intent.kind];
+      return <div className="inline-block rounded-lg border border-current/50 px-3 py-2 text-[16px] opacity-80">▤ {title}</div>;
+    }
     case "row":
       return <div className="grid grid-cols-2 gap-8">{block.children.map((child) => <MiniBlock key={child.id} block={child} />)}</div>;
   }
@@ -208,6 +215,8 @@ export function SettingsPanel({
   setFontScale,
   latex,
   setLatex,
+  boardRevertsWithMessage,
+  setBoardRevertsWithMessage,
   onClose,
 }: {
   theme: BoardTheme;
@@ -218,6 +227,8 @@ export function SettingsPanel({
   setFontScale: (n: number) => void;
   latex: boolean;
   setLatex: (b: boolean) => void;
+  boardRevertsWithMessage: boolean;
+  setBoardRevertsWithMessage: (b: boolean) => void;
   onClose: () => void;
 }) {
   return (
@@ -287,6 +298,26 @@ export function SettingsPanel({
             <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${latex ? "translate-x-3" : ""}`} />
           </span>
         </button>
+
+        <div className="mt-4">
+          <Label>Reverting a message</Label>
+          <button
+            onClick={() => setBoardRevertsWithMessage(!boardRevertsWithMessage)}
+            className="flex w-full items-center gap-2.5 rounded-md border border-edge bg-raise px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07]"
+          >
+            <span className="flex-1">
+              <span className="block text-[12.5px] text-fg">Board reverts too</span>
+              <span className="block text-[10.5px] leading-snug text-dim">
+                {boardRevertsWithMessage
+                  ? "Undoing a message also undoes what the tutor drew for it"
+                  : "Undoing a message keeps everything on the board"}
+              </span>
+            </span>
+            <span className={`h-4 w-7 flex-none rounded-full p-0.5 transition-colors ${boardRevertsWithMessage ? "bg-accent" : "bg-[#3a3a38]"}`}>
+              <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${boardRevertsWithMessage ? "translate-x-3" : ""}`} />
+            </span>
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -329,6 +360,21 @@ export interface ChatMsg {
   role: "tutor" | "user" | "system";
   text: string;
   imageData?: string;
+  /** Board state as it stood immediately BEFORE this message was sent.
+   *
+   *  Reverting to a message restores this snapshot, so undoing a question also
+   *  undoes everything the tutor drew in response to it. Captured only on user
+   *  messages, which are the only revertable points. Optional because sessions
+   *  saved before board-revert existed have no snapshot — those revert the
+   *  transcript alone rather than failing. */
+  boardSnapshot?: BoardSnapshot;
+}
+
+/** The board half of a revert point. Cloned at capture time so later mutation
+ *  of the live boards cannot reach back and corrupt the history. */
+export interface BoardSnapshot {
+  boards: BoardDoc[];
+  activeId: string;
 }
 
 export type AgentActivityKind =
@@ -350,7 +396,6 @@ export interface AgentActivity {
 }
 
 function AgentActivityWidget({ activity }: { activity: AgentActivity }) {
-<<<<<<< HEAD
   // Planning/thinking is intentionally a tiny neutral presence. The expanded
   // blue activity card is reserved for an actual board/tool operation.
   if (["planning", "thinking", "responding"].includes(activity.kind)) {
@@ -364,8 +409,6 @@ function AgentActivityWidget({ activity }: { activity: AgentActivity }) {
     );
   }
 
-=======
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
   const done = activity.kind === "complete";
   const failed = activity.kind === "error";
   const active = !done && !failed;
@@ -574,29 +617,6 @@ export function ChatDock({
     reader.readAsDataURL(file);
   };
 
-  const readImageAttachment = (file: File) => {
-    // The Tutor transport accepts data URLs up to 8M characters. Reject before
-    // FileReader allocates a larger base64 copy in the webview.
-    if (!file.type.startsWith("image/")) {
-      setAttachmentError("Choose an image file.");
-      return;
-    }
-    if (file.size > 5_000_000) {
-      setAttachmentError("Images must be 5 MB or smaller.");
-      return;
-    }
-    setAttachmentError("");
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const url = evt.target?.result;
-      if (typeof url === "string" && url.startsWith("data:image/")) {
-        onAddAttachment("image", file.name, url, file.type);
-      } else setAttachmentError("That image could not be read.");
-    };
-    reader.onerror = () => setAttachmentError("That image could not be read.");
-    reader.readAsDataURL(file);
-  };
-
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -778,11 +798,7 @@ export function ChatDock({
           )}
           <textarea
             value={val}
-<<<<<<< HEAD
             rows={Math.min(5, Math.max(1, val.split(/\r?\n/).length))}
-=======
-            rows={1}
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
             aria-label="AI Response message"
             onChange={(e) => setVal(e.target.value)}
             onMouseDown={(e) => e.stopPropagation()}
@@ -794,11 +810,7 @@ export function ChatDock({
             }}
             disabled={rewinding}
             placeholder={rewinding ? "Returning conversation…" : busy ? "Studyus is responding…" : "Ask anything about the board…"}
-<<<<<<< HEAD
             className="max-h-[90px] min-w-0 flex-1 resize-none overflow-y-auto cursor-text bg-transparent text-[11px] leading-[18px] text-white outline-none placeholder:text-white/35 disabled:cursor-wait disabled:opacity-60"
-=======
-            className="max-h-12 min-w-0 flex-1 resize-none cursor-text bg-transparent text-[11px] leading-[18px] text-white outline-none placeholder:text-white/35 disabled:cursor-wait disabled:opacity-60"
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
           />
           <button
             onClick={send}
@@ -878,30 +890,35 @@ export function ChatDock({
               return (
                 <div key={m.id} className="anim-msg space-y-1">
                   <div className="text-right text-[8.5px] uppercase tracking-[0.12em] text-white/30">You</div>
-                  <div className="ml-auto max-w-[90%] rounded bg-white/[0.07] px-2 py-1.5 text-[10.5px] leading-relaxed text-white/82">
-                    <div>{m.text}</div>
-                    {m.imageData && (
-                      <img
-                        src={m.imageData}
-                        alt="User uploaded attachment"
-                        className="mt-2 max-h-[160px] max-w-full rounded-md border border-white/10 object-contain"
-                      />
-                    )}
-                    <div className="mt-1 flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setVal(m.text);
-                          onRevertMessage(m.id);
-                        }}
-                        disabled={rewinding}
-                        aria-label="Revert to this message"
-                        title="Revert to this message"
-                        className="grid h-5 w-5 place-items-center rounded text-white/35 transition-colors hover:bg-white/10 hover:text-white/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#7dd3fc]/70 disabled:cursor-wait disabled:opacity-35"
-                      >
-                        <Undo2 size={11} aria-hidden="true" />
-                      </button>
+                  {/*  The bubble shrink-wraps its content (`w-fit`) so a short
+                   *  message stays a short bubble, and the revert control sits
+                   *  INLINE with the text rather than on its own row below it.
+                   *  Both together keep "Okay. Where is it?" to a single line
+                   *  instead of a mostly-empty box with a stranded arrow. */}
+                  <div className="ml-auto flex w-fit max-w-[90%] items-start gap-1.5 rounded bg-white/[0.07] py-1.5 pl-2 pr-1.5 text-[10.5px] leading-relaxed text-white/82">
+                    <div className="min-w-0 flex-1">
+                      <div className="whitespace-pre-wrap break-words">{m.text}</div>
+                      {m.imageData && (
+                        <img
+                          src={m.imageData}
+                          alt="User uploaded attachment"
+                          className="mt-2 max-h-[160px] max-w-full rounded-md border border-white/10 object-contain"
+                        />
+                      )}
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVal(m.text);
+                        onRevertMessage(m.id);
+                      }}
+                      disabled={rewinding}
+                      aria-label="Revert to this message"
+                      title="Revert to this message"
+                      className="-mr-0.5 grid h-4 w-4 flex-none place-items-center rounded text-white/35 transition-colors hover:bg-white/10 hover:text-white/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#7dd3fc]/70 disabled:cursor-wait disabled:opacity-35"
+                    >
+                      <Undo2 size={11} aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
               );
@@ -921,11 +938,7 @@ export function ChatDock({
             <AgentActivityWidget
               activity={{
                 kind: agentStatus === "writing" ? "writing" : agentStatus === "error" ? "error" : "thinking",
-<<<<<<< HEAD
                 label: agentStatus === "writing" ? "Updating the board" : agentStatus === "error" ? "Could not finish" : "agent is thinking...",
-=======
-                label: agentStatus === "writing" ? "Updating the board" : agentStatus === "error" ? "Could not finish" : "Planning a response",
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
                 detail: agentStatus === "writing" ? "Applying validated board changes" : agentStatus === "error" ? "The operation stopped safely" : "Reading your request and board context",
               }}
             />
@@ -942,11 +955,7 @@ export function ChatDock({
           <div className="flex items-center gap-2 px-2.5 pb-2">
             <textarea
               value={val}
-<<<<<<< HEAD
               rows={Math.min(5, Math.max(1, val.split(/\r?\n/).length))}
-=======
-              rows={1}
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
               aria-label="AI Response message"
               onChange={(e) => setVal(e.target.value)}
               onKeyDown={(e) => {
@@ -957,11 +966,7 @@ export function ChatDock({
               }}
               disabled={rewinding}
               placeholder={rewinding ? "Returning conversation…" : "what if I want to…"}
-<<<<<<< HEAD
               className="max-h-[90px] min-w-0 flex-1 resize-none overflow-y-auto rounded bg-black/15 px-2 py-1.5 text-[10px] leading-relaxed text-white outline-none placeholder:text-white/30 disabled:cursor-wait disabled:opacity-60"
-=======
-              className="max-h-24 min-w-0 flex-1 resize-y rounded bg-black/15 px-2 py-1.5 text-[10px] leading-relaxed text-white outline-none placeholder:text-white/30 disabled:cursor-wait disabled:opacity-60"
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
             />
             <button
               onClick={send}

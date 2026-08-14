@@ -8,11 +8,22 @@ import {
   ChatDock,
   type AgentActivity,
   type ChatAttachment,
+  type BoardSnapshot,
   type ChatMsg,
 } from "./BoardPanels";
 import { buildSubBoard, boardToMarkdown, DOMAIN_META, type BoardDoc } from "../../data/boards";
 import { validateVisualizationIntent } from "../../lib/visualization/validate";
 import type { VisualizationIntent, VisualizationState } from "../../lib/visualization/types";
+import { sanitizeWidgetState, validateWidgetIntent } from "../../lib/widgets/validate";
+import {
+  buildClusterSignalDisplayText,
+  buildClusterSignalMessage,
+  buildWidgetSignal,
+  shouldSignalTutor,
+} from "../../lib/widgets/signal";
+import { clusterAllowsSignal, type ClusterMember } from "../../lib/widgets/cluster";
+import { getSessionMasteryStage } from "../../lib/tutor";
+import { WIDGET_LABEL, type WidgetIntent, type WidgetState } from "../../lib/widgets/types";
 import {
   askTutorTurn,
   ensureChalkboardSession,
@@ -26,11 +37,18 @@ import { ContextMenu, ContextMenuTarget } from "../ContextMenu";
 import { toPng } from "html-to-image";
 import { saveStudySession, type StoredStudySession } from "../../state/studySessionStore";
 import type { OnboardingAnswers } from "../../data/tutor";
+import { ErrorBoundary } from "../ErrorBoundary";
 import {
   PREFERENCES_CHANGED_EVENT,
   loadPreferences,
+  savePreferences,
   type StudyusPreferences,
 } from "../../lib/preferences";
+
+/** What produced this turn. Distinguishes the opening greeting (retryable when
+ *  an unmount kills it) and a widget answer (retryable, and shown in the
+ *  transcript as the learner's action) from a typed chat message. */
+type TurnKind = "chat" | "greeting" | "widget";
 
 interface Props {
   initialBoard: BoardDoc;
@@ -48,7 +66,23 @@ interface Props {
 
 export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding, onLeave, notify }: Props) {
   const [boards, setBoards] = useState<BoardDoc[]>(initialSession?.boards ?? [initialBoard]);
+  /** Latest boards, readable from callbacks that must not re-bind whenever the
+   *  board changes (every board op would otherwise rebuild them). */
+  const boardsRef = useRef(boards);
+  boardsRef.current = boards;
   const [activeId, setActiveId] = useState(initialSession?.activeId ?? initialBoard.id);
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  // A behaviour preference rather than a per-session appearance choice, so it
+  // persists globally and stays consistent across every board the learner opens.
+  const [boardRevertsWithMessage, setBoardRevertsWithMessageState] = useState(
+    () => loadPreferences().appearance.boardRevertsWithMessage
+  );
+  const setBoardRevertsWithMessage = useCallback((next: boolean) => {
+    setBoardRevertsWithMessageState(next);
+    const current = loadPreferences();
+    savePreferences({ ...current, appearance: { ...current.appearance, boardRevertsWithMessage: next } });
+  }, []);
   const [written, setWritten] = useState<Set<string>>(new Set((initialSession?.boards ?? []).map((item) => item.id)));
 
   const [theme, setTheme] = useState<BoardTheme>(
@@ -97,6 +131,11 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
       if (next?.tutor) {
         setPacing({ sessionLength: next.tutor.sessionLength, breakEvery: next.tutor.breakEvery });
       }
+      // Keep the board-settings toggle honest if the preference is changed
+      // from the main Settings modal while a board is open.
+      if (next?.appearance) {
+        setBoardRevertsWithMessageState(next.appearance.boardRevertsWithMessage);
+      }
     };
     window.addEventListener(PREFERENCES_CHANGED_EVENT, onPreferencesChanged);
     return () => window.removeEventListener(PREFERENCES_CHANGED_EVENT, onPreferencesChanged);
@@ -141,10 +180,24 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   /* The in-flight tutor call is aborted when the room unmounts. */
   const abortRef = useRef<AbortController | null>(null);
   const activityTurnRef = useRef(0);
-<<<<<<< HEAD
   const greetedRef = useRef(false);
-=======
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
+  /** Widgets that have already woken the tutor, so a re-render or a double
+   *  click on Check cannot ask the same question twice. */
+  const signalledWidgets = useRef(new Set<string>());
+  /** `saveWidgetState` is declared before `handleSend`; the ref breaks that
+   *  cycle without reordering the component. */
+  const handleSendRef = useRef<
+    ((
+      text: string,
+      imageData?: string,
+      showUserMessage?: boolean,
+      options?: { kind?: TurnKind; displayText?: string; signalKey?: string }
+    ) => Promise<void>) | null
+  >(null);
+  /** Bumped when an opening greeting is cancelled by an unmount, so the
+   *  surviving mount retries it. Bounded: a greeting is worth one retry, not an
+   *  infinite loop against a dead endpoint. */
+  const [greetAttempt, setGreetAttempt] = useState(0);
   const rewindRef = useRef(false);
   useEffect(() => () => abortRef.current?.abort(), []);
   const [previews, setPreviews] = useState<Record<string, string>>({});
@@ -191,7 +244,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     boundNodes: resolvedBoundNodes,
     boards,
     activeId,
-    messages: messages.map(({ imageData: _imageData, ...message }) => message),
+    messages: pruneSnapshotsForStorage(messages),
     viewMap,
     strokeMap,
     appearance: {
@@ -289,6 +342,138 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     [activeId]
   );
 
+  // Learner interaction with a study widget (answers, slider position, opened
+  // hint levels) is persisted onto the owning block. It survives a reopen and
+  // is summarized back into the tutor prompt, so the agent teaches against what
+  // the learner actually did rather than guessing.
+  //
+  // Committing an ANSWER additionally wakes the tutor. Under the Guide to
+  // Mastery the agent owns the response to a learner's work: a wrong choice is
+  // a misconception to diagnose, a right one is evidence to test rather than
+  // celebrate. A widget the learner answers into silence would make the board a
+  // worksheet instead of a lesson.
+  const saveWidgetState = useCallback(
+    (blockId: string, state: WidgetState) => {
+      // Called straight from a widget's event handler. React error boundaries
+      // do not catch throws from handlers, so anything escaping here reaches
+      // window.onerror with the board already half-updated. Every failure below
+      // is contained: losing one interaction is recoverable, losing the session
+      // is not.
+      try {
+        const safe = sanitizeWidgetState(state);
+        if (!safe) return;
+
+        const target = boardsRef.current
+          .find((b) => b.id === activeId)
+          ?.blocks.find((blk) => blk.id === blockId);
+        const widget = target?.kind === "widget" ? target : null;
+
+        setBoards((current) =>
+          current.map((b) =>
+            b.id === activeId
+              ? {
+                  ...b,
+                  blocks: b.blocks.map((blk) =>
+                    blk.id === blockId && blk.kind === "widget" ? { ...blk, state: safe } : blk
+                  ),
+                }
+              : b
+          )
+        );
+
+        if (!widget) return;
+        // Only a committed answer wakes the tutor; exploration must not. Decided
+        // synchronously so a double click cannot slip two turns through the
+        // await below.
+        if (!shouldSignalTutor(widget.intent, widget.state, safe)) return;
+
+        // Cluster gate. When the agent grouped this widget with others, the
+        // tutor is owed ONE turn covering the whole set, not a turn per answer.
+        // Built from the board as it will be after this save, since setBoards
+        // above has not flushed yet.
+        const members: ClusterMember[] = (boardsRef.current.find((b) => b.id === activeId)?.blocks ?? [])
+          .flatMap((blk) =>
+            blk.kind === "widget"
+              ? [{ blockId: blk.id, intent: blk.intent, state: blk.id === blockId ? safe : blk.state }]
+              : []
+          );
+        const { allowed, cluster } = clusterAllowsSignal(members, blockId);
+        if (!allowed) return;
+
+        // A completed cluster is claimed under its group id so that whichever
+        // member finished it, the tutor is woken exactly once.
+        const signalKey = cluster ? `group:${cluster.groupId}` : blockId;
+        if (signalledWidgets.current.has(signalKey)) return;
+        signalledWidgets.current.add(signalKey);
+
+        const previousState = widget.state;
+        void (async () => {
+          try {
+            const { stage } = await getSessionMasteryStage(sessionId);
+
+            if (cluster) {
+              // Answers are read in board order — the order the learner met
+              // them in — so the agent sees the set as it was worked.
+              const answered = cluster.answerable.map((member) => ({
+                intent: member.intent,
+                state: member.blockId === blockId ? safe : (member.state ?? {}),
+              }));
+              void handleSendRef.current?.(
+                buildClusterSignalMessage(answered, stage, cluster.label),
+                undefined,
+                false,
+                {
+                  kind: "widget",
+                  displayText: buildClusterSignalDisplayText(answered, cluster.label),
+                  signalKey,
+                }
+              );
+              return;
+            }
+
+            const signal = buildWidgetSignal(blockId, widget.intent, previousState, safe, stage);
+            if (!signal) {
+              signalledWidgets.current.delete(signalKey);
+              return;
+            }
+            // Routed through the normal turn path so the full tutor contract
+            // applies, but shown as the learner's own board action rather than a
+            // chat message they did not type.
+            void handleSendRef.current?.(signal.message, undefined, false, {
+              kind: "widget",
+              displayText: signal.displayText,
+              signalKey: blockId,
+            });
+          } catch (error) {
+            // Release the dedupe claim, or this widget could never wake the tutor
+            // again for the rest of the session — a silent dead end far worse
+            // than one failed turn. The answer itself is already saved above.
+            // Must be the same key that was claimed: releasing `blockId` when a
+            // cluster claimed `group:…` would strand the whole cluster.
+            signalledWidgets.current.delete(signalKey);
+            console.error("[widget] failed to signal the tutor", error);
+            notify("Your answer was saved, but the tutor could not be reached");
+          }
+        })();
+      } catch (error) {
+        console.error("[widget] failed to record interaction", error);
+      }
+    },
+    [activeId, sessionId]
+  );
+
+  /**
+   * Board state as it stands right now, frozen for a revert point.
+   *
+   * Deep-cloned deliberately: blocks are mutated by later board ops and widget
+   * answers, and a shallow copy would let those edits reach back and rewrite
+   * history, so reverting would restore the present.
+   */
+  const captureBoardSnapshot = useCallback((): BoardSnapshot => ({
+    boards: structuredClone(boardsRef.current),
+    activeId: activeIdRef.current,
+  }), []);
+
   /* session timer */
   useEffect(() => {
     const id = window.setInterval(() => setSeconds((s) => s + 1), 1000);
@@ -345,6 +530,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const handleAsk = useCallback(
     async (selection: string, question: string) => {
       await captureActive();
+      // Taken before the branch board is added, so reverting this message
+      // removes the branch it created rather than stranding an empty thread.
+      const boardSnapshot = captureBoardSnapshot();
       const sub = buildSubBoard(selection, question, board);
       try {
         await logThread(sub);
@@ -360,18 +548,33 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
       setChatCollapsed(false);
       setMessages((m) => [
         ...m,
-        { id: ++msgId.current, role: "user", text: question ? `${question}  ("${trim(selection)}")` : `Explain: "${trim(selection)}"` },
+        {
+          id: ++msgId.current,
+          role: "user",
+          text: question ? `${question}  ("${trim(selection)}")` : `Explain: "${trim(selection)}"`,
+          boardSnapshot,
+        },
       ]);
       pushTutor(`New board opened for "${trim(selection)}". I'm writing the breakdown now — it's saved in Threads so you can come back to it.`, 800);
       notify("Branched into a new board");
     },
-    [board, captureActive, logThread, notify, pushTutor]
+    [board, captureActive, captureBoardSnapshot, logThread, notify, pushTutor]
   );
 
   const handleRevertMessage = useCallback((messageId: number) => {
     if (rewindRef.current) return;
     const index = messages.findIndex((message) => message.id === messageId && message.role === "user");
     if (index < 0) return;
+
+    const target = messages[index];
+    const previousBoards = boardsRef.current;
+    const previousActiveId = activeIdRef.current;
+    // Roll the chalkboard back with the conversation, unless the learner has
+    // chosen to keep the board as an accumulating notebook. Sessions saved
+    // before snapshots existed have none, and revert the transcript alone
+    // rather than failing or wiping the board.
+    const revertBoard =
+      loadPreferences().appearance.boardRevertsWithMessage && target.boardSnapshot !== undefined;
 
     // A rewind supersedes any active turn. Incrementing the turn token ensures
     // its cancellation cannot append an error or clear newer activity state.
@@ -392,6 +595,19 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     // Reflect the rewind immediately, while locking submission until the
     // durable transcript has reached the same state.
     setMessages(retained);
+    if (revertBoard && target.boardSnapshot) {
+      // Clone on restore too: this snapshot stays attached to the message and
+      // must survive being reverted to more than once.
+      setBoards(structuredClone(target.boardSnapshot.boards));
+      const restoredActive = target.boardSnapshot.activeId;
+      setActiveId(
+        target.boardSnapshot.boards.some((item) => item.id === restoredActive)
+          ? restoredActive
+          : target.boardSnapshot.boards[0]?.id ?? previousActiveId
+      );
+      // Widget answers on restored blocks may legitimately be re-submitted.
+      signalledWidgets.current.clear();
+    }
     void replaceSessionTranscript(
       sessionId,
       retained.map((message) => ({
@@ -399,9 +615,20 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         content: message.text,
       }))
     ).then(() => {
-      notify("Conversation returned to this message — edit it and submit again");
+      notify(
+        revertBoard
+          ? "Conversation and board returned to this message — edit it and submit again"
+          : "Conversation returned to this message — the board was left as it is"
+      );
     }).catch(() => {
+      // The durable transcript is the source of truth. If it could not be
+      // rewound, put the board back too rather than leaving chat and board
+      // describing different lessons.
       setMessages(messages);
+      if (revertBoard) {
+        setBoards(previousBoards);
+        setActiveId(previousActiveId);
+      }
       notify("The conversation could not be reverted");
     }).finally(() => {
       rewindRef.current = false;
@@ -412,21 +639,27 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   /* chat replies — routed through the tutor harness, which resolves the bound
      tutor role, validates structured output, and persists both messages */
   const handleSend = useCallback(
-<<<<<<< HEAD
-    async (text: string, imageData?: string, showUserMessage = true) => {
+    async (
+      text: string,
+      imageData?: string,
+      showUserMessage = true,
+      options?: { kind?: TurnKind; displayText?: string; signalKey?: string }
+    ) => {
       if (rewindRef.current) return;
+      const turnKind = options?.kind ?? "chat";
       const activityTurn = ++activityTurnRef.current;
       const targetBoardId = board.id;
+      // Freeze the board BEFORE this turn touches it, so reverting to this
+      // message undoes everything the tutor drew in response to it.
+      const boardSnapshot = captureBoardSnapshot();
       if (showUserMessage) {
-        setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
+        setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData, boardSnapshot }]);
+      } else if (options?.displayText) {
+        // A widget answer is the learner's turn, so it belongs in the
+        // transcript — but as what they DID, never as the internal directive
+        // the model receives.
+        setMessages((m) => [...m, { id: ++msgId.current, role: "user", text: options.displayText!, boardSnapshot }]);
       }
-=======
-    async (text: string, imageData?: string) => {
-      if (rewindRef.current) return;
-      const activityTurn = ++activityTurnRef.current;
-      const targetBoardId = board.id;
-      setMessages((m) => [...m, { id: ++msgId.current, role: "user", text, imageData }]);
->>>>>>> 2b4dc7d769d9c94350cc86df59df7fd71e52800e
       // Consume the transient payload once. The request below retains this
       // callback's immutable attachment snapshot while React clears the UI.
       setAttachments([]);
@@ -517,9 +750,30 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           if (activityTurnRef.current === activityTurn) setAgentActivity(null);
         }, 1100);
       } catch (e: any) {
-        // Reverting a user message intentionally aborts the superseded turn.
-        // Do not turn that cancellation into a visible tutor error.
-        if (controller.signal.aborted && activityTurnRef.current !== activityTurn) return;
+        // A cancellation is something WE caused: a rewind superseding this turn,
+        // or the room unmounting (including React StrictMode's dev
+        // mount/unmount/remount). It is never a tutor failure, so it must never
+        // surface as a tutor error in the learner's chat.
+        if (controller.signal.aborted || e?.failureClass === "aborted") {
+          // A greeting killed by an unmount must still happen if the room is
+          // still here (React StrictMode mounts, unmounts, then remounts). The
+          // remount's effect has already run and skipped by now, so re-arm the
+          // flag and bump a counter to actually re-run it.
+          if (turnKind === "greeting") {
+            greetedRef.current = false;
+            setGreetAttempt((attempt) => attempt + 1);
+          }
+          // A widget answer that never reached the tutor must be allowed to
+          // retry, or the learner is left staring at an answered widget.
+          if (turnKind === "widget" && options?.signalKey) {
+            signalledWidgets.current.delete(options.signalKey);
+          }
+          if (activityTurnRef.current === activityTurn) {
+            setAgentStatus("idle");
+            setAgentActivity(null);
+          }
+          return;
+        }
         setAgentStatus("error");
         setAgentActivity({
           kind: "error",
@@ -556,17 +810,20 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     [attachments, board, logThread, notify, onboarding, sessionId, resolvedBoundNodes, speakTutorText]
   );
 
+  handleSendRef.current = handleSend;
+
   // A fresh chalkboard opens with a tutor greeting and the first lesson turn;
   // restored sessions keep their existing transcript untouched.
   useEffect(() => {
-    if (initialSession || greetedRef.current) return;
+    if (initialSession || greetedRef.current || greetAttempt > 2) return;
     greetedRef.current = true;
     void handleSend(
       "Open the lesson with a brief welcome, then place the first teaching step or orientation on the chalkboard. Keep the chat response to a short greeting.",
       undefined,
-      false
+      false,
+      { kind: "greeting" }
     );
-  }, [handleSend, initialSession]);
+  }, [handleSend, initialSession, greetAttempt]);
 
   /* markdown recording + export */
   const buildDoc = useCallback(() => {
@@ -617,6 +874,31 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     >
       {/* the shared screen frame */}
       <div className="share-frame absolute inset-2 overflow-hidden rounded-lg">
+        {/* Per-block boundaries inside Chalkboard catch content failures. This
+            one catches the board shell itself (pan/zoom, annotation canvas) so
+            a failure there still leaves the chat dock and toolbar usable and
+            the session recoverable rather than blanking the window. */}
+        <ErrorBoundary
+          label="Chalkboard"
+          resetKey={board.id}
+          fallback={(_error, reset) => (
+            <div className="grid h-full w-full place-items-center bg-[#191b1f] px-6 text-center">
+              <div className="max-w-sm">
+                <div className="text-[14px] font-medium text-white/90">This board could not be drawn</div>
+                <p className="mt-1.5 text-[12px] leading-relaxed text-white/55">
+                  Your transcript and notes are safe. Reopening the board usually clears it.
+                </p>
+                <button
+                  type="button"
+                  onClick={reset}
+                  className="mt-3 rounded-md bg-white/12 px-3 py-1.5 text-[12px] text-white/90 hover:bg-white/20"
+                >
+                  Redraw board
+                </button>
+              </div>
+            </div>
+          )}
+        >
         <Chalkboard
           board={board}
           theme={theme}
@@ -636,7 +918,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           initialStrokes={strokeMap[board.id]}
           onStrokesChange={saveStrokes}
           onBlockStateChange={saveBlockState}
+          onWidgetStateChange={saveWidgetState}
         />
+        </ErrorBoundary>
       </div>
 
       <BoardToolbar
@@ -730,6 +1014,8 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           setFontScale={setFontScale}
           latex={latex}
           setLatex={setLatex}
+          boardRevertsWithMessage={boardRevertsWithMessage}
+          setBoardRevertsWithMessage={setBoardRevertsWithMessage}
           onClose={() => setPanel(null)}
         />
       )}
@@ -821,6 +1107,20 @@ function activityForBoardOp(op: BoardOp, index: number, total: number): AgentAct
         detail: "Applying validated visual data and interaction changes",
         progress,
       };
+    case "place_widget":
+      return {
+        kind: "visualizing",
+        label: `Placing a ${WIDGET_LABEL[op.intent.kind].toLowerCase()}`,
+        detail: "Adding an interactive study widget to the board",
+        progress,
+      };
+    case "update_widget":
+      return {
+        kind: "revising",
+        label: `Updating the ${WIDGET_LABEL[op.intent.kind].toLowerCase()}`,
+        detail: "Reconfiguring the study widget in place",
+        progress,
+      };
     case "revise_text":
       return {
         kind: "revising",
@@ -840,6 +1140,13 @@ function activityForBoardOp(op: BoardOp, index: number, total: number): AgentAct
         kind: "revising",
         label: "Removing a board section",
         detail: "Deleting the targeted block",
+        progress,
+      };
+    case "redraw_block":
+      return {
+        kind: "revising",
+        label: "Redrawing that for you",
+        detail: "Remounting the block so it renders from scratch",
         progress,
       };
     case "insert_after":
@@ -914,6 +1221,13 @@ function toolCallToBlock(call: { name: string; args: Record<string, any> }, doma
         intent: intent as VisualizationIntent,
       };
     }
+    case "place_widget": {
+      // Re-validate at the placement boundary: a corrupt or drifted widget
+      // payload must never reach the chalkboard as a half-configured card.
+      const intent = args.intent;
+      if (!validateWidgetIntent(intent).valid) return null;
+      return { id, kind: "widget" as const, intent: intent as WidgetIntent };
+    }
     case "write_callout":
       return { id, kind: "callout" as const, text: text("text") };
     default:
@@ -924,6 +1238,33 @@ function toolCallToBlock(call: { name: string; args: Record<string, any> }, doma
 
 function appendBlock(board: BoardDoc, block: NonNullable<ReturnType<typeof toolCallToBlock>>): BoardDoc {
   return { ...board, blocks: [...board.blocks, block] };
+}
+
+/**
+ * Board snapshots are a full clone of every board, so keeping one on every
+ * message would grow the saved session quadratically and blow the ~5MB
+ * localStorage budget on a long lesson.
+ *
+ * Only the most recent revert points keep their snapshot. Older messages stay
+ * revertable, but revert the transcript alone — the same graceful path already
+ * taken by sessions saved before snapshots existed.
+ */
+const PERSISTED_BOARD_SNAPSHOTS = 12;
+
+export function pruneSnapshotsForStorage(messages: ChatMsg[]): ChatMsg[] {
+  let remaining = PERSISTED_BOARD_SNAPSHOTS;
+  const kept = new Set<number>();
+  for (let index = messages.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    if (messages[index].boardSnapshot) {
+      kept.add(messages[index].id);
+      remaining -= 1;
+    }
+  }
+  return messages.map(({ imageData: _imageData, ...message }) =>
+    message.boardSnapshot && !kept.has(message.id)
+      ? { ...message, boardSnapshot: undefined }
+      : message
+  );
 }
 
 function blockSpecToBlock(spec: Record<string, unknown>, domain: BoardDoc["domain"], existingId?: string) {
@@ -942,6 +1283,10 @@ function blockSpecToBlock(spec: Record<string, unknown>, domain: BoardDoc["domai
       const result = validateVisualizationIntent(spec.intent);
       if (!result.valid) return null;
       return { id, kind: "visualization" as const, intent: spec.intent as VisualizationIntent };
+    }
+    case "widget": {
+      if (!validateWidgetIntent(spec.intent).valid) return null;
+      return { id, kind: "widget" as const, intent: spec.intent as WidgetIntent };
     }
     case "callout":
       return { id, kind: "callout" as const, text: String(spec.text ?? "") };
@@ -992,14 +1337,96 @@ function blockSearchText(block: BoardDoc["blocks"][number]): string {
       const caption = "caption" in block.intent ? block.intent.caption ?? "" : "";
       return [block.intent.type, title, caption].join(" ");
     }
+    case "widget":
+      return widgetSearchText(block.intent);
     case "row":
       return block.children.map(blockSearchText).join(" \n ");
   }
 }
 
+/** Searchable text for a widget, so targetMatchText can find one by its visible
+ *  content the same way it finds a text block. */
+function widgetSearchText(intent: WidgetIntent): string {
+  const parts: string[] = [intent.kind, WIDGET_LABEL[intent.kind], intent.title ?? "", intent.note ?? ""];
+  switch (intent.kind) {
+    case "roadmap":
+      parts.push(intent.heading ?? "", ...intent.steps.map((step) => step.label));
+      break;
+    case "concept_card":
+      parts.push(intent.term, intent.definition);
+      break;
+    case "slider":
+      parts.push(intent.label, intent.parameter);
+      break;
+    case "animation":
+      parts.push(...intent.frames.map((frame) => frame.caption));
+      break;
+    case "comparison":
+      parts.push(...intent.columns.map((column) => column.title), intent.takeaway ?? "");
+      break;
+    case "question":
+    case "retrieval_check":
+      parts.push(intent.prompt);
+      break;
+    case "hint":
+      parts.push(...intent.steps.map((step) => step.label));
+      break;
+    case "scratchpad":
+      parts.push(intent.prompt ?? "", intent.starter ?? "");
+      break;
+    case "annotation":
+      parts.push(intent.targetLabel ?? "", ...intent.marks.map((mark) => mark.target));
+      break;
+    case "reveal":
+      parts.push(intent.prompt ?? "", ...intent.items.map((item) => item.label));
+      break;
+    case "example":
+      parts.push(intent.problem ?? "", ...intent.steps.map((step) => step.why));
+      break;
+    case "mistake_check":
+      parts.push(intent.prompt ?? "", intent.misconception ?? "");
+      break;
+    case "memory_hook":
+      parts.push(intent.hook);
+      break;
+    case "challenge":
+      parts.push(intent.prompt);
+      break;
+    case "reflection":
+      parts.push(intent.prompt);
+      break;
+    case "mastery_card":
+      parts.push(intent.concept);
+      break;
+  }
+  return parts.filter(Boolean).join(" ");
+}
+
+/** Drop any previous redraw suffix so repeated redraws do not grow the id
+ *  unboundedly, and so the tutor's original anchor still matches. */
+function stripRedrawSuffix(id: string): string {
+  return id.replace(/~r[0-9a-z]+$/, "");
+}
+
+/** Monotonic, so two redraws within the same millisecond still produce
+ *  different ids. An identical id would leave React's key unchanged and skip
+ *  the remount entirely — the exact repair the learner asked for. */
+let redrawCounter = 0;
+function redrawId(id: string): string {
+  redrawCounter += 1;
+  return `${stripRedrawSuffix(id)}~r${redrawCounter.toString(36)}${Date.now().toString(36)}`;
+}
+
 function resolveBoardTargetIndex(board: BoardDoc, op: Record<string, any>): number {
   if (typeof op.targetAnchor === "string" && op.targetAnchor.trim()) {
-    return board.blocks.findIndex((block) => block.id === op.targetAnchor.trim());
+    const anchor = op.targetAnchor.trim();
+    const exact = board.blocks.findIndex((block) => block.id === anchor);
+    if (exact >= 0) return exact;
+    // A redrawn block carries a fresh id, but the tutor is still holding the
+    // id it was given when the block was placed. Match through the suffix so a
+    // redraw does not orphan every later update targeting that block.
+    const base = stripRedrawSuffix(anchor);
+    return board.blocks.findIndex((block) => stripRedrawSuffix(block.id) === base);
   }
   if (Number.isInteger(op.targetIndex)) {
     return op.targetIndex >= 0 && op.targetIndex < board.blocks.length ? op.targetIndex : -1;
@@ -1036,7 +1463,7 @@ function reviseBlockText(block: BoardDoc["blocks"][number], find: string, replac
   }
 }
 
-function applyBoardOp(board: BoardDoc, op: Record<string, any>, domain: BoardDoc["domain"]): BoardDoc {
+export function applyBoardOp(board: BoardDoc, op: Record<string, any>, domain: BoardDoc["domain"]): BoardDoc {
   switch (op.op) {
     case "replace_block": {
       const index = resolveBoardTargetIndex(board, op);
@@ -1061,6 +1488,19 @@ function applyBoardOp(board: BoardDoc, op: Record<string, any>, domain: BoardDoc
       if (index < 0) return board;
       return { ...board, blocks: board.blocks.filter((_, i) => i !== index) };
     }
+    case "redraw_block": {
+      // "I can't see it" repair. Content is untouched; only the block's id
+      // changes, and React keys the block list by id, so the old subtree
+      // unmounts and a brand-new one mounts. That clears a tripped error
+      // boundary, a failed lazy-loaded adapter, or a widget wedged in a bad
+      // internal state — none of which a content edit would fix.
+      const index = resolveBoardTargetIndex(board, op);
+      if (index < 0) return board;
+      const target = board.blocks[index];
+      const blocks = board.blocks.slice();
+      blocks[index] = { ...target, id: redrawId(target.id) };
+      return { ...board, blocks };
+    }
     case "update_visualization": {
       const index = resolveBoardTargetIndex(board, op);
       if (index < 0) return board;
@@ -1076,6 +1516,18 @@ function applyBoardOp(board: BoardDoc, op: Record<string, any>, domain: BoardDoc
         intent: (op.intent as VisualizationIntent | undefined) ?? target.intent,
         state: mergeVisualizationState(target.state, op.statePatch),
       };
+      return { ...board, blocks };
+    }
+    case "update_widget": {
+      const index = resolveBoardTargetIndex(board, op);
+      if (index < 0) return board;
+      const target = board.blocks[index];
+      if (target.kind !== "widget") return board;
+      if (!validateWidgetIntent(op.intent).valid) return board;
+      const blocks = board.blocks.slice();
+      // Reconfiguring a widget keeps the learner's interaction state: a tutor
+      // rewording a question must not silently erase the answer they gave.
+      blocks[index] = { ...target, intent: op.intent as WidgetIntent, state: target.state };
       return { ...board, blocks };
     }
     case "revise_text": {

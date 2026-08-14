@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "cross-env STUDYUS_TAURI=1 vite build"
   },
   "app": {

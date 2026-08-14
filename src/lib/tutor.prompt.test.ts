@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildTutorUserPrompt } from "./tutor";
+import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
 import type { Domain } from "../data/boards";
 
 /**
@@ -70,10 +71,12 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(noEvidencePrompt).not.toMatch(/no curriculum sections are bound/i);
   });
 
-  it("states the intent discriminant is `type`, not `kind`", () => {
+  it("states the visualization intent discriminant is `type`, not `kind`", () => {
     expect(prompt).toMatch(/discriminated union on "type"/);
-    // The stale wording must be gone.
+    // The stale wording must be gone. Widgets key on "kind", but a
+    // VisualizationIntent must never be described that way.
     expect(prompt).not.toMatch(/discriminated union on "kind"/);
+    expect(prompt).toMatch(/a widget "intent" is keyed on its "kind" field/);
   });
 
   it("shows a geometry example using the correct intent/object field names", () => {
@@ -130,9 +133,112 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(prompt).toMatch(/OPTIONAL ENRICHMENT/i);
   });
 
+  it("carries the Guide to Mastery loop as a binding directive", () => {
+    expect(prompt).toMatch(/GUIDE TO MASTERY — THE OPERATING LOOP \(binding\)/);
+    expect(prompt).toContain("The agent carries the structure. The student carries the thinking.");
+    for (const stage of ["ENCOUNTER", "UNDERSTAND", "CONSTRUCT", "APPLY", "TRANSFER", "MASTER"]) {
+      expect(prompt).toContain(stage);
+    }
+    expect(prompt).toMatch(/Advancement is NOT click-through/i);
+    expect(prompt).toMatch(/NEVER declare mastery from a raw score/i);
+    expect(prompt).toMatch(/Never say "You completed Section X/);
+  });
+
+  it("tells the tutor where the session already is on the ladder", () => {
+    // Default (no stage supplied) opens at Encounter.
+    expect(prompt).toMatch(/CURRENT STAGE: 1\. Encounter/);
+    expect(prompt).toMatch(/Exit condition:/);
+
+    const midway = buildTutorUserPrompt({
+      ...baseParams,
+      masteryStage: "construct",
+      masteryStageEvidence: "Wrote the difference quotient unaided.",
+    });
+    expect(midway).toMatch(/CURRENT STAGE: 3\. Construct/);
+    expect(midway).toContain("Wrote the difference quotient unaided.");
+    expect(midway).toMatch(/The session then moves to Apply; you cannot skip ahead of it/);
+    expect(midway).toMatch(/Moving back is correct behaviour/);
+
+    const final = buildTutorUserPrompt({ ...baseParams, masteryStage: "master" });
+    expect(final).toMatch(/This is the final stage/);
+    expect(final).toMatch(/mastery_card reporting all five evidence dimensions/);
+  });
+
+  it("advertises the widget ops and the full 17-widget vocabulary", () => {
+    expect(prompt).toMatch(/place_widget/);
+    expect(prompt).toMatch(/update_widget/);
+    const kinds = [
+      "roadmap", "concept_card", "slider", "animation", "comparison", "question", "hint",
+      "scratchpad", "annotation", "reveal", "example", "mistake_check", "memory_hook",
+      "retrieval_check", "challenge", "reflection", "mastery_card",
+    ];
+    for (const kind of kinds) {
+      expect(prompt).toContain(`[${kind}]`);
+    }
+  });
+
+  it("keeps graphs, geometry, and equations on the visualize op, not widgets", () => {
+    expect(prompt).toMatch(/Graphs, geometry\/points, and equations are NOT widgets/i);
+    expect(prompt).not.toContain(`"kind":"graph"`);
+    expect(prompt).not.toContain(`"kind":"equation"`);
+  });
+
+  it("states the widget invariants that make widgets teach rather than decorate", () => {
+    expect(prompt).toMatch(/EXACTLY ONE correct/);
+    expect(prompt).toMatch(/EVERY step requires "why"/);
+    expect(prompt).toMatch(/every error line REQUIRES a "diagnosis"/);
+    expect(prompt).toMatch(/never the final answer/i);
+    expect(prompt).toMatch(/teaching vocabulary, not a set of optional features/i);
+  });
+
+  it("asks for the stage and evidence-backed stage advancement in the JSON shape", () => {
+    expect(prompt).toMatch(/"stage": "encounter"\|"understand"\|"construct"\|"apply"\|"transfer"\|"master"/);
+    expect(prompt).toMatch(/"stage_advance"/);
+    expect(prompt).toMatch(/ready:true REQUIRES evidence/i);
+  });
+
   it("enumerates the 8 geometry object kinds so the LLM names real ones", () => {
     for (const kind of ["point", "line", "segment", "circle", "polygon", "angle", "label", "text"]) {
       expect(prompt).toContain(kind);
     }
+  });
+});
+
+describe("the never-passive policy reaches the model", () => {
+  it("forbids the roadmap-only turn by name", () => {
+    // Naming the exact failure matters: a general "be interactive" instruction
+    // is the kind of guidance a model satisfies with a rhetorical question.
+    const directive = formatMasteryDirective();
+    expect(directive).toMatch(/THE LEARNER IS NEVER PASSIVE/);
+    expect(directive).toMatch(/roadmap and stopping is a specific and forbidden failure/i);
+    expect(directive).toMatch(/means of guidance/i);
+  });
+
+  it("bans the permission-seeking sign-offs that end a turn without a task", () => {
+    const directive = formatMasteryDirective();
+    expect(directive).toMatch(/let me know when you're ready/i);
+    expect(directive).toMatch(/does that make sense/i);
+  });
+
+  it("tells the agent a roadmap must be placed alongside the move that opens step 1", () => {
+    expect(formatWidgetCatalog()).toMatch(/roadmap is orientation, NOT teaching/i);
+  });
+});
+
+describe("widget cluster groups reach the model", () => {
+  it("documents the group shape in the widget catalog", () => {
+    const catalog = formatWidgetCatalog();
+    expect(catalog).toMatch(/GroupRef = \{ "id": string/);
+    expect(catalog).toMatch(/answer every answerable widget in the group/i);
+  });
+
+  it("warns against grouping by turn rather than by meaning", () => {
+    // The failure to avoid: the agent grouping everything it happens to place
+    // together, which would withhold signals from independent widgets.
+    expect(formatWidgetCatalog()).toMatch(/NOT group widgets merely because you placed them in the same turn/i);
+  });
+
+  it("tells the agent to answer a completed set in one reply", () => {
+    expect(formatMasteryDirective()).toMatch(/respond to the SET in one reply/i);
   });
 });

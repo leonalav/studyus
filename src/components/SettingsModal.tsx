@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { formatCredits, studyusModelSpec } from "../lib/studyusModels";
+import { EMPTY_CREDIT_USAGE, STARTING_CREDITS, formatCreditAmount, loadCreditUsage, type CreditUsage } from "../lib/credits";
 import {
   ArrowLeft,
   Check,
@@ -6,10 +8,10 @@ import {
   ChevronRight,
   ChevronUp,
   CornerDownLeft,
+  Crown,
   LockKeyhole,
   MonitorSmartphone,
   Moon,
-  Plus,
   Settings,
   Sun,
   Trash2,
@@ -366,38 +368,18 @@ function Field({ value, onChange, type = "text", placeholder, id }: {
 
 /* ── About me ─────────────────────────────────────────────── */
 
-interface UsageStats {
-  calls: number;
-  successful: number;
-  tokens: number;
-  byRole: Record<string, number>;
-}
-
 function AboutMe({ preferences, updatePreferences, onNotify }: {
   preferences: StudyusPreferences;
   updatePreferences: (updater: (current: StudyusPreferences) => StudyusPreferences) => void;
   onNotify: (text: string) => void;
 }) {
-  const [usage, setUsage] = useState<UsageStats>({ calls: 0, successful: 0, tokens: 0, byRole: {} });
+  const [usage, setUsage] = useState<CreditUsage>(EMPTY_CREDIT_USAGE);
 
   useEffect(() => {
     let cancelled = false;
-    void import("../db/database").then(async ({ getDb }) => {
-      const db = await getDb();
-      const result = db.exec("SELECT role, outcome, token_counts_json FROM agent_calls;");
-      const next: UsageStats = { calls: 0, successful: 0, tokens: 0, byRole: {} };
-      for (const row of result[0]?.values ?? []) {
-        const role = String(row[0] ?? "unknown");
-        next.calls += 1;
-        next.byRole[role] = (next.byRole[role] ?? 0) + 1;
-        if (row[1] === "success") next.successful += 1;
-        try {
-          const parsed = JSON.parse(String(row[2] || "{}")) as { total?: unknown };
-          if (typeof parsed.total === "number" && Number.isFinite(parsed.total)) next.tokens += parsed.total;
-        } catch {}
-      }
-      if (!cancelled) setUsage(next);
-    }).catch(() => undefined);
+    void loadCreditUsage()
+      .then((next) => { if (!cancelled) setUsage(next); })
+      .catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
 
@@ -408,7 +390,10 @@ function AboutMe({ preferences, updatePreferences, onNotify }: {
   }));
   const initials = profile.fullName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "L";
   const timezones = Array.from(new Set([profile.timezone, Intl.DateTimeFormat().resolvedOptions().timeZone, "UTC", "Asia/Bangkok", "Asia/Novosibirsk", "Europe/London", "America/New_York"])).filter(Boolean);
-  const successPct = usage.calls > 0 ? Math.round((usage.successful / usage.calls) * 100) : 0;
+  // The bar now tracks the allowance, not the success rate: the headline number
+  // is credits remaining, and a bar measuring something else beside it would be
+  // read as belonging to it.
+  const remainingPct = Math.round((usage.remaining / STARTING_CREDITS) * 100);
 
   return (
     <div>
@@ -447,20 +432,27 @@ function AboutMe({ preferences, updatePreferences, onNotify }: {
         <div className="mb-2 flex items-baseline justify-between">
           <div>
             <div className="text-[16px] font-semibold text-fg">
-              {usage.tokens.toLocaleString()} <span className="text-[12px] font-normal text-dim">reported tokens</span>
+              {formatCreditAmount(usage.remaining)}{" "}
+              <span className="text-[12px] font-normal text-dim">
+                of {STARTING_CREDITS.toLocaleString()} credits
+              </span>
             </div>
-            <div className="text-[11.5px] text-dim">Measured from actual agent calls saved on this device</div>
+            <div className="text-[11.5px] text-dim">
+              {usage.spent > 0
+                ? `${formatCreditAmount(usage.spent)} spent · charged per request by the model you used`
+                : "Charged per request, by the Studyus model you use"}
+            </div>
           </div>
-          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent">{successPct}%</span>
+          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent">{remainingPct}%</span>
         </div>
         <div className="h-1.5 overflow-hidden rounded-full bg-white/8">
-          <div className="h-full rounded-full bg-accent" style={{ width: `${successPct}%` }} />
+          <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${remainingPct}%` }} />
         </div>
         <div className="mt-3 grid grid-cols-3 gap-2 text-center">
           {[
-            { label: "Agent calls", value: usage.calls.toLocaleString() },
+            { label: "Requests", value: usage.requests.toLocaleString() },
             { label: "Successful", value: usage.successful.toLocaleString() },
-            { label: "Tokens reported", value: usage.tokens.toLocaleString() },
+            { label: "Credits remaining", value: formatCreditAmount(usage.remaining) },
           ].map((metric) => (
             <div key={metric.label} className="rounded-md bg-black/25 py-2">
               <div className="text-[15px] font-semibold text-fg">{metric.value}</div>
@@ -469,9 +461,9 @@ function AboutMe({ preferences, updatePreferences, onNotify }: {
           ))}
         </div>
         <div className="mt-2 text-[10.5px] text-dim">
-          {usage.calls > 0
+          {usage.requests > 0
             ? Object.entries(usage.byRole).map(([role, count]) => `${role}: ${count}`).join(" · ")
-            : "No agent calls have been logged yet."}
+            : "No requests have been logged yet."}
         </div>
       </div>
 
@@ -669,6 +661,19 @@ function Notifications({ preferences, updatePreferences, onNotify }: {
 }
 
 /* ── Model configuration ──────────────────────────────────── */
+
+/** Pro marker. The tooltip carries the explanation, so the icon stays quiet. */
+function ProCrown() {
+  return (
+    <span
+      title="Reserved for Studyus Pro subscriptions"
+      className="grid h-3.5 w-3.5 place-items-center text-[#e2b73f]"
+      aria-label="Reserved for Studyus Pro subscriptions"
+    >
+      <Crown size={11} />
+    </span>
+  );
+}
 
 const EMPTY_ENDPOINT: SavedModelEndpoint = {
   id: "",
@@ -962,9 +967,10 @@ function Models({ preferences, updatePreferences, onNotify }: {
         </button>
         <button
           onClick={() => setCategory("custom")}
-          className={`rounded px-2 py-1.5 text-[11.5px] transition-colors ${category === "custom" ? "bg-white/[0.14] text-fg" : "text-dim hover:text-mut"}`}
+          className={`flex items-center justify-center gap-1.5 rounded px-2 py-1.5 text-[11.5px] transition-colors ${category === "custom" ? "bg-white/[0.14] text-fg" : "text-dim hover:text-mut"}`}
         >
           Custom endpoints · {customEndpoints.length}
+          <ProCrown />
         </button>
       </div>
 
@@ -990,8 +996,23 @@ function Models({ preferences, updatePreferences, onNotify }: {
                     <span className="truncate text-[12.5px] font-medium text-fg">{endpoint.label}</span>
                     {endpoint.active && <span className="rounded-full bg-accent/20 px-1.5 py-[1px] text-[9.5px] font-medium text-accent">Active</span>}
                     {endpoint.vision && <span className="rounded-full bg-[#7dd3fc]/15 px-1.5 py-[1px] text-[9.5px] text-[#7dd3fc]">Vision</span>}
+                    {endpoint.provider === "studyus" && studyusModelSpec(endpoint.id) && (
+                      <span className="rounded-full bg-white/[0.08] px-1.5 py-[1px] font-mono text-[9.5px] text-mut" title="Credits used per request">
+                        {formatCredits(studyusModelSpec(endpoint.id)!.credits)}
+                      </span>
+                    )}
                   </div>
-                  <div className="truncate font-mono text-[10px] text-dim">{endpoint.model} · {endpoint.baseUrl} · key: {endpoint.keyMasked}</div>
+                  {endpoint.provider === "studyus" ? (
+                    // The routed model id and the key are Studyus's, not the
+                    // learner's: showing the id leaks which vendor backs each
+                    // tier, and a key field they must leave blank reads as a
+                    // broken form. The credit price is the fact that matters.
+                    <div className="truncate text-[10.5px] text-dim">
+                      {studyusModelSpec(endpoint.id)?.blurb ?? "Provided by Studyus."}
+                    </div>
+                  ) : (
+                    <div className="truncate font-mono text-[10px] text-dim">{endpoint.model} · {endpoint.baseUrl} · key: {endpoint.keyMasked}</div>
+                  )}
                 </div>
                 <button disabled={testingId === endpoint.id} onClick={() => { void testEndpoint(endpoint); }} className="shrink-0 rounded-md border border-white/10 bg-white/[0.07] px-2 py-1 text-[10.5px] text-mut hover:bg-white/[0.12] hover:text-fg disabled:opacity-50">{testingId === endpoint.id ? "Testing…" : "Test"}</button>
                 {endpoint.provider !== "studyus" && (
@@ -1057,8 +1078,26 @@ function Models({ preferences, updatePreferences, onNotify }: {
         })}
       </div>
 
+      {category === "custom" && (
+        <div className="mb-2 flex items-start gap-2 rounded-md border border-[#e2b73f]/25 bg-[#e2b73f]/[0.06] px-2.5 py-2">
+          <Crown size={12} className="mt-[2px] shrink-0 text-[#e2b73f]" />
+          <p className="text-[11.5px] leading-relaxed text-mut">
+            <span className="font-medium text-fg">Custom endpoints are a Pro feature.</span>{" "}
+            Bring your own OpenAI-compatible model and key. Endpoints you already saved keep
+            working — you can test, assign and remove them.
+          </p>
+        </div>
+      )}
+
       {category === "custom" && (!showAdd ? (
-        <button onClick={() => setShowAdd(true)} className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-white/12 py-2 text-[12px] text-mut transition-colors hover:border-white/20 hover:text-fg"><Plus size={12} />Add OpenAI-compatible endpoint</button>
+        <button
+          onClick={() => onNotify("Custom endpoints are reserved for Studyus Pro")}
+          title="Reserved for Studyus Pro"
+          className="mb-2 flex w-full cursor-not-allowed items-center justify-center gap-1.5 rounded-md border border-dashed border-white/12 py-2 text-[12px] text-dim transition-colors hover:border-[#e2b73f]/30"
+        >
+          <Crown size={12} className="text-[#e2b73f]" />
+          Add OpenAI-compatible endpoint
+        </button>
       ) : (
         <div className="mb-2 space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-3">
           <div className="mb-1 flex items-center justify-between"><span className="text-[11.5px] font-medium text-fg">New custom endpoint</span><button onClick={() => setShowAdd(false)} className="grid h-5 w-5 place-items-center rounded text-dim hover:bg-white/[0.07] hover:text-fg"><X size={11} /></button></div>

@@ -7,6 +7,8 @@ import { ActivityList } from "./components/ActivityList";
 import { Toasts, type ToastItem } from "./components/Toasts";
 import { SearchModal } from "./components/SearchModal";
 import { SettingsModal } from "./components/SettingsModal";
+import { HelpModal } from "./components/HelpModal";
+import { MarketplacePage } from "./components/MarketplacePage";
 import { TabContent, type TestParams } from "./components/TabContent";
 import { decodeTestTabId, encodeTestTabId } from "./components/testTabIds";
 import { StudyRoom } from "./components/board/StudyRoom";
@@ -39,6 +41,7 @@ function useClock() {
 }
 
 const HOME_TAB_ID = "home";
+const MARKETPLACE_TAB_ID = "marketplace";
 const CURRICULUM_SELECTION_KEY = "studyus.curriculum_selection.v1";
 
 function loadCurriculumSelection(): CurriculumStudySelection | null {
@@ -64,6 +67,7 @@ export default function App() {
   const [pendingOnboarding, setPendingOnboarding] = useState<OnboardingAnswers | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<
     "root" | "about" | "appearance" | "tutor" | "notifications" | "models"
   >("root");
@@ -470,6 +474,8 @@ export default function App() {
             onNotify={notify}
             onOpenSearch={() => setSearchOpen(true)}
             onOpenSettings={openSettingsRoot}
+            onOpenHelp={() => setHelpOpen(true)}
+            onOpenMarketplace={() => openTab({ id: MARKETPLACE_TAB_ID, title: "Marketplace", kind: "marketplace" })}
             onOpenTab={openTab}
             onPastNoteDeleted={(id) => removeResourceTabs("note", `note-${id}`)}
             onPastNoteRenamed={(id, title) => renameResourceTabs("note", `note-${id}`, title)}
@@ -488,12 +494,39 @@ export default function App() {
           />
         )}
 
-        <div className="relative flex-1 overflow-y-auto">
-          <div className="sticky top-0 z-20 bg-ink/85 backdrop-blur-sm">
-            <Toolbar title={activeTab.title} onNotify={notify} />
+        {/* The Marketplace is a fixed, non-scrolling page: its shelf is a preview
+            behind a notice, so letting the learner scroll a wall of blurred
+            placeholder content would imply there is something down there to
+            reach. Every other tab keeps its normal scroll. */}
+        <div
+          className={`relative flex-1 ${activeTab.kind === "marketplace"
+              ? "flex min-h-0 flex-col overflow-hidden"
+              : "overflow-y-auto"
+            }`}
+        >
+          <div className="sticky top-0 z-20 shrink-0 bg-ink/85 backdrop-blur-sm">
+            <Toolbar
+              title={activeTab.title}
+              onNotify={notify}
+              onDuplicateTab={() => handleTabContextAction("duplicate_tab", { tab: activeTab })}
+              onDeleteTab={() => closeTab(activeTab.id)}
+              // Closing the last tab would leave the shell with nothing to
+              // render, so the item is disabled rather than silently ignored.
+              canDeleteTab={tabs.length > 1}
+              starred={activeTab.starred === true}
+              onToggleStar={() =>
+                setTabs((current) =>
+                  current.map((tab) =>
+                    tab.id === activeTab.id ? { ...tab, starred: !tab.starred } : tab
+                  )
+                )
+              }
+            />
           </div>
 
-          {isBoardTab ? (
+          {activeTab.kind === "marketplace" ? (
+            <MarketplacePage />
+          ) : isBoardTab ? (
             <main className="mx-auto w-full max-w-[760px] px-5 pt-14 sm:pt-20">
               <header className="anim-fade-up mb-8">
                 {/* The big page header always shows the current time — it is never
@@ -504,7 +537,7 @@ export default function App() {
                   <span className="text-[#909090]">Today {time}</span>
                 </h1>
                 <p className="mt-2 font-mono text-[11px] uppercase tracking-wider text-dim">
-                  {chosenSection ? `Studying concept section: ${chosenSection.label}` : "Tell Studyus what to study · it builds the chalkboard"}
+                  {chosenSection ? `Studying concept section: ${chosenSection.label}` : "Tell Studyus what to study"}
                 </p>
               </header>
 
@@ -583,6 +616,8 @@ export default function App() {
         onNotify={notify}
         initialSection={settingsSection}
       />
+
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
 
       <ContextMenu
         target={shellContextMenu}
