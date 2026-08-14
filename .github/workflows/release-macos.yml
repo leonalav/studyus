@@ -1,0 +1,102 @@
+name: Release macOS App & Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'Release Tag (e.g. v1.0.0)'
+        required: true
+        default: 'v0.1.0'
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    permissions:
+      contents: write # Needed to publish GitHub Releases
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: latest
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build Tauri macOS App
+        run: pnpm tauri build
+
+      - name: Package Zip and Generate Checksums
+        run: |
+          mkdir -p release-assets
+          
+          # Locate the built .app bundle
+          APP_PATH=$(find src-tauri/target -type d -name "Studyus.app" | head -n 1)
+          
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: Studyus.app not found!"
+            exit 1
+          fi
+          
+          # Compress the .app bundle preserving symlinks
+          cd "$(dirname "$APP_PATH")"
+          zip -r -y "${GITHUB_WORKSPACE}/release-assets/Studyus-macOS.zip" "$(basename "$APP_PATH")"
+          cd "${GITHUB_WORKSPACE}/release-assets"
+          
+          # Generate SHA-256 checksum
+          shasum -a 256 Studyus-macOS.zip > Studyus-macOS.zip.sha256
+
+      - name: Generate install.sh
+        run: |
+          cat << 'EOF' > release-assets/install.sh
+          #!/usr/bin/env bash
+          set -e
+
+          APP_NAME="Studyus"
+          REPO="leonalav/studyus"
+          ZIP_URL="https://github.com/${REPO}/releases/latest/download/Studyus-macOS.zip"
+          INSTALL_DIR="/Applications"
+
+          echo "==> Downloading ${APP_NAME}..."
+          TMP_DIR=$(mktemp -d)
+          curl -fSL "${ZIP_URL}" -o "${TMP_DIR}/${APP_NAME}.zip"
+
+          echo "==> Installing to ${INSTALL_DIR}..."
+          unzip -q -o "${TMP_DIR}/${APP_NAME}.zip" -d "${INSTALL_DIR}"
+          xattr -cr "${INSTALL_DIR}/${APP_NAME}.app" 2>/dev/null || true
+          rm -rf "${TMP_DIR}"
+
+          echo "==> ${APP_NAME} installed successfully!"
+          open "${INSTALL_DIR}/${APP_NAME}.app"
+          EOF
+          chmod +x release-assets/install.sh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version_tag || github.ref_name }}
+          name: Release ${{ github.event.inputs.version_tag || github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            release-assets/Studyus-macOS.zip
+            release-assets/Studyus-macOS.zip.sha256
+            release-assets/install.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
