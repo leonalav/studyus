@@ -13,7 +13,7 @@ import {
   Mic,
   AtSign,
   X,
-  BookOpen,
+  AlertTriangle,
   Upload,
 } from "lucide-react";
 import {
@@ -502,7 +502,7 @@ export function SessionCard({
         {showCurriculumNotice && (
           <div className="anim-fade-up mb-3 rounded-lg border border-warn/35 bg-warn/[0.07] px-3 py-2.5">
             <div className="flex items-start gap-2.5">
-              <BookOpen size={14} className="mt-[2px] flex-none text-warn" />
+              <AlertTriangle size={14} className="mt-[2px] flex-none text-warn" />
               <div className="min-w-0 flex-1">
                 <p className="text-[12.5px] font-medium text-fg">No curriculum imported</p>
                 <p className="mt-0.5 text-[11.5px] leading-relaxed text-mut">

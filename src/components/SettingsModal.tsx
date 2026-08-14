@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { formatCredits, studyusModelSpec } from "../lib/studyusModels";
+import { EMPTY_CREDIT_USAGE, STARTING_CREDITS, formatCreditAmount, loadCreditUsage, type CreditUsage } from "../lib/credits";
 import {
   ArrowLeft,
   Check,
@@ -367,38 +368,18 @@ function Field({ value, onChange, type = "text", placeholder, id }: {
 
 /* ── About me ─────────────────────────────────────────────── */
 
-interface UsageStats {
-  calls: number;
-  successful: number;
-  tokens: number;
-  byRole: Record<string, number>;
-}
-
 function AboutMe({ preferences, updatePreferences, onNotify }: {
   preferences: StudyusPreferences;
   updatePreferences: (updater: (current: StudyusPreferences) => StudyusPreferences) => void;
   onNotify: (text: string) => void;
 }) {
-  const [usage, setUsage] = useState<UsageStats>({ calls: 0, successful: 0, tokens: 0, byRole: {} });
+  const [usage, setUsage] = useState<CreditUsage>(EMPTY_CREDIT_USAGE);
 
   useEffect(() => {
     let cancelled = false;
-    void import("../db/database").then(async ({ getDb }) => {
-      const db = await getDb();
-      const result = db.exec("SELECT role, outcome, token_counts_json FROM agent_calls;");
-      const next: UsageStats = { calls: 0, successful: 0, tokens: 0, byRole: {} };
-      for (const row of result[0]?.values ?? []) {
-        const role = String(row[0] ?? "unknown");
-        next.calls += 1;
-        next.byRole[role] = (next.byRole[role] ?? 0) + 1;
-        if (row[1] === "success") next.successful += 1;
-        try {
-          const parsed = JSON.parse(String(row[2] || "{}")) as { total?: unknown };
-          if (typeof parsed.total === "number" && Number.isFinite(parsed.total)) next.tokens += parsed.total;
-        } catch {}
-      }
-      if (!cancelled) setUsage(next);
-    }).catch(() => undefined);
+    void loadCreditUsage()
+      .then((next) => { if (!cancelled) setUsage(next); })
+      .catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
 
@@ -409,7 +390,10 @@ function AboutMe({ preferences, updatePreferences, onNotify }: {
   }));
   const initials = profile.fullName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "L";
   const timezones = Array.from(new Set([profile.timezone, Intl.DateTimeFormat().resolvedOptions().timeZone, "UTC", "Asia/Bangkok", "Asia/Novosibirsk", "Europe/London", "America/New_York"])).filter(Boolean);
-  const successPct = usage.calls > 0 ? Math.round((usage.successful / usage.calls) * 100) : 0;
+  // The bar now tracks the allowance, not the success rate: the headline number
+  // is credits remaining, and a bar measuring something else beside it would be
+  // read as belonging to it.
+  const remainingPct = Math.round((usage.remaining / STARTING_CREDITS) * 100);
 
   return (
     <div>
@@ -448,20 +432,27 @@ function AboutMe({ preferences, updatePreferences, onNotify }: {
         <div className="mb-2 flex items-baseline justify-between">
           <div>
             <div className="text-[16px] font-semibold text-fg">
-              {usage.tokens.toLocaleString()} <span className="text-[12px] font-normal text-dim">reported tokens</span>
+              {formatCreditAmount(usage.remaining)}{" "}
+              <span className="text-[12px] font-normal text-dim">
+                of {STARTING_CREDITS.toLocaleString()} credits
+              </span>
             </div>
-            <div className="text-[11.5px] text-dim">Measured from actual agent calls saved on this device</div>
+            <div className="text-[11.5px] text-dim">
+              {usage.spent > 0
+                ? `${formatCreditAmount(usage.spent)} spent · charged per request by the model you used`
+                : "Charged per request, by the Studyus model you use"}
+            </div>
           </div>
-          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent">{successPct}%</span>
+          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent">{remainingPct}%</span>
         </div>
         <div className="h-1.5 overflow-hidden rounded-full bg-white/8">
-          <div className="h-full rounded-full bg-accent" style={{ width: `${successPct}%` }} />
+          <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${remainingPct}%` }} />
         </div>
         <div className="mt-3 grid grid-cols-3 gap-2 text-center">
           {[
-            { label: "Agent calls", value: usage.calls.toLocaleString() },
+            { label: "Requests", value: usage.requests.toLocaleString() },
             { label: "Successful", value: usage.successful.toLocaleString() },
-            { label: "Tokens reported", value: usage.tokens.toLocaleString() },
+            { label: "Credits remaining", value: formatCreditAmount(usage.remaining) },
           ].map((metric) => (
             <div key={metric.label} className="rounded-md bg-black/25 py-2">
               <div className="text-[15px] font-semibold text-fg">{metric.value}</div>
@@ -470,9 +461,9 @@ function AboutMe({ preferences, updatePreferences, onNotify }: {
           ))}
         </div>
         <div className="mt-2 text-[10.5px] text-dim">
-          {usage.calls > 0
+          {usage.requests > 0
             ? Object.entries(usage.byRole).map(([role, count]) => `${role}: ${count}`).join(" · ")
-            : "No agent calls have been logged yet."}
+            : "No requests have been logged yet."}
         </div>
       </div>
 

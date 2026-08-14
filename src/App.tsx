@@ -8,7 +8,7 @@ import { Toasts, type ToastItem } from "./components/Toasts";
 import { SearchModal } from "./components/SearchModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { HelpModal } from "./components/HelpModal";
-import { MarketplaceModal } from "./components/MarketplaceModal";
+import { MarketplacePage } from "./components/MarketplacePage";
 import { TabContent, type TestParams } from "./components/TabContent";
 import { decodeTestTabId, encodeTestTabId } from "./components/testTabIds";
 import { StudyRoom } from "./components/board/StudyRoom";
@@ -41,6 +41,7 @@ function useClock() {
 }
 
 const HOME_TAB_ID = "home";
+const MARKETPLACE_TAB_ID = "marketplace";
 const CURRICULUM_SELECTION_KEY = "studyus.curriculum_selection.v1";
 
 function loadCurriculumSelection(): CurriculumStudySelection | null {
@@ -67,7 +68,6 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [marketplaceOpen, setMarketplaceOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<
     "root" | "about" | "appearance" | "tutor" | "notifications" | "models"
   >("root");
@@ -475,7 +475,7 @@ export default function App() {
             onOpenSearch={() => setSearchOpen(true)}
             onOpenSettings={openSettingsRoot}
         onOpenHelp={() => setHelpOpen(true)}
-        onOpenMarketplace={() => setMarketplaceOpen(true)}
+        onOpenMarketplace={() => openTab({ id: MARKETPLACE_TAB_ID, title: "Marketplace", kind: "marketplace" })}
             onOpenTab={openTab}
             onPastNoteDeleted={(id) => removeResourceTabs("note", `note-${id}`)}
             onPastNoteRenamed={(id, title) => renameResourceTabs("note", `note-${id}`, title)}
@@ -494,8 +494,18 @@ export default function App() {
           />
         )}
 
-        <div className="relative flex-1 overflow-y-auto">
-          <div className="sticky top-0 z-20 bg-ink/85 backdrop-blur-sm">
+        {/* The Marketplace is a fixed, non-scrolling page: its shelf is a preview
+            behind a notice, so letting the learner scroll a wall of blurred
+            placeholder content would imply there is something down there to
+            reach. Every other tab keeps its normal scroll. */}
+        <div
+          className={`relative flex-1 ${
+            activeTab.kind === "marketplace"
+              ? "flex min-h-0 flex-col overflow-hidden"
+              : "overflow-y-auto"
+          }`}
+        >
+          <div className="sticky top-0 z-20 shrink-0 bg-ink/85 backdrop-blur-sm">
             <Toolbar
               title={activeTab.title}
               onNotify={notify}
@@ -515,7 +525,9 @@ export default function App() {
             />
           </div>
 
-          {isBoardTab ? (
+          {activeTab.kind === "marketplace" ? (
+            <MarketplacePage />
+          ) : isBoardTab ? (
             <main className="mx-auto w-full max-w-[760px] px-5 pt-14 sm:pt-20">
               <header className="anim-fade-up mb-8">
                 {/* The big page header always shows the current time — it is never
@@ -607,8 +619,6 @@ export default function App() {
       />
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
-
-      <MarketplaceModal open={marketplaceOpen} onClose={() => setMarketplaceOpen(false)} />
 
       <ContextMenu
         target={shellContextMenu}

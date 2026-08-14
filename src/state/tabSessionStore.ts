@@ -15,7 +15,13 @@ export function createDefaultTab(): Tab {
 }
 
 function isTabKind(value: unknown): value is Tab["kind"] {
-  return value === "board" || value === "curriculum" || value === "test" || value === "note";
+  return (
+    value === "board" ||
+    value === "curriculum" ||
+    value === "test" ||
+    value === "note" ||
+    value === "marketplace"
+  );
 }
 
 function sanitizeTab(value: unknown): Tab | null {
@@ -29,6 +35,7 @@ function sanitizeTab(value: unknown): Tab | null {
     title: candidate.title.slice(0, 160),
     kind: candidate.kind,
     ...(candidate.pinned === true ? { pinned: true } : {}),
+    ...(candidate.starred === true ? { starred: true } : {}),
     ...(typeof candidate.contentId === "string" && candidate.contentId.trim()
       ? { contentId: candidate.contentId.slice(0, 300) }
       : {}),

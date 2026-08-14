@@ -5,7 +5,7 @@ import { isTauriRuntime } from "../lib/tauri";
 export interface Tab {
   id: string;
   title: string;
-  kind: "board" | "curriculum" | "test" | "note";
+  kind: "board" | "curriculum" | "test" | "note" | "marketplace";
   /** Pinned tabs are kept at the start of the strip and restored on restart. */
   pinned?: boolean;
   /** Stable content identity used when a tab is duplicated under a new tab id. */
@@ -87,6 +87,8 @@ export function TopBar({
                 ? "bg-[#a5b4fc]"
                 : tab.kind === "note"
                 ? "bg-[#86efac]"
+                : tab.kind === "marketplace"
+                ? "bg-[#f0abfc]"
                 : "bg-accent";
             return (
               <div
