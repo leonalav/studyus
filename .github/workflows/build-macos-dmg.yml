@@ -22,32 +22,26 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-          standalone: true
-          run_install: false
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install frontend dependencies
+      - name: Set up pnpm (v9)
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
       - name: Set up Rust (stable)
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build output
-        uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "src-tauri -> target"
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
-      - name: Build macOS app & DMG
+      - name: Build Tauri DMG
         run: pnpm exec tauri build
 
       - name: Upload the .dmg
