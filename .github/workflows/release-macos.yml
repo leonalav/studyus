@@ -21,25 +21,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-          standalone: true
-          run_install: false
-
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up pnpm (v9)
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Build Tauri macOS App
         run: pnpm exec tauri build
@@ -48,14 +47,9 @@ jobs:
         run: |
           mkdir -p release-assets
           
-          # Find any generated .app bundle inside target
-          APP_PATH=$(find src-tauri/target -type d -iname "*.app" | grep -E "(bundle/macos|bundle/osx)" | head -n 1)
+          # Case-insensitive search for the built .app bundle
+          APP_PATH=$(find src-tauri/target -type d -iname "*.app" | head -n 1)
           
-          if [ -z "$APP_PATH" ]; then
-            # Fallback search if bundle structure varies
-            APP_PATH=$(find src-tauri/target -type d -iname "*.app" | head -n 1)
-          fi
-
           if [ -z "$APP_PATH" ]; then
             echo "Error: .app bundle not found!"
             exit 1
@@ -63,7 +57,7 @@ jobs:
 
           echo "Found app bundle at: $APP_PATH"
           
-          # Compress the .app bundle preserving symlinks
+          # Compress the .app preserving symlinks
           cd "$(dirname "$APP_PATH")"
           zip -r -y "${GITHUB_WORKSPACE}/release-assets/Studyus-macOS.zip" "$(basename "$APP_PATH")"
           cd "${GITHUB_WORKSPACE}/release-assets"
