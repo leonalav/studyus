@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: 'Release Tag (e.g. v1.0.0)'
+        description: 'Release Tag (e.g. v0.1.0)'
         required: true
         default: 'v0.1.0'
   push:
@@ -15,44 +15,52 @@ jobs:
   build-and-release:
     runs-on: macos-latest
     permissions:
-      contents: write # Needed to publish GitHub Releases
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: latest
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build Tauri macOS App
-        run: pnpm tauri build
+        run: pnpm exec tauri build
 
       - name: Package Zip and Generate Checksums
         run: |
           mkdir -p release-assets
           
-          # Locate the built .app bundle
-          APP_PATH=$(find src-tauri/target -type d -name "Studyus.app" | head -n 1)
+          # Find any generated .app bundle inside target
+          APP_PATH=$(find src-tauri/target -type d -iname "*.app" | grep -E "(bundle/macos|bundle/osx)" | head -n 1)
           
           if [ -z "$APP_PATH" ]; then
-            echo "Error: Studyus.app not found!"
+            # Fallback search if bundle structure varies
+            APP_PATH=$(find src-tauri/target -type d -iname "*.app" | head -n 1)
+          fi
+
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: .app bundle not found!"
             exit 1
           fi
+
+          echo "Found app bundle at: $APP_PATH"
           
           # Compress the .app bundle preserving symlinks
           cd "$(dirname "$APP_PATH")"
@@ -79,11 +87,11 @@ jobs:
 
           echo "==> Installing to ${INSTALL_DIR}..."
           unzip -q -o "${TMP_DIR}/${APP_NAME}.zip" -d "${INSTALL_DIR}"
-          xattr -cr "${INSTALL_DIR}/${APP_NAME}.app" 2>/dev/null || true
+          xattr -cr "${INSTALL_DIR}"/*.app 2>/dev/null || true
           rm -rf "${TMP_DIR}"
 
           echo "==> ${APP_NAME} installed successfully!"
-          open "${INSTALL_DIR}/${APP_NAME}.app"
+          open -a "${APP_NAME}" 2>/dev/null || open "${INSTALL_DIR}"/*.app
           EOF
           chmod +x release-assets/install.sh
 
