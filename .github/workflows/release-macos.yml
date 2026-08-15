@@ -21,7 +21,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -51,7 +51,7 @@ jobs:
           APP_PATH=$(find src-tauri/target -type d -iname "*.app" | head -n 1)
           
           if [ -z "$APP_PATH" ]; then
-            echo "Error: .app bundle not found!"
+            echo "Error: .app bundle not found in src-tauri/target!"
             exit 1
           fi
 
