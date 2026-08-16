@@ -511,6 +511,17 @@ export interface NextLearningMove {
   reviewId?: string;
   /** Set when the move exists to discharge an owed reconstruction. */
   reconstructionTaskFamily?: string;
+  /**
+   * The task family this move's evidence must be filed under.
+   *
+   * Load-bearing for anything with an outstanding obligation. A review is
+   * settled by matching `(skill, taskFamily)`, so a due retrieval whose
+   * evidence lands under a route-derived family instead of the reviewed one
+   * settles nothing: the review stays open, comes due again the next session,
+   * and the learner is asked the same question forever while their answers
+   * pile up somewhere the scheduler never looks.
+   */
+  taskFamily?: string;
 }
 
 /* ─────────────────────────────────────────────────────────────

@@ -239,6 +239,9 @@ export function planNextMove(input: PlanInput): NextLearningMove {
       rationaleEvidenceIds: state.stageEvidenceIds.slice(-2),
       reviewId: review.reviewId,
       reconstructionTaskFamily: review.reconstruction ? review.taskFamily : undefined,
+      // Always the reviewed family, reconstruction or not: this is what lets
+      // the resulting evidence settle the review rather than orphan it.
+      taskFamily: review.taskFamily,
     });
   }
 
@@ -414,6 +417,7 @@ function buildMove(params: {
   rationaleEvidenceIds: string[];
   reviewId?: string;
   reconstructionTaskFamily?: string;
+  taskFamily?: string;
 }): NextLearningMove {
   const { route, state } = params;
   return {
@@ -429,6 +433,7 @@ function buildMove(params: {
     rationale: params.rationale,
     reviewId: params.reviewId,
     reconstructionTaskFamily: params.reconstructionTaskFamily,
+    taskFamily: params.taskFamily ?? params.reconstructionTaskFamily,
   };
 }
 

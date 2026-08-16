@@ -56,6 +56,7 @@ import type { MathNode, FunctionNode, OperatorNode, SymbolNode } from "mathjs";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
 import type { WidgetIntent, WidgetState } from "./widgets/types";
+import type { SupportLevel } from "./learning/types";
 import { WIDGET_LABEL, isActionableWidget } from "./widgets/types";
 import { validateWidgetIntent } from "./widgets/validate";
 import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
@@ -530,6 +531,114 @@ export function enforceLearnerAgency(turn: TutorTurn): TutorTurn {
   if (turnLeavesLearnerSomethingToDo(turn)) return turn;
   const speech = turn.speech.trim();
   return { ...turn, speech: speech ? `${speech} ${PASSIVE_TURN_NUDGE}` : PASSIVE_TURN_NUDGE };
+}
+
+/**
+ * Widget kinds that hand the learner support rather than work.
+ *
+ * A `hint` is support by definition. An `example` is a worked demonstration —
+ * seeing the method performed is exactly what level-2/3 support means. A
+ * `reveal` hides an answer behind one click, which under a zero ceiling is a
+ * hint with extra steps.
+ */
+const SUPPORT_WIDGET_CEILING: Partial<Record<WidgetIntent["kind"], SupportLevel>> = {
+  hint: 1,
+  example: 2,
+  reveal: 2,
+};
+
+/** The support level a single hint step corresponds to. */
+function hintStepSupportLevel(level: number): SupportLevel {
+  return Math.max(0, Math.min(3, Math.round(level))) as SupportLevel;
+}
+
+/**
+ * Make the policy ceiling binding rather than advisory.
+ *
+ * The prompt states the ceiling and the model usually respects it. "Usually" is
+ * the problem: the routes with a ceiling of 0 are exactly the ones whose only
+ * purpose is measurement, and a single hint on a due retrieval does not degrade
+ * that measurement — it destroys it. There is no partial credit for a retrieval
+ * that was prompted; you simply no longer know whether the learner could recall
+ * it, and no later turn can recover that.
+ *
+ * So the ceiling is enforced here, after the model has spoken and before the
+ * board is written.
+ *
+ * What this does NOT do is silently gut the turn. Over-supportive widgets are
+ * dropped or trimmed to the permitted level, and the tutor's speech says so
+ * plainly. A learner who can see that help was withheld deliberately is being
+ * treated as an adult; a learner whose hint quietly vanished is being gaslit by
+ * their study tool.
+ */
+export function enforceSupportCeiling(turn: TutorTurn, ceiling: SupportLevel): TutorTurn {
+  if (ceiling >= 3) return turn;
+
+  let trimmedAny = false;
+  let droppedAny = false;
+
+  const limitWidget = (intent: WidgetIntent): WidgetIntent | null => {
+    // A hint widget survives at a reduced ceiling by keeping only the rungs the
+    // policy allows. Level 1 orientation under a ceiling of 1 is legitimate
+    // help; the deeper rungs are what must not be reachable.
+    if (intent.kind === "hint") {
+      const steps = intent.steps.filter((step) => hintStepSupportLevel(step.level) <= ceiling);
+      if (steps.length === intent.steps.length) return intent;
+      if (steps.length === 0) {
+        droppedAny = true;
+        return null;
+      }
+      trimmedAny = true;
+      return { ...intent, steps };
+    }
+
+    const required = SUPPORT_WIDGET_CEILING[intent.kind];
+    if (required !== undefined && required > ceiling) {
+      droppedAny = true;
+      return null;
+    }
+    return intent;
+  };
+
+  const boardOps = turn.boardOps.flatMap<BoardOp>((op) => {
+    switch (op.op) {
+      case "place_widget":
+      case "update_widget": {
+        const intent = limitWidget(op.intent);
+        return intent ? [{ ...op, intent }] : [];
+      }
+      case "replace_block":
+      case "insert_after": {
+        if (op.block.kind !== "widget") return [op];
+        const intent = limitWidget(op.block.intent);
+        return intent ? [{ ...op, block: { ...op.block, intent } }] : [];
+      }
+      case "spawn_thread": {
+        const initialBlocks = op.initialBlocks.flatMap<BoardBlockSpec>((block) => {
+          if (block.kind !== "widget") return [block];
+          const intent = limitWidget(block.intent);
+          return intent ? [{ ...block, intent }] : [];
+        });
+        return [{ ...op, initialBlocks }];
+      }
+      default:
+        return [op];
+    }
+  });
+
+  if (!trimmedAny && !droppedAny) return turn;
+
+  const notice =
+    ceiling === 0
+      ? "I'm holding back hints on this one on purpose — this task is measuring what you can do unaided, and a nudge from me would make the result meaningless. Tell me where you get stuck and I'll make the task smaller instead."
+      : `I'm keeping help at the orientation level here rather than working through it, so that what you produce is genuinely yours. Say where you're stuck and I'll point you at the right part.`;
+
+  const speech = turn.speech.trim();
+  return {
+    ...turn,
+    boardOps,
+    speech: speech ? `${speech} ${notice}` : notice,
+  };
 }
 
 /** Hard safety net for turns where any board mutation is categorically noise. */
@@ -2488,10 +2597,16 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
       }
     },
   });
+  // Ceiling enforcement runs BEFORE the agency check, so that a turn whose only
+  // learner-facing element was an over-supportive widget is caught by the
+  // never-passive net rather than shipping as a bare explanation.
   const policedTurn = enforceLearnerAgency(
-    enforceTutorBoardNecessity(
-      enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
-      req.learnerMessage
+    enforceSupportCeiling(
+      enforceTutorBoardNecessity(
+        enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
+        req.learnerMessage
+      ),
+      policyBrief?.support.granted ?? 3
     )
   );
 
@@ -2538,10 +2653,14 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
         sessionId: req.sessionId,
         skillIds: [skillId],
         taskId: `${req.sessionId}:${loadedHistory.length}`,
-        // A reconstruction is owed against a specific family, so it must be
-        // recorded against that same family or the debt never clears.
-        taskFamily:
-          policyBrief.move.reconstructionTaskFamily ?? `${skillId}:${policyBrief.move.route}`,
+        // An obligation is owed against a specific family, so the evidence must
+        // be filed under that same family or the debt never clears: a due
+        // review is settled by matching (skill, taskFamily), and evidence
+        // landing under a route-derived name settles nothing. The review would
+        // come due again next session, and the learner would be asked the same
+        // question forever while their answers piled up out of the scheduler's
+        // sight.
+        taskFamily: policyBrief.move.taskFamily ?? `${skillId}:${policyBrief.move.route}`,
         evidenceType: policyBrief.move.requiredEvidence[0] ?? "explanation",
         response: req.learnerMessage,
         correctness: correctnessFromDiagnosis(result.value),
