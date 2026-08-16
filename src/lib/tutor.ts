@@ -55,7 +55,7 @@ import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
 import type { MathNode, FunctionNode, OperatorNode, SymbolNode } from "mathjs";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
-import type { WidgetIntent, WidgetState } from "./widgets/types";
+import type { WidgetIntent, WidgetKind, WidgetState } from "./widgets/types";
 import type { SupportLevel } from "./learning/types";
 import { WIDGET_LABEL, isActionableWidget } from "./widgets/types";
 import { validateWidgetIntent } from "./widgets/validate";
@@ -144,7 +144,10 @@ export type BoardOp =
   | { op: "write_bullets"; items: string[] }
   | { op: "write_latex"; tex: string; caption?: string }
   | { op: "visualize"; intent: VisualizationIntent }
-  | { op: "place_widget"; intent: WidgetIntent }
+  // `blockId` is never model-authored: the client may pre-assign the id of the
+  // block this op will create so it can durably bind that block to its activity
+  // contract before the learner can interact with it.
+  | { op: "place_widget"; intent: WidgetIntent; blockId?: string }
   | { op: "write_callout"; text: string }
   | ({ op: "replace_block"; block: BoardBlockSpec } & BoardTargetSpec)
   | ({ op: "insert_after"; block: BoardBlockSpec } & BoardTargetSpec)
@@ -202,6 +205,13 @@ export interface TutorTurn {
    *  met. Advancement is a deliberate, evidenced decision — never the result of
    *  the learner having clicked "next". */
   stageAdvance?: TutorStageAdvance;
+  /** The activity contract this turn's board work was placed under.
+   *
+   *  Surfaced so the caller can bind it to the specific blocks this turn
+   *  created. A widget answered three turns later must be filed against the
+   *  contract it was PLACED under, not whichever contract happens to be newest
+   *  when the learner gets round to answering. */
+  activityId?: string;
 }
 
 export interface TutorStageAdvance {
@@ -1322,6 +1332,10 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
     case "place_widget": {
       const intent = validateWidgetIntentField(rec.intent, path, errors);
       if (!intent) return null;
+      // Rebuilt from validated fields only, which deliberately drops any
+      // model-authored `blockId`: that field is assigned by the client at
+      // placement to bind the block to its activity contract, and a model that
+      // could choose it could file a learner's answer under another task.
       return { op, intent };
     }
     case "update_widget": {
@@ -2074,6 +2088,9 @@ export function buildTutorUserPrompt(params: {
    *  stage gate's outstanding requirements, the warranted move, the support
    *  ceiling, and the response routing table. */
   policyBrief?: string;
+  /** Widget kinds the policy warranted for this turn. When supplied, only these
+   *  are described in the catalog; the validator still governs what may render. */
+  permittedWidgetKinds?: readonly WidgetKind[];
   /** Due retrievals to surface before new teaching. Empty mid-session. */
   openingBrief?: string;
   learnerSummary: string;
@@ -2225,7 +2242,7 @@ export function buildTutorUserPrompt(params: {
       `- update_widget: { "op", targetAnchor?|targetIndex?|targetMatchText?, "intent": WidgetIntent } — reconfigures an existing widget in place, keeping the learner's answers and interaction state. Use it to mark the next roadmap step current, add a deeper hint level, or reveal a mistake_check correction after the learner has responded — never append a second copy of a widget you already placed.\n` +
       `- redraw_block: { "op", targetAnchor?|targetIndex?|targetMatchText? } — force a block to re-render from scratch, keeping its content exactly as-is. Use this ONLY when the learner reports they cannot see something you placed ("the widget is blank", "the diagram didn't load", "I can't see the equation"). It repairs a block that failed to draw; it does not change what the block says. Acknowledge it plainly ("Redrawing that now") and, if it still does not appear after one redraw, place the content again in a different form rather than redrawing a second time.\n` +
       `WIDGET CATALOG — a widget "intent" is keyed on its "kind" field (visualization intents remain keyed on "type"). Graphs, geometry/points, and equations are NOT widgets: emit those through visualize as "function", "geometry", and "equation" intents.\n` +
-      `${formatWidgetCatalog()}\n` +
+      `${formatWidgetCatalog(params.permittedWidgetKinds)}\n` +
       `- visualize: { "op", "intent": VisualizationIntent } — appends a new visualization block. Use this immediately when the learner explicitly asks for a diagram, graph, plot, or structure. ` +
       `Describe what the figure IS, not how to draw it; the renderer handles rendering. ` +
       `Geometry figures are auto-fitted to the available board space from their actual objects. Do not emit a geometry "viewport"; this build intentionally ignores it so shapes stay tight, fully visible, and draggable without a big empty interaction rectangle. ` +
@@ -2283,10 +2300,28 @@ export function buildTutorUserPrompt(params: {
   return parts.join("\n\n");
 }
 
+/**
+ * How many board blocks are described to the model.
+ *
+ * The board is the one part of the prompt that grows for the whole session:
+ * one line per block, forever. A long session is exactly when tokens are most
+ * expensive, so an uncapped board makes the last turn of a lesson the priciest.
+ * The tail is kept rather than the head because edits target recent work; the
+ * elision is announced so the model knows older anchors exist and does not
+ * conclude the board began where the listing does.
+ */
+const MAX_SUMMARIZED_BOARD_BLOCKS = 40;
+
 function summarizeBoardBlocks(board: BoardDoc): string {
   if (board.blocks.length === 0) return `- (board is empty)`;
-  return board.blocks
-    .map((block, index) => {
+  const hidden = Math.max(0, board.blocks.length - MAX_SUMMARIZED_BOARD_BLOCKS);
+  const shown = hidden > 0 ? board.blocks.slice(-MAX_SUMMARIZED_BOARD_BLOCKS) : board.blocks;
+  const elision = hidden > 0
+    ? `- (${hidden} earlier block(s) omitted; they are still on the board. Ask the learner to scroll to them by name if you need one, or place fresh content instead of editing them.)\n`
+    : ``;
+  return elision + shown
+    .map((block, offset) => {
+      const index = hidden + offset;
       const prefix = `- [${index}] anchor=${block.id}`;
       switch (block.kind) {
         case "title":
@@ -2602,6 +2637,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     masteryStage: policyBrief?.state.stage ?? masteryStage.stage,
     masteryStageEvidence: masteryStage.evidence,
     policyBrief: policyBrief?.prompt,
+    permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
     openingBrief,
     learnerSummary,
     curriculumScope,
@@ -2725,14 +2761,16 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // Record the contract this turn's board activity is placed under, so that a
   // widget the learner answers later resolves to a named task family, context
   // variant and support ceiling rather than being filed as an anonymous click.
+  let turnActivityId: string | undefined;
   if (policyBrief) {
-    await recordMoveActivity({
+    const contract = await recordMoveActivity({
       learnerId,
       sessionId: req.sessionId,
       skillId,
       move: policyBrief.move,
       turnOrdinal: loadedHistory.length,
     });
+    turnActivityId = contract?.activityId;
   }
 
   // Hypotheses are written after the evidence they rest on, so each claim
@@ -2755,6 +2793,11 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
     await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
   }
+
+  // Hand the caller the contract these board ops were authored under so it can
+  // bind it to the blocks this turn creates. Binding at placement is what makes
+  // a late answer resolvable to the right activity.
+  if (turnActivityId) result.value.activityId = turnActivityId;
 
   return result;
 }

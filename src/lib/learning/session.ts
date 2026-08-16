@@ -15,6 +15,7 @@
  */
 
 import type { MasteryStage } from "../mastery";
+import { ensureSkillGraphBackfilled } from "./skillGraph";
 import { formatMoveDirective, planNextMove, readSignals, type PolicySignals } from "./policy";
 import { evaluateStageExit } from "./predicates";
 import {
@@ -87,6 +88,11 @@ export interface PolicyBriefInput {
 export async function buildPolicyBrief(input: PolicyBriefInput): Promise<PolicyBrief> {
   const learnerId = input.learnerId ?? DEFAULT_LEARNER_ID;
   const skillId = normalizeSkillId(input.skillId);
+
+  // Curricula and assessments ingested before the skill graph existed have no
+  // edges, and a missing edge is invisible: prerequisite repair simply never
+  // fires. Repair the graph once, before the first decision is taken on it.
+  await ensureSkillGraphBackfilled();
 
   const [events, existingState, dueReviews, hypotheses, nodes] = await Promise.all([
     getSkillEvidence(skillId, learnerId),

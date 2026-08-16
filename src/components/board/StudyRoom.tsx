@@ -24,7 +24,12 @@ import {
 import { clusterAllowsSignal, type ClusterMember } from "../../lib/widgets/cluster";
 import { getSessionHintLevel, getSessionMasteryStage } from "../../lib/tutor";
 import { recordWidgetEvidence } from "../../lib/learning/bridge";
-import { DEFAULT_LEARNER_ID, getLatestSessionActivity } from "../../lib/learning/store";
+import {
+  DEFAULT_LEARNER_ID,
+  bindBlockToActivity,
+  getActivityForBlock,
+  getLatestSessionActivity,
+} from "../../lib/learning/store";
 import { WIDGET_LABEL, type WidgetIntent, type WidgetState } from "../../lib/widgets/types";
 import {
   askTutorTurn,
@@ -405,7 +410,16 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
             // is filed against a widget-kind-derived family, which makes five
             // different problems on one skill look like five answers to the
             // same one and hollows out every breadth requirement downstream.
-            const contract = await getLatestSessionActivity(sessionId);
+            //
+            // Resolve it by BLOCK, not by recency. A learner may answer a
+            // widget several turns after it was placed, by which point the
+            // newest contract describes a different move on a possibly
+            // different skill; filing the answer there would record real work
+            // as evidence of something never asked. Only blocks placed before
+            // binding existed fall back to the latest contract.
+            const contract =
+              (await getActivityForBlock(sessionId, blockId)) ??
+              (await getLatestSessionActivity(sessionId));
             await recordWidgetEvidence(widget.intent, safe, {
               learnerId: DEFAULT_LEARNER_ID,
               sessionId,
@@ -779,8 +793,32 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
               continue;
             }
 
+            // Bind an interactive block to the contract this turn authored it
+            // under, BEFORE it can be answered. The binding is what makes a
+            // late submission resolvable to the activity the learner was
+            // actually set, rather than to whatever the tutor has moved on to
+            // by the time they answer.
+            // Bind an interactive block to the contract this turn authored it
+            // under, BEFORE it can be answered. The block id is pre-assigned
+            // here precisely so the binding can be durable by the time the
+            // widget is on screen: that is what makes a late submission
+            // resolvable to the activity the learner was actually set, rather
+            // than to whatever the tutor has moved on to by then.
+            let appliedOp = op;
+            if (op.op === "place_widget" && turn.activityId) {
+              const blockId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              appliedOp = { ...op, blockId };
+              try {
+                await bindBlockToActivity(sessionId, blockId, turn.activityId);
+              } catch {
+                // An unbound block still records evidence via the fallback
+                // path; losing the binding must not cost the learner the task.
+              }
+              if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
+            }
+
             setBoards((current) =>
-              current.map((item) => item.id === targetBoardId ? applyBoardOp(item, op, item.domain) : item)
+              current.map((item) => item.id === targetBoardId ? applyBoardOp(item, appliedOp, item.domain) : item)
             );
           }
         }
@@ -1230,7 +1268,11 @@ function activityForBoardOp(op: BoardOp, index: number, total: number): AgentAct
 /* ── agent tool-call → block ── */
 
 function toolCallToBlock(call: { name: string; args: Record<string, any> }, domain: BoardDoc["domain"]) {
-  const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  // A caller may pre-assign the block id so it can record something about the
+  // block (its activity contract) before the block exists on the board. Ids
+  // minted here are otherwise opaque and unknowable until after the apply.
+  const preassigned = typeof call.args.blockId === "string" ? call.args.blockId.trim() : "";
+  const id = preassigned || `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const args = call.args ?? {};
   const text = (k: string) => String(args[k] ?? "");
 

@@ -755,6 +755,56 @@ export async function getActivityContract(
   };
 }
 
+/**
+ * Bind a board block to the activity contract it was placed under.
+ *
+ * Called at placement, not at submission. The binding is what lets a widget
+ * answered many turns later be filed against its own task family and context
+ * variant instead of whichever contract happens to be newest at that moment.
+ * Re-placing the same block id rebinds it, since the block has genuinely been
+ * reissued under a new contract.
+ */
+export async function bindBlockToActivity(
+  sessionId: string,
+  blockId: string,
+  activityId: string
+): Promise<void> {
+  const session = sessionId.trim();
+  const block = blockId.trim();
+  const activity = activityId.trim();
+  if (!session || !block || !activity) return;
+  const db = await getDb();
+  db.run(
+    `INSERT OR REPLACE INTO board_block_activities (session_id, block_id, activity_id, created_at)
+     VALUES (?, ?, ?, ?);`,
+    [session, block, activity, new Date().toISOString()]
+  );
+  saveDbSync();
+}
+
+/**
+ * The contract a specific board block was placed under.
+ *
+ * Returns `undefined` for blocks placed before binding existed (or placed
+ * outside a policy-governed turn); callers decide their own fallback rather
+ * than being silently handed an unrelated contract.
+ */
+export async function getActivityForBlock(
+  sessionId: string,
+  blockId: string
+): Promise<LearningActivityContract | undefined> {
+  const session = sessionId.trim();
+  const block = blockId.trim();
+  if (!session || !block) return undefined;
+  const db = await getDb();
+  const res = db.exec(
+    "SELECT activity_id FROM board_block_activities WHERE session_id = ? AND block_id = ? LIMIT 1;",
+    [session, block]
+  );
+  const id = res[0]?.values?.[0]?.[0];
+  return id ? getActivityContract(String(id)) : undefined;
+}
+
 /** The most recent contract placed in a session, for evidence attribution. */
 export async function getLatestSessionActivity(
   sessionId: string

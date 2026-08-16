@@ -657,6 +657,49 @@ function runMigrations(db: Database) {
     db.run("COMMIT;");
   }
 
+  if (currentVersion < 7) {
+    db.run("BEGIN TRANSACTION;");
+
+    // ── Board block → activity contract binding ──
+    //
+    // A widget is placed under one contract and may be answered many turns
+    // later, by which time the session's newest contract describes a different
+    // move entirely. Resolving a submission to "the latest activity" therefore
+    // files real learner work under the wrong task family, context variant and
+    // target skills — the evidence is recorded, but it is recorded as evidence
+    // of something the learner was never asked to do.
+    //
+    // Binding the block at PLACEMENT time is what makes a late answer
+    // interpretable: the row below is written when the widget reaches the
+    // board, and read when it is submitted, so the contract travels with the
+    // task rather than with the clock.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS board_block_activities (
+        session_id TEXT NOT NULL,
+        block_id TEXT NOT NULL,
+        activity_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, block_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_board_block_activities_activity ON board_block_activities(activity_id);
+    `);
+
+    const v7Now = new Date().toISOString();
+    db.run(
+      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
+      [
+        7,
+        "Bind board blocks to the activity contract they were placed under",
+        v7Now,
+        "Rule: a learner interaction is evidence only against the contract it was PLACED under. board_block_activities is written at placement and read at submission, so a widget answered many turns later is still filed against its own task family, context variant and target skills instead of whichever contract is newest. Falling back to the latest session activity is a correctness bug, not a convenience.",
+      ]
+    );
+
+    db.run("PRAGMA user_version = 7;");
+    db.run("COMMIT;");
+  }
+
   // No legacy assessment fixtures are seeded in production. A fresh profile
   // starts with no forms/attempts so AvailableTests shows its empty state
   // (see plan §3 / verification: "Fresh profile shows no … seeded recent

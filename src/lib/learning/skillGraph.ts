@@ -183,3 +183,98 @@ export async function linkObjectiveToCurriculumNode(params: {
     description: existing?.description,
   });
 }
+
+/**
+ * Build the skill graph for curricula and assessments that already exist.
+ *
+ * Seeding runs at ingest time, which is the right moment for anything arriving
+ * from now on — and useless for everything already in the database. A learner
+ * who imported their textbook last month would have had an empty graph
+ * forever: no prerequisite edges, so `prerequisite_repair` could never fire and
+ * every failure fell back to a generic diagnostic probe. The pedagogy would
+ * silently be one route short, and nothing would look broken.
+ *
+ * Idempotent by construction: node seeding upserts by skill id, and objective
+ * linking unions its edge into whatever is already there. Running it twice
+ * changes nothing, so it is safe to call on every startup.
+ *
+ * Failures are contained per source and per objective. A backfill is
+ * best-effort maintenance, and one malformed row must not stop the rest of the
+ * graph from being built, nor take the caller down with it.
+ */
+export async function backfillSkillGraph(): Promise<{
+  sources: number;
+  nodes: number;
+  objectives: number;
+}> {
+  const db = await getDb();
+  let sources = 0;
+  let nodes = 0;
+  let objectives = 0;
+
+  const sourceRows = db.exec(`SELECT DISTINCT source_id FROM curriculum_nodes;`);
+  for (const row of sourceRows[0]?.values ?? []) {
+    const sourceId = String(row[0]);
+    try {
+      nodes += await seedSkillGraphFromCurriculum(sourceId);
+      sources += 1;
+    } catch (error) {
+      console.warn(`[skill-graph] could not backfill curriculum source ${sourceId}`, error);
+    }
+  }
+
+  // Objectives are linked from the items that name them. DISTINCT keeps the
+  // work proportional to the number of real objectives rather than the number
+  // of questions, which is often an order of magnitude larger.
+  const objectiveRows = db.exec(
+    `SELECT DISTINCT learning_objective, curriculum_node
+       FROM assessment_items
+      WHERE learning_objective <> '' AND curriculum_node <> '';`
+  );
+  for (const row of objectiveRows[0]?.values ?? []) {
+    const objective = String(row[0] ?? "").trim();
+    const node = String(row[1] ?? "").trim();
+    if (!objective || !node) continue;
+    try {
+      await linkObjectiveToCurriculumNode({
+        skillId: objective,
+        label: objective,
+        curriculumNodeId: node,
+      });
+      objectives += 1;
+    } catch (error) {
+      console.warn(`[skill-graph] could not link objective "${objective}"`, error);
+    }
+  }
+
+  return { sources, nodes, objectives };
+}
+
+/**
+ * Run the backfill at most once per process.
+ *
+ * Called from the policy path, which is the first place the graph is actually
+ * consumed, so the repair happens before anything can be decided on a missing
+ * edge. A module-level promise makes concurrent turns share one pass instead of
+ * racing, and the resolved promise makes every later call a no-op.
+ *
+ * It never rejects: an unusable graph should degrade the pedagogy to what it
+ * was before the graph existed, not fail a learner's turn.
+ */
+let backfillOnce: Promise<void> | null = null;
+
+export function ensureSkillGraphBackfilled(): Promise<void> {
+  if (!backfillOnce) {
+    backfillOnce = backfillSkillGraph()
+      .then(() => undefined)
+      .catch((error) => {
+        console.warn("[skill-graph] backfill failed; continuing without it", error);
+      });
+  }
+  return backfillOnce;
+}
+
+/** Test seam: forget that the backfill ran. */
+export function resetSkillGraphBackfillForTests(): void {
+  backfillOnce = null;
+}

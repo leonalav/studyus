@@ -121,8 +121,38 @@ const GROUP_SPEC_DOC =
   `Omit "group" for a widget you want answered on its own: a standalone widget signals you immediately, as always. ` +
   `Do NOT group widgets merely because you placed them in the same turn — group them because the answers belong together.`;
 
-export function formatWidgetCatalog(): string {
-  return `${RESPOND_SPEC_DOC}\n\n${GROUP_SPEC_DOC}\n` + WIDGET_KINDS.map((kind) => {
+/**
+ * Render the widget catalog, optionally narrowed to the kinds the policy
+ * permits for this turn.
+ *
+ * The full catalog is roughly 5,900 tokens and was previously sent on every
+ * single turn: 43% of the whole request, describing seventeen widgets when the
+ * policy had already decided the turn could only legitimately use two or three
+ * of them. That is not just cost, it is noise — the model was choosing from a
+ * menu the engine had already ruled out, which is exactly the "LLM decides what
+ * is warranted" failure the policy engine exists to prevent.
+ *
+ * Narrowing is safe because it is advisory, not enforcement. `validate.ts`
+ * remains the fail-closed authority over what may actually be rendered, and the
+ * tool-policy filter still drops anything out of contract. Withholding a spec
+ * only means the model is not *invited* to use a widget the engine did not
+ * warrant; if it emits one anyway, the boundary behaves exactly as before.
+ *
+ * `permitted` is intersected with the real widget list rather than trusted, and
+ * an empty or unrecognised set falls back to the full catalog: a narrowing bug
+ * upstream should degrade to "too much prompt", never to "no widgets at all".
+ */
+export function formatWidgetCatalog(permitted?: readonly WidgetKind[]): string {
+  const allowed = permitted?.length
+    ? WIDGET_KINDS.filter((kind) => permitted.includes(kind))
+    : WIDGET_KINDS;
+  const kinds = allowed.length ? allowed : WIDGET_KINDS;
+  const scopeNote = kinds.length < WIDGET_KINDS.length
+    ? `\nThe widgets below are the ones warranted for THIS turn's instructional move. ` +
+      `Other widget kinds exist but are not appropriate here; if none of these fits what the ` +
+      `learner needs, say so in "speech" rather than reaching for a widget that is not listed.\n`
+    : ``;
+  return `${RESPOND_SPEC_DOC}\n\n${GROUP_SPEC_DOC}\n${scopeNote}` + kinds.map((kind) => {
     const stages = stagesForWidget(kind)
       .map((stage) => MASTERY_STAGE_SPECS[stage].label)
       .join("/");
