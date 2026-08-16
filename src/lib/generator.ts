@@ -57,6 +57,9 @@ export type AssistancePolicy = "full_hints" | "limited_hints" | "no_hints";
 const ITEM_TYPES = ["mcq", "numeric", "proof"] as const;
 const QUESTION_FORMATS = ["mcq", "proof", "mixed"] as const;
 const RIGOR_LEVELS = ["casual", "challenging", "rigorous"] as const;
+import { linkObjectiveToCurriculumNode } from "./learning/skillGraph";
+import { normalizeSkillId } from "./learning/store";
+
 const BLOOM_TARGETS = ["remember", "understand", "apply", "analyze", "evaluate", "create"] as const;
 const GENERATION_BATCH_SIZE = 6;
 
@@ -883,6 +886,33 @@ export function persistGeneratedForm({
   return { formId, attemptId, evidenceCitations };
 }
 
+/**
+ * Attach each item's learning objective to the curriculum node it was authored
+ * against.
+ *
+ * Assessments name skills by objective while the skill graph is keyed on
+ * curriculum nodes, so without this link the two are disconnected islands: a
+ * repeated failure on "chain rule differentiation" would have no path to the
+ * sections that come before it, and prerequisite repair would never fire for
+ * exactly the learner who needs it most.
+ *
+ * Best-effort by design. An assessment the learner can actually sit is worth
+ * more than a complete graph, and the graph converges on the next generation.
+ */
+async function linkGeneratedObjectivesToSkillGraph(items: GeneratedItem[]): Promise<void> {
+  for (const item of items) {
+    try {
+      await linkObjectiveToCurriculumNode({
+        skillId: normalizeSkillId(item.learningObjective),
+        label: item.learningObjective,
+        curriculumNodeId: item.curriculumNode,
+      });
+    } catch (error) {
+      console.warn("[generator] could not link objective to the skill graph", error);
+    }
+  }
+}
+
 /* ─────────────────────────────────────────────────────────────
    PUBLIC ENTRY POINT
    ───────────────────────────────────────────────────────────── */
@@ -999,6 +1029,7 @@ export async function generateAssessment(req: GenerationRequest): Promise<Genera
   const db = await getDb();
   report(95, "Saving the validated test…");
   const persisted = persistGeneratedForm({ db, req: normalized, items: generatedItems, cards, title });
+  await linkGeneratedObjectivesToSkillGraph(generatedItems);
   report(100, "Ready");
 
   return {
