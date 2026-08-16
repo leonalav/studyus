@@ -283,3 +283,114 @@ describe("Signals stay honest about what happened", () => {
     expect(readSignals(events as never).consecutiveFailures).toBe(2);
   });
 });
+
+/**
+ * A contract is what turns an interaction into evidence.
+ *
+ * Without one, "the learner selected option B" is a click. With one, it is a
+ * selection on a named skill, at a known support ceiling, in a known context
+ * variant, against a named task family. Every downstream mechanism reads those
+ * fields: predicates count distinct task families, reviews settle on
+ * (skill, taskFamily), and transfer credit depends on the variant. A contract
+ * derived from the planner rather than authored by the model is also what stops
+ * the model satisfying a breadth requirement by renaming the same task.
+ */
+describe("Activity contracts describe what the learner did", () => {
+  it("derives the contract from the planned move, not from the model", async () => {
+    const { recordMoveActivity } = await import("./session");
+    const { getActivityContract } = await import("./store");
+    const learnerId = learner();
+
+    const move = planNextMove({
+      state: { ...emptySkillState(learnerId, "chain_rule"), stage: "apply" },
+      events: [],
+    });
+    const contract = await recordMoveActivity({
+      learnerId,
+      sessionId: "contract-session-1",
+      skillId: "chain_rule",
+      move,
+      turnOrdinal: 3,
+    });
+
+    expect(contract).toBeDefined();
+    const stored = await getActivityContract(contract!.activityId);
+    expect(stored?.stage).toBe("apply");
+    expect(stored?.mode).toBe(move.mode);
+    expect(stored?.route).toBe(move.route);
+    // The ceiling travels with the activity so an answer can be interpreted
+    // against the help that was actually available when it was given.
+    expect(stored?.supportCeiling).toBe(move.supportCeiling);
+    expect(stored?.contextVariant).toBe(move.contextVariant);
+  });
+
+  it("pins the reviewed task family onto the contract for a due retrieval", async () => {
+    const { recordMoveActivity } = await import("./session");
+    const learnerId = learner();
+    const review = await scheduleReview({
+      learnerId,
+      skillId: "chain_rule",
+      taskFamily: "composite_derivative",
+      dueAt: new Date(Date.now() - DAY),
+      intervalIndex: 1,
+      retrievalType: "cued_recall",
+    });
+
+    const move = planNextMove({
+      state: emptySkillState(learnerId, "chain_rule"),
+      events: [],
+      dueReviews: [review],
+    });
+    const contract = await recordMoveActivity({
+      learnerId,
+      sessionId: "contract-session-2",
+      skillId: "chain_rule",
+      move,
+      turnOrdinal: 1,
+    });
+
+    // Any widget placed under this contract now files its evidence where the
+    // review will look for it.
+    expect(contract?.taskFamily).toBe("composite_derivative");
+    expect(contract?.supportCeiling).toBe(0);
+  });
+
+  it("hands the latest contract back for the session that produced it", async () => {
+    const { recordMoveActivity } = await import("./session");
+    const { getLatestSessionActivity } = await import("./store");
+    const learnerId = learner();
+    const state = emptySkillState(learnerId, "chain_rule");
+
+    await recordMoveActivity({
+      learnerId,
+      sessionId: "contract-session-3",
+      skillId: "chain_rule",
+      move: planNextMove({ state, events: [] }),
+      turnOrdinal: 1,
+    });
+    const second = await recordMoveActivity({
+      learnerId,
+      sessionId: "contract-session-3",
+      skillId: "chain_rule",
+      move: planNextMove({ state: { ...state, stage: "transfer" }, events: [] }),
+      turnOrdinal: 2,
+    });
+
+    // A widget answered now belongs to the move that is currently in play, not
+    // to whatever was on the board twenty minutes ago.
+    const latest = await getLatestSessionActivity("contract-session-3");
+    expect(latest?.activityId).toBe(second?.activityId);
+    expect(latest?.stage).toBe("transfer");
+  });
+
+  it("keeps contracts from different sessions apart", async () => {
+    const { recordMoveActivity } = await import("./session");
+    const { getLatestSessionActivity } = await import("./store");
+    const learnerId = learner();
+    const move = planNextMove({ state: emptySkillState(learnerId, "chain_rule"), events: [] });
+
+    await recordMoveActivity({ learnerId, sessionId: "contract-a", skillId: "chain_rule", move, turnOrdinal: 1 });
+
+    expect(await getLatestSessionActivity("contract-b")).toBeUndefined();
+  });
+});

@@ -38,13 +38,14 @@ import {
   emptySkillState,
   prerequisiteChain,
   type LearnerHypothesis,
+  type LearningActivityContract,
   type LearningEvidenceEvent,
   type NextLearningMove,
   type ReviewTask,
   type SkillNode,
   type SkillState,
 } from "./types";
-import { getSkillNodes } from "./store";
+import { getSkillNodes, recordActivityContract } from "./store";
 
 export interface PolicyBrief {
   /** The skill the turn is about. */
@@ -267,6 +268,64 @@ export async function buildSessionOpeningBrief(
     "Each must be unaided: no hints, no worked steps, no narrowing of the option space, even if asked. A coached retrieval measures the coaching, and the whole value of a scheduled review is that it is uncoached.",
     "If a retrieval fails, do not simply supply the answer. Route into targeted repair on the specific thing that was lost, then reschedule.",
   ].join("\n");
+}
+
+/**
+ * Persist the contract the turn's board activity is placed under.
+ *
+ * A contract is what turns an interaction into evidence. Without one, "the
+ * learner selected option B" is a click; with one, it is a `selection` on
+ * `chain_rule` at support ceiling 1 in a `changed_representation` variant,
+ * against a named task family, produced to serve a named route. Only the second
+ * can be reasoned about — the stage predicates count distinct task families,
+ * the review queue settles on `(skill, taskFamily)`, and transfer credit
+ * depends on the context variant. All three read fields that live here.
+ *
+ * The contract is derived from the planner's move rather than authored by the
+ * model, which is the same separation the whole engine rests on: the policy
+ * engine decides what evidence is needed and the model decides how to elicit
+ * it. Letting the model declare its own contract would let it declare its own
+ * task family and context variant, and with those it could satisfy a breadth
+ * requirement by renaming the same task five times.
+ *
+ * Returns the contract so a caller can attach it to the widgets it places, and
+ * `undefined` if persistence failed — an activity the ledger cannot describe
+ * should produce evidence with no contract rather than evidence with a
+ * contract nothing recorded.
+ */
+export async function recordMoveActivity(params: {
+  learnerId: string;
+  sessionId: string;
+  skillId: string;
+  move: NextLearningMove;
+  turnOrdinal: number;
+}): Promise<LearningActivityContract | undefined> {
+  const { move } = params;
+  const contract: LearningActivityContract = {
+    activityId: `act-${params.sessionId}-${params.turnOrdinal}`,
+    targetSkillIds: move.targetSkillIds.length ? move.targetSkillIds : [params.skillId],
+    stage: move.stage,
+    mode: move.mode,
+    route: move.route,
+    taskFamily: move.taskFamily ?? `${params.skillId}:${move.route}`,
+    contextVariant: move.contextVariant,
+    supportCeiling: move.supportCeiling,
+    expectedEvidence: move.requiredEvidence,
+    // The move's rationale evidence is what justified this activity; carrying
+    // the ids forward is what makes "why was I asked this" answerable later.
+    successCriteria: move.rationaleEvidenceIds,
+    representationRoles: [],
+    permittedWidgetKinds: move.permittedWidgetKinds,
+    createdAt: new Date().toISOString(),
+  };
+
+  try {
+    await recordActivityContract(contract, params.sessionId, params.learnerId);
+    return contract;
+  } catch (error) {
+    console.warn("[policy] could not persist the activity contract for this turn", error);
+    return undefined;
+  }
 }
 
 /** Recompute a skill's state after a turn's evidence has been written. */

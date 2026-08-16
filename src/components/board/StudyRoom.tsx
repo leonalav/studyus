@@ -24,7 +24,7 @@ import {
 import { clusterAllowsSignal, type ClusterMember } from "../../lib/widgets/cluster";
 import { getSessionHintLevel, getSessionMasteryStage } from "../../lib/tutor";
 import { recordWidgetEvidence } from "../../lib/learning/bridge";
-import { DEFAULT_LEARNER_ID } from "../../lib/learning/store";
+import { DEFAULT_LEARNER_ID, getLatestSessionActivity } from "../../lib/learning/store";
 import { WIDGET_LABEL, type WidgetIntent, type WidgetState } from "../../lib/widgets/types";
 import {
   askTutorTurn,
@@ -400,9 +400,16 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         // this call is missing, no stage gate above Encounter can be satisfied.
         void (async () => {
           try {
+            // The contract the tutor placed this activity under names the task
+            // family, context variant and target skills. Without it the answer
+            // is filed against a widget-kind-derived family, which makes five
+            // different problems on one skill look like five answers to the
+            // same one and hollows out every breadth requirement downstream.
+            const contract = await getLatestSessionActivity(sessionId);
             await recordWidgetEvidence(widget.intent, safe, {
               learnerId: DEFAULT_LEARNER_ID,
               sessionId,
+              contract,
               taskId: `${activeId}:${blockId}`,
               fallbackSkillIds: [
                 resolveTurnSkillId({

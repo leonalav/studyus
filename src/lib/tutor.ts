@@ -62,7 +62,12 @@ import { validateWidgetIntent } from "./widgets/validate";
 import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
 import { MASTERY_STAGES, MASTERY_STAGE_SPECS, isMasteryStage, nextStage, type MasteryStage } from "./mastery";
 import { evaluateStageExit } from "./learning/predicates";
-import { buildPolicyBrief, buildSessionOpeningBrief, type PolicyBrief } from "./learning/session";
+import {
+  buildPolicyBrief,
+  buildSessionOpeningBrief,
+  recordMoveActivity,
+  type PolicyBrief,
+} from "./learning/session";
 import { groundMasteryCards } from "./learning/masteryCard";
 import { recordTutorObservation } from "./learning/bridge";
 import { getSkillEvidence, upsertHypothesis, DEFAULT_LEARNER_ID } from "./learning/store";
@@ -2712,6 +2717,19 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     ledgerEvidence = await getSkillEvidence(skillId, learnerId);
   } catch (error) {
     console.warn("[tutor] could not record turn evidence", error);
+  }
+
+  // Record the contract this turn's board activity is placed under, so that a
+  // widget the learner answers later resolves to a named task family, context
+  // variant and support ceiling rather than being filed as an anonymous click.
+  if (policyBrief) {
+    await recordMoveActivity({
+      learnerId,
+      sessionId: req.sessionId,
+      skillId,
+      move: policyBrief.move,
+      turnOrdinal: loadedHistory.length,
+    });
   }
 
   // Hypotheses are written after the evidence they rest on, so each claim
