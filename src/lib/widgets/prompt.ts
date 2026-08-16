@@ -31,7 +31,7 @@ const WIDGET_FIELD_SPEC: Record<WidgetKind, string> = {
   slider:
     `{ "kind":"slider", "label": string, "parameter": string, "min": number, "max": number, "step"?: number, "value": number, "unit"?: string, "ticks"?: [{ "value": number, "label": string }], "readouts"?: [{ "id": string, "label": string, "expression": string, "precision"?: number, "unit"?: string }], "observe"?: string, "respond"?: RespondSpec } — min<max, value within range; readout expressions are arithmetic in "parameter" only (e.g. "0.5*g*t^2"), max 4 readouts.`,
   animation:
-    `{ "kind":"animation", "frames": [ { "id": string, "caption": string, "latex"?: string } ], "motion"?: { "xExpression": string, "yExpression": string, "tDomain": [number,number], "trace"?: boolean, "guideXExpression"?: string, "guideYExpression"?: string }, "durationMs"?: number, "loop"?: boolean, "predictPrompt"?: string, "respond"?: RespondSpec } — 1–12 frames; motion expressions are arithmetic in "t".`,
+    `{ "kind":"animation", "frames": [ { "id": string, "caption": string, "latex"?: string } ], "motion"?: { "xExpression": string, "yExpression": string, "tDomain": [number,number], "trace"?: boolean, "guideXExpression"?: string, "guideYExpression"?: string }, "durationMs"?: number, "loop"?: boolean, "predictPrompt"?: string, "respond"?: RespondSpec, "checkpoints"?: [ { "id": string, "at": number, "prompt": string, "options"?: [ { "id": string, "label": string, "correct"?: boolean } ], "acceptedAnswers"?: string[], "rationale"?: string } ], "controls"?: { "scrub"?: boolean, "step"?: boolean, "speed"?: boolean, "replay"?: boolean }, "linkedRepresentations"?: [ { "id": string, "representation": "graph"|"table"|"equation"|"number_line"|"diagram", "label": string, "tracks": string } ], "reconcilePrompt"?: string, "reconstructPrompt"?: string } — 1–12 frames; motion expressions are arithmetic in "t"; 1–6 checkpoints with "at" in 0..1 strictly increasing, and multiple-choice checkpoints need exactly one correct option; "predictPrompt" REQUIRES "respond"; "reconcilePrompt" REQUIRES "predictPrompt".`,
   comparison:
     `{ "kind":"comparison", "columns": [ { "id": string, "title": string, "items"?: string[], "accent"?: "cyan"|"amber"|"violet"|"ember"|"neutral" } ], "rows"?: [ { "id": string, "label": string, "cells": string[] } ], "takeaway"?: string } — 2–4 columns; every row's "cells" length must equal the column count; each column needs "items" unless "rows" is supplied.`,
   question:
@@ -69,7 +69,7 @@ const WIDGET_TEACHING_RULE: Record<WidgetKind, string> = {
   slider:
     `Let the learner move one parameter and watch what changes. Always set "observe" so the drag has a question attached to it. Attach "respond" whenever you need to know what they concluded — dragging a handle proves nothing on its own.`,
   animation:
-    `Show a process across time. Set "predictPrompt" so the learner commits to a prediction before pressing play; an animation watched passively teaches nothing. Pair it with "respond" so the prediction is actually written down and can be checked against what happened.`,
+    `Show a process across time, as a five-beat cycle rather than a video. 1) "predictPrompt" + "respond": the learner commits a prediction in writing, and playback stays locked until they do — a prediction made after watching is a description, and the two are not the same evidence. 2) "controls": give step and replay so observation is controlled rather than passive; a learner who can stop the motion is examining it. 3) "checkpoints": halt at the moments where the interesting change happens and require an answer, placing each at the instant something becomes visible, not at tidy intervals. 4) "reconcilePrompt": make the learner say what they expected, what happened, and what accounts for the gap — this is where a wrong prediction turns into a corrected belief, and skipping it wastes the prediction entirely. 5) "reconstructPrompt": have them rebuild the idea unaided once the animation is gone. Use "linkedRepresentations" to hold a graph, table, or equation in sync, naming in "tracks" exactly what follows the motion, so the learner sees one fact in two forms rather than two unrelated pictures.`,
   comparison:
     `Put two ideas side by side when the learner is confusing them. State the "takeaway" — the single distinction the comparison exists to make land.`,
   question:
@@ -121,8 +121,38 @@ const GROUP_SPEC_DOC =
   `Omit "group" for a widget you want answered on its own: a standalone widget signals you immediately, as always. ` +
   `Do NOT group widgets merely because you placed them in the same turn — group them because the answers belong together.`;
 
-export function formatWidgetCatalog(): string {
-  return `${RESPOND_SPEC_DOC}\n\n${GROUP_SPEC_DOC}\n` + WIDGET_KINDS.map((kind) => {
+/**
+ * Render the widget catalog, optionally narrowed to the kinds the policy
+ * permits for this turn.
+ *
+ * The full catalog is roughly 5,900 tokens and was previously sent on every
+ * single turn: 43% of the whole request, describing seventeen widgets when the
+ * policy had already decided the turn could only legitimately use two or three
+ * of them. That is not just cost, it is noise — the model was choosing from a
+ * menu the engine had already ruled out, which is exactly the "LLM decides what
+ * is warranted" failure the policy engine exists to prevent.
+ *
+ * Narrowing is safe because it is advisory, not enforcement. `validate.ts`
+ * remains the fail-closed authority over what may actually be rendered, and the
+ * tool-policy filter still drops anything out of contract. Withholding a spec
+ * only means the model is not *invited* to use a widget the engine did not
+ * warrant; if it emits one anyway, the boundary behaves exactly as before.
+ *
+ * `permitted` is intersected with the real widget list rather than trusted, and
+ * an empty or unrecognised set falls back to the full catalog: a narrowing bug
+ * upstream should degrade to "too much prompt", never to "no widgets at all".
+ */
+export function formatWidgetCatalog(permitted?: readonly WidgetKind[]): string {
+  const allowed = permitted?.length
+    ? WIDGET_KINDS.filter((kind) => permitted.includes(kind))
+    : WIDGET_KINDS;
+  const kinds = allowed.length ? allowed : WIDGET_KINDS;
+  const scopeNote = kinds.length < WIDGET_KINDS.length
+    ? `\nThe widgets below are the ones warranted for THIS turn's instructional move. ` +
+      `Other widget kinds exist but are not appropriate here; if none of these fits what the ` +
+      `learner needs, say so in "speech" rather than reaching for a widget that is not listed.\n`
+    : ``;
+  return `${RESPOND_SPEC_DOC}\n\n${GROUP_SPEC_DOC}\n${scopeNote}` + kinds.map((kind) => {
     const stages = stagesForWidget(kind)
       .map((stage) => MASTERY_STAGE_SPECS[stage].label)
       .join("/");
@@ -161,7 +191,9 @@ export function formatMasteryDirective(): string {
     ``,
     `THE LEARNER IS NEVER PASSIVE (binding):`,
     `- You are not only a teacher; you are the means of guidance. Guidance means the learner is always doing something, never watching you work.`,
-    `- EVERY teaching turn must end with the learner holding a task. If your board_ops add only presentational content — a roadmap, a concept card, a paragraph, a diagram, a worked example — the turn is incomplete. Pair it with the move that hands the work back.`,
+    `- The learner must always be holding a task. If your board_ops add only presentational content — a roadmap, a concept card, a paragraph, a diagram, a worked example — and nothing on the board is already awaiting their answer, the turn is incomplete. Pair it with the move that hands the work back.`,
+    `- ONE COMMITMENT PER CYCLE, not per turn. When an unanswered question, scratchpad or prediction is already sitting on the board, do NOT add a second one. Answer what they asked, extend the explanation, then let them finish the task they are already mid-way through. Stacking a new demand on an open one is not more engagement — it abandons the first task and leaves a column of half-answered questions.`,
+    `- Never invent a filler question just to satisfy this rule. "And what do you think happens next?" attached to nothing teaches the learner that most prompts are noise and can be skimmed past. A cycle closes when the learner's commitment is resolved; then, and only then, open the next one.`,
     `- Placing a roadmap and stopping is a specific and forbidden failure. A roadmap orients; it does not teach and it does not ask. In the same turn, open the first step: place the question, scratchpad, reveal or slider-with-"respond" that starts the actual work.`,
     `- Never end a turn with "let me know when you're ready", "does that make sense?", "let's begin when you are", or any variant that waits for permission. Ask the question that begins the work instead.`,
     `- The learner clicking "next" is not participation. Participation is them answering, predicting, attempting, explaining, or choosing.`,

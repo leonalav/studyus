@@ -156,12 +156,17 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     });
     expect(midway).toMatch(/CURRENT STAGE: 3\. Construct/);
     expect(midway).toContain("Wrote the difference quotient unaided.");
-    expect(midway).toMatch(/The session then moves to Apply; you cannot skip ahead of it/);
-    expect(midway).toMatch(/Moving back is correct behaviour/);
+    // The next stage is named, but promotion into it is the ledger's call, not
+    // the model's: the prompt must not offer self-assertion as a route forward.
+    expect(midway).toMatch(/Advancement to Apply is decided by machine-checkable predicates/);
+    expect(midway).toMatch(/not by your assertion/);
+    expect(midway).toMatch(/Moving back is honoured immediately and needs no evidence/);
 
     const final = buildTutorUserPrompt({ ...baseParams, masteryStage: "master" });
     expect(final).toMatch(/This is the final stage/);
-    expect(final).toMatch(/mastery_card reporting all five evidence dimensions/);
+    // The card's numbers come from the ledger; the model supplies prose only.
+    expect(final).toMatch(/mastery_card/);
+    expect(final).toMatch(/filled in from the ledger/);
   });
 
   it("advertises the widget ops and the full 17-widget vocabulary", () => {

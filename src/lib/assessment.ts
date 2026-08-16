@@ -8,6 +8,9 @@ import {
   blankEvaluation,
   type EvaluatedCriterion,
 } from "./evaluator";
+import { recordAssessmentEvidence } from "./learning/bridge";
+import { DEFAULT_LEARNER_ID, normalizeSkillId } from "./learning/store";
+import type { Correctness, EvidenceType, SupportLevel } from "./learning/types";
 
 export type AttemptStatus =
   | "created"
@@ -605,15 +608,183 @@ export async function autosaveDraft(
   return { success: true, status: "active" };
 }
 
+/* ─────────────────────────────────────────────────────────────
+   EVIDENCE LEDGER ROUTING
+
+   An assessment result and a board answer are the same class of fact about
+   the learner, and until they land in the same ledger they cannot be reasoned
+   about together. Before this routing existed a learner could sit a test,
+   score full marks, and still be treated by the tutor as someone who had never
+   demonstrated anything — because the tutor read one store and the assessment
+   engine wrote another.
+
+   Nothing here changes a mark. Grading remains the authority on the score;
+   this only translates each already-decided item outcome into an evidence
+   event and lets the ledger derive from it.
+   ───────────────────────────────────────────────────────────── */
+
+/** Response flags are stored as a JSON array; tolerate anything else. */
+function parseResponseFlags(raw: unknown): string[] {
+  if (typeof raw !== "string" || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((f) => String(f)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The skill an item is evidence about.
+ *
+ * The learning objective is the closest thing an item carries to a skill, and
+ * it is what the item was authored against. The curriculum node is the
+ * fallback, because an objective-less item still belongs somewhere in the
+ * sequence, and filing it under a generic bucket would blur several genuinely
+ * different skills into one state.
+ */
+export function assessmentSkillId(item: { learningObjective: string; curriculumNode: string }): string {
+  const raw = item.learningObjective?.trim() || item.curriculumNode?.trim();
+  return raw ? normalizeSkillId(raw) : "unspecified";
+}
+
+/**
+ * What kind of cognitive act each item type actually demands.
+ *
+ * This distinction is load-bearing, not cosmetic. The stage predicates count
+ * `construction` and `procedure` toward the Construct gate and treat
+ * `selection` as recognition. Filing every assessment item as "procedure"
+ * would let a learner clear a production gate by ticking boxes, which is the
+ * exact inflation the ledger exists to prevent.
+ */
+export function assessmentEvidenceType(itemType: string): EvidenceType {
+  switch (itemType) {
+    case "mcq":
+      return "selection";
+    case "numeric":
+      return "procedure";
+    case "proof":
+    case "rubric":
+      return "construction";
+    default:
+      return "observation";
+  }
+}
+
+/**
+ * The interchangeable-instance family the item belongs to.
+ *
+ * Item type is part of the family because "recognise the right option" and
+ * "produce the derivation" are not interchangeable demands even on the same
+ * objective, and a reconstruction scheduled on the wrong one would be answered
+ * by a task that never tested what the support had propped up.
+ */
+export function assessmentTaskFamily(skillId: string, itemType: string): string {
+  return `${skillId}:${itemType}`;
+}
+
+/**
+ * Support in force during an assessment item.
+ *
+ * An objective hint is orientation, not a structural or worked step, so it maps
+ * to level 1 — enough to keep the response out of the independence count
+ * without pretending the learner was walked through the answer. An item under a
+ * hint-bearing policy where no hint was taken is genuinely unaided, and is
+ * recorded as such: the learner who declines available help has demonstrated
+ * more, not less.
+ */
+export function assessmentSupportLevel(assistancePolicy: string, hintUsed: boolean): SupportLevel {
+  if (!hintUsed) return 0;
+  return assistancePolicy === "no_hints" ? 0 : 1;
+}
+
+interface AssessmentEvidenceOutcome {
+  itemId: string;
+  skillId: string;
+  taskFamily: string;
+  response: string;
+  evidenceType: EvidenceType;
+  /** Four-state: an unattempted item is blank, not wrong. */
+  correctness: Correctness;
+  supportLevel: SupportLevel;
+  rubricCriterionIds: string[];
+  /** 0–100. Deterministic key matches are certain; rubric marking is not. */
+  evaluatorConfidence?: number;
+  /** Set when the item could not be marked at all. */
+  unmarkable: boolean;
+}
+
+/**
+ * Partial credit is real information and must not be rounded into a verdict.
+ *
+ * Collapsing 4/6 to "incorrect" would drive repair routing for a learner who is
+ * mostly right, and collapsing it to "correct" would grant independence credit
+ * for work that was two thirds there. `partial` is a distinct state precisely
+ * so neither happens.
+ */
+export function marksToCorrectness(awarded: number, maximum: number, blank: boolean): Correctness {
+  if (blank) return "blank";
+  if (maximum <= 0) return "unknown";
+  if (awarded >= maximum) return "correct";
+  if (awarded <= 0) return "incorrect";
+  return "partial";
+}
+
+/**
+ * Route already-graded item outcomes into the evidence ledger.
+ *
+ * Deliberately best-effort: a submitted, marked attempt is a completed piece of
+ * learner work, and it must never be rolled back or reported as failed because
+ * a downstream bookkeeping write had a problem. The mark is the contract with
+ * the learner; the ledger is an inference built on top of it.
+ */
+async function routeAttemptEvidenceToLedger(params: {
+  attemptId: string;
+  learnerId: string;
+  outcomes: AssessmentEvidenceOutcome[];
+}): Promise<void> {
+  for (const outcome of params.outcomes) {
+    try {
+      await recordAssessmentEvidence({
+        learnerId: params.learnerId,
+        skillIds: [outcome.skillId],
+        itemId: `${params.attemptId}:${outcome.itemId}`,
+        taskFamily: outcome.taskFamily,
+        response: outcome.response,
+        // An item that could not be marked yields no verdict at all. Recording
+        // it as a failure would manufacture evidence of a misconception out of
+        // an evaluator outage.
+        correct: undefined,
+        correctness: outcome.unmarkable ? "unknown" : outcome.correctness,
+        supportLevel: outcome.supportLevel,
+        hintExposure: outcome.supportLevel,
+        rubricCriterionIds: outcome.rubricCriterionIds,
+        evaluatorConfidence: outcome.unmarkable ? undefined : outcome.evaluatorConfidence,
+        evidenceType: outcome.evidenceType,
+      });
+    } catch (error) {
+      console.warn(
+        `[assessment] evidence ledger write failed for item ${outcome.itemId}; the mark is unaffected`,
+        error
+      );
+    }
+  }
+}
+
 export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO> {
   const db = await getDb();
 
-  const preRes = db.exec("SELECT id, form_id, status FROM assessment_attempts WHERE id = ?;", [attemptId]);
+  const preRes = db.exec(
+    "SELECT id, form_id, status, learner_id, assistance_policy FROM assessment_attempts WHERE id = ?;",
+    [attemptId]
+  );
   if (!preRes[0] || preRes[0].values.length === 0) {
     throw new Error("Attempt not found");
   }
 
   const preStatus = preRes[0].values[0][2] as AttemptStatus;
+  const learnerId = (preRes[0].values[0][3] as string) || DEFAULT_LEARNER_ID;
+  const assistancePolicy = (preRes[0].values[0][4] as string) ?? "no_hints";
 
   // Idempotent: if already completed, return the existing result untouched.
   if (preStatus === "completed") {
@@ -627,7 +798,8 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
   // draft, so grade against the same text the transaction is about to commit.
   const planRes = db.exec(`
     SELECT i.id, i.item_type, i.maximum_marks, i.answer_spec_json, i.stem, i.learning_objective, i.figure_spec_json,
-           r.id AS resp_id, COALESCE(r.committed_response, r.draft_response, '') AS response_text
+           r.id AS resp_id, COALESCE(r.committed_response, r.draft_response, '') AS response_text,
+           i.curriculum_node, r.response_flags
     FROM assessment_items i
     LEFT JOIN attempt_responses r ON i.id = r.item_id AND r.attempt_id = ?
     WHERE i.form_id = (SELECT form_id FROM assessment_attempts WHERE id = ?)
@@ -641,9 +813,12 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
     spec: any;
     stem: string;
     learningObjective: string;
+    curriculumNode: string;
     figure?: VisualizationIntent;
     responseId: string;
     committedResponse: string;
+    /** True when the learner spent a hint on this item during the attempt. */
+    hintUsed: boolean;
   }
 
   const plan: PlanRow[] = (planRes[0]?.values ?? []).map((row) => {
@@ -657,8 +832,10 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
       stem: (row[4] as string) ?? "",
       learningObjective: (row[5] as string) ?? "",
       figure: validatedStoredFigure(row[6], row[0] as string),
+      curriculumNode: (row[9] as string) ?? "",
       responseId: (row[7] as string) ?? `resp-${attemptId}-${row[0] as string}`,
       committedResponse: (row[8] as string) ?? "",
+      hintUsed: parseResponseFlags(row[10]).includes("hint_used"),
     };
   });
 
@@ -685,6 +862,9 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
 
     let totalAwarded = 0;
     let hasGradingBlocked = false;
+    // Collected inside the transaction, written to the ledger after it commits:
+    // sql.js is synchronous and cannot await between BEGIN and COMMIT.
+    const evidenceOutcomes: AssessmentEvidenceOutcome[] = [];
 
     const writeCriterion = (
       id: string,
@@ -710,6 +890,16 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
 
     for (const row of plan) {
       const { itemId, itemType, maximumMarks: maxMarks, spec, responseId: respId, committedResponse: committedResp } = row;
+      const skillId = assessmentSkillId(row);
+      const supportLevel = assessmentSupportLevel(assistancePolicy, row.hintUsed);
+      const evidenceBase = {
+        itemId,
+        skillId,
+        taskFamily: assessmentTaskFamily(skillId, itemType),
+        response: committedResp,
+        evidenceType: assessmentEvidenceType(itemType),
+        supportLevel,
+      };
 
       // criterion_scores.response_id is a foreign key, and an item the learner
       // never opened has no response row yet. Materialise a blank one so the
@@ -737,6 +927,13 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
           "certain"
         );
         db.run("UPDATE attempt_responses SET grading_status = 'graded' WHERE id = ?;", [respId]);
+        evidenceOutcomes.push({
+          ...evidenceBase,
+          correctness: marksToCorrectness(awarded, maxMarks, blank),
+          rubricCriterionIds: ["numeric_match"],
+          evaluatorConfidence: 100,
+          unmarkable: false,
+        });
 
       } else if (itemType === "proof" || itemType === "rubric") {
         const criteria: RubricCriterion[] = Array.isArray(spec?.criteria) ? spec.criteria : [];
@@ -744,6 +941,12 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
         if (criteria.length === 0) {
           hasGradingBlocked = true;
           db.run("UPDATE attempt_responses SET grading_status = 'grading_blocked' WHERE id = ?;", [respId]);
+          evidenceOutcomes.push({
+            ...evidenceBase,
+            correctness: "unknown",
+            rubricCriterionIds: [],
+            unmarkable: true,
+          });
           continue;
         }
 
@@ -751,6 +954,12 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
         if (!grade) {
           hasGradingBlocked = true;
           db.run("UPDATE attempt_responses SET grading_status = 'grading_blocked' WHERE id = ?;", [respId]);
+          evidenceOutcomes.push({
+            ...evidenceBase,
+            correctness: "unknown",
+            rubricCriterionIds: criteria.map((c) => String(c.id)),
+            unmarkable: true,
+          });
           continue;
         }
 
@@ -769,12 +978,33 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
           );
         }
 
+        const criterionIds = grade.criteria.map((c) => c.criterionId);
         if (grade.blocked) {
           hasGradingBlocked = true;
           db.run("UPDATE attempt_responses SET grading_status = 'grading_blocked' WHERE id = ?;", [respId]);
+          evidenceOutcomes.push({
+            ...evidenceBase,
+            correctness: "unknown",
+            rubricCriterionIds: criterionIds,
+            unmarkable: true,
+          });
         } else {
           totalAwarded += itemScore;
           db.run("UPDATE attempt_responses SET grading_status = 'graded' WHERE id = ?;", [respId]);
+          // The evaluator's own least confident criterion bounds how much this
+          // item is allowed to move the learner's state. A rubric judgement the
+          // grader half-believes must not read like a key match.
+          const lowestConfidence = grade.criteria.reduce(
+            (lowest, c) => Math.min(lowest, c.confidence),
+            1
+          );
+          evidenceOutcomes.push({
+            ...evidenceBase,
+            correctness: marksToCorrectness(itemScore, maxMarks, isBlankResponse(committedResp)),
+            rubricCriterionIds: criterionIds,
+            evaluatorConfidence: Math.round(Math.max(0, Math.min(1, lowestConfidence)) * 100),
+            unmarkable: false,
+          });
         }
 
       } else if (itemType === "mcq") {
@@ -784,11 +1014,24 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
           hasGradingBlocked = true;
           writeCriterion(`crit-${respId}-mcq`, respId, "mcq_match", maxMarks, 0, outcome.rationale, 0, "grading_blocked");
           db.run("UPDATE attempt_responses SET grading_status = 'grading_blocked' WHERE id = ?;", [respId]);
+          evidenceOutcomes.push({
+            ...evidenceBase,
+            correctness: "unknown",
+            rubricCriterionIds: ["mcq_match"],
+            unmarkable: true,
+          });
         } else {
           const awarded = outcome.pass ? maxMarks : 0;
           totalAwarded += awarded;
           writeCriterion(`crit-${respId}-mcq`, respId, "mcq_match", maxMarks, awarded, outcome.rationale, 1.0, "certain");
           db.run("UPDATE attempt_responses SET grading_status = 'graded' WHERE id = ?;", [respId]);
+          evidenceOutcomes.push({
+            ...evidenceBase,
+            correctness: marksToCorrectness(awarded, maxMarks, isBlankResponse(committedResp)),
+            rubricCriterionIds: ["mcq_match"],
+            evaluatorConfidence: 100,
+            unmarkable: false,
+          });
         }
 
       } else {
@@ -805,6 +1048,12 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
           "grading_blocked"
         );
         db.run("UPDATE attempt_responses SET grading_status = 'grading_blocked' WHERE id = ?;", [respId]);
+        evidenceOutcomes.push({
+          ...evidenceBase,
+          correctness: "unknown",
+          rubricCriterionIds: ["unsupported_item_type"],
+          unmarkable: true,
+        });
       }
     }
 
@@ -822,6 +1071,11 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
 
     db.run("COMMIT;");
     saveDbSync();
+
+    // Marks are final and durable at this point. Ledger routing happens after
+    // the commit and outside its error path, so a ledger problem can never
+    // discard a submitted attempt.
+    await routeAttemptEvidenceToLedger({ attemptId, learnerId, outcomes: evidenceOutcomes });
 
     return getAttemptResult(attemptId);
   } catch (err) {

@@ -163,12 +163,46 @@ describe("widget validation — pedagogical invariants", () => {
     expect(validateWidgetIntent(build(["current", "current"])).valid).toBe(false);
   });
 
-  it("requires all five evidence dimensions on a mastery card", () => {
+  it("accepts a mastery card with no evidence, because the ledger supplies it", () => {
+    // Mastery scores are computed from recorded evidence and written onto the
+    // card by the harness. The agent is not required — or trusted — to author
+    // them, so a card without an evidence block is legal rather than malformed.
+    expect(validateWidgetIntent({ kind: "mastery_card", concept: "Derivatives" }).valid).toBe(true);
+    expect(
+      validateWidgetIntent({ kind: "mastery_card", concept: "Derivatives", skillId: "derivatives" }).valid
+    ).toBe(true);
+
+    const partial = { recall: 90, understanding: 88 };
+    expect(validateWidgetIntent({ kind: "mastery_card", concept: "Derivatives", evidence: partial }).valid).toBe(true);
+  });
+
+  it("still rejects out-of-range mastery scores when a card carries them", () => {
     const evidence = { recall: 90, understanding: 88, procedure: 92, transfer: 70, independence: 86 };
     expect(validateWidgetIntent({ kind: "mastery_card", concept: "Derivatives", evidence }).valid).toBe(true);
 
-    const { transfer: _omitted, ...partial } = evidence;
-    expect(validateWidgetIntent({ kind: "mastery_card", concept: "Derivatives", evidence: partial }).valid).toBe(false);
+    expect(
+      validateWidgetIntent({
+        kind: "mastery_card",
+        concept: "Derivatives",
+        evidence: { ...evidence, transfer: 140 },
+      }).valid
+    ).toBe(false);
+    expect(
+      validateWidgetIntent({
+        kind: "mastery_card",
+        concept: "Derivatives",
+        evidence: { ...evidence, recall: "high" },
+      }).valid
+    ).toBe(false);
+  });
+
+  it("rejects a weakest link that is not one of the five dimensions", () => {
+    expect(
+      validateWidgetIntent({ kind: "mastery_card", concept: "Derivatives", weakestLink: "transfer" }).valid
+    ).toBe(true);
+    expect(
+      validateWidgetIntent({ kind: "mastery_card", concept: "Derivatives", weakestLink: "effort" }).valid
+    ).toBe(false);
   });
 });
 
@@ -263,5 +297,263 @@ describe("mastery directive", () => {
     expect(directive).toMatch(/scratchpad/);
     expect(directive).toMatch(/Teach notation explicitly/i);
     expect(directive).toMatch(/Mastery is impermanent/i);
+  });
+});
+
+/**
+ * The Animation widget carries the heaviest instructional contract of the
+ * seventeen, because it is the one most likely to degrade into video. A learner
+ * who watches an animation and moves on has seen a thing happen and can tell you
+ * nothing about why. The upgraded contract — prediction-lock, controlled
+ * observation, checkpoints, reconciliation, reconstruction — is what makes the
+ * difference, and every clause of it is enforced here rather than requested in
+ * a prompt, because a model under sampling pressure will drop the awkward parts
+ * first.
+ */
+describe("animation validation — the contract that stops it becoming video", () => {
+  const frames = [{ id: "f1", caption: "Secant rotates toward tangent" }];
+
+  function animation(extra: Record<string, unknown> = {}) {
+    return validateWidgetIntent({ kind: "animation", frames, ...extra });
+  }
+
+  /** The rejection reason, or "" when the intent was accepted. Keeps the
+   *  assertions readable without hand-narrowing the result union each time. */
+  function reasonFor(extra: Record<string, unknown>): string {
+    const result = animation(extra);
+    return result.valid ? "" : result.reason;
+  }
+
+  it("accepts a plain illustrative animation with no prompts attached", () => {
+    // Not every animation must be an assessment. A tutor may legitimately show
+    // something; the contract only binds once it starts making claims.
+    expect(animation().valid).toBe(true);
+  });
+
+  it("rejects a prediction the learner has no way to commit", () => {
+    // The surface locks playback until the prediction is submitted. Asking for
+    // one without an input to record it leaves the learner staring at a disabled
+    // play button with nowhere to type.
+    const reason = reasonFor({ predictPrompt: "What will the slope approach?" });
+    expect(reason).toMatch(/respond spec/i);
+  });
+
+  it("accepts a prediction paired with the means to commit it", () => {
+    expect(
+      animation({
+        predictPrompt: "What will the slope approach?",
+        respond: { prompt: "Commit your prediction" },
+      }).valid
+    ).toBe(true);
+  });
+
+  it("rejects reconciliation with nothing to reconcile against", () => {
+    // Reconciliation is what makes a WRONG prediction valuable: the learner has
+    // to say what they expected, what happened, and what accounts for the gap.
+    // Without a recorded prediction it collapses into "describe what you saw".
+    const reason = reasonFor({ reconcilePrompt: "How did that differ from your prediction?" });
+    expect(reason).toMatch(/nothing to reconcile/i);
+  });
+
+  it("requires checkpoints to be in strictly increasing playhead order", () => {
+    // The surface halts in sequence. An out-of-order checkpoint is either
+    // skipped outright or rewinds the learner mid-thought.
+    const reason = reasonFor({
+      checkpoints: [
+        { id: "c1", at: 0.8, prompt: "What now?" },
+        { id: "c2", at: 0.3, prompt: "And now?" },
+      ],
+    });
+    expect(reason).toMatch(/increasing playhead order/i);
+  });
+
+  it("rejects two checkpoints at the same instant", () => {
+    expect(
+      reasonFor({
+        checkpoints: [
+          { id: "c1", at: 0.5, prompt: "What now?" },
+          { id: "c2", at: 0.5, prompt: "And now?" },
+        ],
+      })
+    ).toMatch(/increasing playhead order/i);
+  });
+
+  it("keeps checkpoint positions inside the playhead range", () => {
+    expect(animation({ checkpoints: [{ id: "c1", at: 1.4, prompt: "?" }] }).valid).toBe(false);
+    expect(animation({ checkpoints: [{ id: "c1", at: -0.1, prompt: "?" }] }).valid).toBe(false);
+  });
+
+  it("requires every checkpoint to actually ask something", () => {
+    expect(reasonFor({ checkpoints: [{ id: "c1", at: 0.5 }] })).toMatch(/needs a prompt/i);
+  });
+
+  it("rejects a multiple-choice checkpoint with no correct answer marked", () => {
+    // Silently accepting every answer is worse than not asking: the learner is
+    // told they were right regardless of what they thought.
+    const reason = reasonFor({
+      checkpoints: [
+        {
+          id: "c1",
+          at: 0.5,
+          prompt: "Which way does it bend?",
+          options: [
+            { id: "a", label: "Up" },
+            { id: "b", label: "Down" },
+          ],
+        },
+      ],
+    });
+    expect(reason).toMatch(/correct option/i);
+  });
+
+  it("accepts a graded checkpoint with a key", () => {
+    expect(
+      animation({
+        checkpoints: [
+          {
+            id: "c1",
+            at: 0.5,
+            prompt: "Which way does it bend?",
+            options: [
+              { id: "a", label: "Up", correct: true },
+              { id: "b", label: "Down" },
+            ],
+            rationale: "This is the moment the curvature reverses.",
+          },
+        ],
+      }).valid
+    ).toBe(true);
+  });
+
+  it("caps checkpoints before the animation turns into a quiz", () => {
+    const many = Array.from({ length: 7 }, (_, i) => ({
+      id: `c${i}`,
+      at: (i + 1) / 10,
+      prompt: "?",
+    }));
+    expect(animation({ checkpoints: many }).valid).toBe(false);
+  });
+
+  it("rejects duplicate checkpoint ids, which would collide in stored answers", () => {
+    expect(
+      reasonFor({
+        checkpoints: [
+          { id: "same", at: 0.3, prompt: "First" },
+          { id: "same", at: 0.6, prompt: "Second" },
+        ],
+      })
+    ).toMatch(/id/i);
+  });
+
+  it("accepts only declared playback affordances", () => {
+    expect(animation({ controls: { scrub: true, step: true } }).valid).toBe(true);
+    expect(animation({ controls: { scrub: "yes" } }).valid).toBe(false);
+    expect(animation({ controls: "all" }).valid).toBe(false);
+  });
+
+  it("requires a linked representation to say what it tracks", () => {
+    // Without that, a "linked" view is just a second picture sitting next to the
+    // first, and the learner is left to guess that the two are the same fact.
+    const reason = reasonFor({
+      linkedRepresentations: [{ id: "r1", representation: "table", label: "Values" }],
+    });
+    expect(reason).toMatch(/what it tracks/i);
+  });
+
+  it("keeps linked representations semantic rather than naming a component", () => {
+    expect(
+      animation({
+        linkedRepresentations: [
+          { id: "r1", representation: "table", label: "Values", tracks: "The secant slope at each t" },
+        ],
+      }).valid
+    ).toBe(true);
+    // A renderer name must never cross this boundary: the router is the sole
+    // renderer authority.
+    expect(
+      animation({
+        linkedRepresentations: [
+          { id: "r1", representation: "EChartsLine", label: "Values", tracks: "slope" },
+        ],
+      }).valid
+    ).toBe(false);
+  });
+
+  it("accepts the full prediction-to-reconstruction contract", () => {
+    expect(
+      animation({
+        predictPrompt: "What will the secant slope approach?",
+        respond: { prompt: "Commit your prediction" },
+        checkpoints: [
+          { id: "c1", at: 0.45, prompt: "What is happening to the gap?" },
+          { id: "c2", at: 0.9, prompt: "What does the secant look like now?" },
+        ],
+        controls: { scrub: true, step: true, replay: true },
+        linkedRepresentations: [
+          { id: "r1", representation: "equation", label: "Difference quotient", tracks: "h as it shrinks" },
+        ],
+        reconcilePrompt: "How did that compare with what you predicted?",
+        reconstructPrompt: "Explain, without looking, why the secant becomes the tangent.",
+      }).valid
+    ).toBe(true);
+  });
+});
+
+describe("animation learner state — semantic answers, not playback traces", () => {
+  it("keeps checkpoint answers keyed by checkpoint", () => {
+    const state = sanitizeWidgetState({
+      checkpointResponses: {
+        c1: { response: "The gap shrinks", correct: true },
+        c2: { response: "It becomes the tangent" },
+      },
+    });
+    expect(state?.checkpointResponses).toEqual({
+      c1: { response: "The gap shrinks", correct: true },
+      c2: { response: "It becomes the tangent" },
+    });
+  });
+
+  it("drops malformed checkpoint answers rather than storing junk", () => {
+    const state = sanitizeWidgetState({
+      checkpointResponses: {
+        c1: { response: "Good answer" },
+        "": { response: "no key at all" },
+        c3: { notAResponse: true },
+        c4: "just a string",
+      },
+    });
+    // Only entries that are a keyed object with a string response survive. A
+    // half-shaped answer stored anyway would later be read as a real one.
+    expect(Object.keys(state?.checkpointResponses ?? {})).toEqual(["c1"]);
+  });
+
+  it("records the prediction lock, reconciliation, and reconstruction", () => {
+    const state = sanitizeWidgetState({
+      predictionLocked: true,
+      reconcileText: "I expected it to level off, but it kept steepening.",
+      reconstructText: "As h shrinks the secant's two points merge.",
+    });
+    expect(state?.predictionLocked).toBe(true);
+    expect(state?.reconcileText).toMatch(/kept steepening/);
+    expect(state?.reconstructText).toMatch(/two points merge/);
+  });
+
+  it("clamps the playhead but keeps no trace of how the learner got there", () => {
+    const state = sanitizeWidgetState({
+      animationProgress: 0.6,
+      scrubHistory: [0.1, 0.2, 0.9],
+      dwellMs: 4200,
+    });
+    // Interaction telemetry is context, never evidence. The moment scrubbing is
+    // recorded as if it meant something, the system starts concluding that the
+    // learner who fidgeted understands more than the one who thought first.
+    expect(state?.animationProgress).toBe(0.6);
+    expect(state).not.toHaveProperty("scrubHistory");
+    expect(state).not.toHaveProperty("dwellMs");
+  });
+
+  it("records self-rated confidence, which only ever arrives by asking", () => {
+    const state = sanitizeWidgetState({ confidence: 140 });
+    expect(state?.confidence).toBe(100);
   });
 });

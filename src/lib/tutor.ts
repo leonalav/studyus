@@ -55,11 +55,29 @@ import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
 import type { MathNode, FunctionNode, OperatorNode, SymbolNode } from "mathjs";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
-import type { WidgetIntent, WidgetState } from "./widgets/types";
+import type { WidgetIntent, WidgetKind, WidgetState } from "./widgets/types";
+import type { SupportLevel } from "./learning/types";
 import { WIDGET_LABEL, isActionableWidget } from "./widgets/types";
 import { validateWidgetIntent } from "./widgets/validate";
 import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
 import { MASTERY_STAGES, MASTERY_STAGE_SPECS, isMasteryStage, nextStage, type MasteryStage } from "./mastery";
+import { evaluateStageExit } from "./learning/predicates";
+import {
+  buildPolicyBrief,
+  buildSessionOpeningBrief,
+  recordMoveActivity,
+  routeTaskFamily,
+  type PolicyBrief,
+} from "./learning/session";
+import { groundMasteryCards } from "./learning/masteryCard";
+import { recordTutorObservation } from "./learning/bridge";
+import { getSkillEvidence, upsertHypothesis, DEFAULT_LEARNER_ID } from "./learning/store";
+import {
+  HYPOTHESIS_KINDS,
+  HYPOTHESIS_KIND_REMEDY,
+  type HypothesisKind,
+  type LearningEvidenceEvent,
+} from "./learning/types";
 import {
   buildTutorPreferenceReminder,
   loadPreferences,
@@ -126,7 +144,10 @@ export type BoardOp =
   | { op: "write_bullets"; items: string[] }
   | { op: "write_latex"; tex: string; caption?: string }
   | { op: "visualize"; intent: VisualizationIntent }
-  | { op: "place_widget"; intent: WidgetIntent }
+  // `blockId` is never model-authored: the client may pre-assign the id of the
+  // block this op will create so it can durably bind that block to its activity
+  // contract before the learner can interact with it.
+  | { op: "place_widget"; intent: WidgetIntent; blockId?: string }
   | { op: "write_callout"; text: string }
   | ({ op: "replace_block"; block: BoardBlockSpec } & BoardTargetSpec)
   | ({ op: "insert_after"; block: BoardBlockSpec } & BoardTargetSpec)
@@ -142,11 +163,34 @@ export type BoardOp =
       initialBlocks: BoardBlockSpec[];
     };
 
+/**
+ * One structured, testable claim the tutor makes about the learner.
+ *
+ * This replaces free-text learner-model statements as the thing that actually
+ * drives instruction. The two added fields are what make it usable:
+ *
+ *  - `kind` is instructionally decisive. "They keep getting these wrong" tells
+ *    a planner nothing; a misconception needs a contrast case, a missing
+ *    prerequisite needs a drop to the prerequisite, a careless error needs
+ *    neither and re-teaching it is insulting.
+ *  - `nextBestTest` is what keeps the model falsifiable. A claim about a
+ *    learner with no stated way to disconfirm it is a label, and labels
+ *    accumulate into a permanent record nothing can remove.
+ */
+export interface TutorHypothesisClaim {
+  kind: HypothesisKind;
+  statement: string;
+  nextBestTest: string;
+}
+
 export interface TutorDiagnosis {
   misconceptions: string[];
   weakCriteria: string[];
   hintDependence: "none" | "low" | "medium" | "high";
   calibration: "under" | "over" | "accurate";
+  /** Structured, skill-linked hypotheses. Optional: a turn where the tutor has
+   *  nothing testable to claim should claim nothing. */
+  hypotheses?: TutorHypothesisClaim[];
 }
 
 export interface TutorTurn {
@@ -161,6 +205,13 @@ export interface TutorTurn {
    *  met. Advancement is a deliberate, evidenced decision — never the result of
    *  the learner having clicked "next". */
   stageAdvance?: TutorStageAdvance;
+  /** The activity contract this turn's board work was placed under.
+   *
+   *  Surfaced so the caller can bind it to the specific blocks this turn
+   *  created. A widget answered three turns later must be filed against the
+   *  contract it was PLACED under, not whichever contract happens to be newest
+   *  when the learner gets round to answering. */
+  activityId?: string;
 }
 
 export interface TutorStageAdvance {
@@ -483,19 +534,163 @@ const PASSIVE_TURN_NUDGE =
   "Before we go on — tell me what you already know about this, or ask me the first thing that looks unclear. I'll build the next step around your answer.";
 
 /**
- * Enforce the never-passive policy.
+ * Does the learner already owe an answer on the board?
+ *
+ * An actionable widget the learner has not submitted is an open commitment.
+ * While one is outstanding, the learner is not passive — they are mid-thought —
+ * and stacking a second demand on top of the first is not more engagement, it
+ * is interruption. It also produces the specific failure of a board where four
+ * half-answered questions sit in a column and none of them gets finished.
+ */
+export function boardHasOpenCommitment(board: BoardDoc | undefined): boolean {
+  if (!board) return false;
+
+  const walk = (blocks: BoardDoc["blocks"]): boolean =>
+    blocks.some((block) => {
+      if (block.kind === "row") return walk(block.children);
+      if (block.kind !== "widget") return false;
+      if (!isActionableWidget(block.intent)) return false;
+      return block.state?.submitted !== true;
+    });
+
+  return walk(board.blocks);
+}
+
+/**
+ * Enforce the never-passive policy, once per instructional cycle.
  *
  * The prompt asks for this, but a prompt is guidance and this is policy, so it
  * is also checked at runtime. We do NOT fabricate a widget: the agent chooses
  * the pedagogical move, and a synthesized question would be content the tutor
  * never wrote. Instead the turn is made to hand the work back in speech, which
  * is always honest and always answerable.
+ *
+ * The unit is the CYCLE, not the turn. Demanding a fresh commitment on every
+ * single turn sounds like rigour and reads as harassment: a learner who asked a
+ * clarifying question halfway through a problem gets answered and immediately
+ * handed a second task, so the first one is abandoned. Worse, the pressure
+ * pushes the tutor toward filler questions — "and what do you think happens
+ * next?" — which teach nothing and train the learner to skim past prompts
+ * because most of them turn out to be noise.
+ *
+ * So when the board already carries an unanswered commitment, an explanatory
+ * turn is allowed to be exactly that. The obligation is still enforced; it is
+ * just discharged by the question that is already waiting.
  */
-export function enforceLearnerAgency(turn: TutorTurn): TutorTurn {
+export function enforceLearnerAgency(turn: TutorTurn, board?: BoardDoc): TutorTurn {
   if (turn.boardOps.length === 0) return turn;
   if (turnLeavesLearnerSomethingToDo(turn)) return turn;
+  if (boardHasOpenCommitment(board)) return turn;
   const speech = turn.speech.trim();
   return { ...turn, speech: speech ? `${speech} ${PASSIVE_TURN_NUDGE}` : PASSIVE_TURN_NUDGE };
+}
+
+/**
+ * Widget kinds that hand the learner support rather than work.
+ *
+ * A `hint` is support by definition. An `example` is a worked demonstration —
+ * seeing the method performed is exactly what level-2/3 support means. A
+ * `reveal` hides an answer behind one click, which under a zero ceiling is a
+ * hint with extra steps.
+ */
+const SUPPORT_WIDGET_CEILING: Partial<Record<WidgetIntent["kind"], SupportLevel>> = {
+  hint: 1,
+  example: 2,
+  reveal: 2,
+};
+
+/** The support level a single hint step corresponds to. */
+function hintStepSupportLevel(level: number): SupportLevel {
+  return Math.max(0, Math.min(3, Math.round(level))) as SupportLevel;
+}
+
+/**
+ * Make the policy ceiling binding rather than advisory.
+ *
+ * The prompt states the ceiling and the model usually respects it. "Usually" is
+ * the problem: the routes with a ceiling of 0 are exactly the ones whose only
+ * purpose is measurement, and a single hint on a due retrieval does not degrade
+ * that measurement — it destroys it. There is no partial credit for a retrieval
+ * that was prompted; you simply no longer know whether the learner could recall
+ * it, and no later turn can recover that.
+ *
+ * So the ceiling is enforced here, after the model has spoken and before the
+ * board is written.
+ *
+ * What this does NOT do is silently gut the turn. Over-supportive widgets are
+ * dropped or trimmed to the permitted level, and the tutor's speech says so
+ * plainly. A learner who can see that help was withheld deliberately is being
+ * treated as an adult; a learner whose hint quietly vanished is being gaslit by
+ * their study tool.
+ */
+export function enforceSupportCeiling(turn: TutorTurn, ceiling: SupportLevel): TutorTurn {
+  if (ceiling >= 3) return turn;
+
+  let trimmedAny = false;
+  let droppedAny = false;
+
+  const limitWidget = (intent: WidgetIntent): WidgetIntent | null => {
+    // A hint widget survives at a reduced ceiling by keeping only the rungs the
+    // policy allows. Level 1 orientation under a ceiling of 1 is legitimate
+    // help; the deeper rungs are what must not be reachable.
+    if (intent.kind === "hint") {
+      const steps = intent.steps.filter((step) => hintStepSupportLevel(step.level) <= ceiling);
+      if (steps.length === intent.steps.length) return intent;
+      if (steps.length === 0) {
+        droppedAny = true;
+        return null;
+      }
+      trimmedAny = true;
+      return { ...intent, steps };
+    }
+
+    const required = SUPPORT_WIDGET_CEILING[intent.kind];
+    if (required !== undefined && required > ceiling) {
+      droppedAny = true;
+      return null;
+    }
+    return intent;
+  };
+
+  const boardOps = turn.boardOps.flatMap<BoardOp>((op) => {
+    switch (op.op) {
+      case "place_widget":
+      case "update_widget": {
+        const intent = limitWidget(op.intent);
+        return intent ? [{ ...op, intent }] : [];
+      }
+      case "replace_block":
+      case "insert_after": {
+        if (op.block.kind !== "widget") return [op];
+        const intent = limitWidget(op.block.intent);
+        return intent ? [{ ...op, block: { ...op.block, intent } }] : [];
+      }
+      case "spawn_thread": {
+        const initialBlocks = op.initialBlocks.flatMap<BoardBlockSpec>((block) => {
+          if (block.kind !== "widget") return [block];
+          const intent = limitWidget(block.intent);
+          return intent ? [{ ...block, intent }] : [];
+        });
+        return [{ ...op, initialBlocks }];
+      }
+      default:
+        return [op];
+    }
+  });
+
+  if (!trimmedAny && !droppedAny) return turn;
+
+  const notice =
+    ceiling === 0
+      ? "I'm holding back hints on this one on purpose — this task is measuring what you can do unaided, and a nudge from me would make the result meaningless. Tell me where you get stuck and I'll make the task smaller instead."
+      : `I'm keeping help at the orientation level here rather than working through it, so that what you produce is genuinely yours. Say where you're stuck and I'll point you at the right part.`;
+
+  const speech = turn.speech.trim();
+  return {
+    ...turn,
+    boardOps,
+    speech: speech ? `${speech} ${notice}` : notice,
+  };
 }
 
 /** Hard safety net for turns where any board mutation is categorically noise. */
@@ -705,12 +900,135 @@ export async function rememberTutorDiagnosis(
   }
 }
 
+/**
+ * Persist the tutor's structured claims as revisable learner-model hypotheses.
+ *
+ * This is the write side of the structured learner model. What it deliberately
+ * does NOT do is let the model declare a claim confirmed: `upsertHypothesis`
+ * enters everything as `suspected` and promotes to `supported` only after two
+ * independent observations. A model that could assert `supported` in one turn
+ * would be able to talk itself into a diagnosis, and the policy engine routes
+ * hard off supported claims — a self-confirming misconception would send the
+ * learner into contrast cases for a belief they never held.
+ *
+ * A learner-disputed claim is never re-created, because `upsertHypothesis`
+ * matches only undisputed rows: once the learner has rejected a claim, the
+ * tutor repeating it does not bring it back.
+ *
+ * Best-effort by design. A hypothesis that fails to persist costs the next turn
+ * some context; a hypothesis that throws would cost the learner their reply.
+ */
+export async function recordTutorHypotheses(params: {
+  learnerId: string;
+  skillId: string;
+  diagnosis: TutorDiagnosis | undefined;
+  preferences: TutorPreferences;
+  evidenceIds: string[];
+}): Promise<void> {
+  const claims = params.diagnosis?.hypotheses ?? [];
+  if (claims.length === 0) return;
+  // The learner model is memory. If the learner turned memory off, or asked not
+  // to be learned from, no claim about them is retained — including this one.
+  if (params.preferences.memory.mode === "off" || !params.preferences.memory.learnFromSessions) {
+    return;
+  }
+
+  for (const claim of claims) {
+    // Honour the same per-category consent the free-text memory honours: a
+    // learner who opted out of misconception tracking has not opted into a
+    // structured version of the same record.
+    if (claim.kind === "misconception" && !params.preferences.memory.rememberMisconceptions) continue;
+    if (
+      (claim.kind === "low_confidence" || claim.kind === "overconfidence") &&
+      !params.preferences.memory.rememberCalibration
+    ) {
+      continue;
+    }
+    if (
+      (claim.kind === "missing_prerequisite" || claim.kind === "procedural_slip") &&
+      !params.preferences.memory.rememberWeakAreas
+    ) {
+      continue;
+    }
+
+    try {
+      await upsertHypothesis({
+        learnerId: params.learnerId,
+        skillId: params.skillId,
+        kind: claim.kind,
+        statement: claim.statement,
+        nextBestTest: claim.nextBestTest,
+        evidenceIds: params.evidenceIds,
+      });
+    } catch (error) {
+      console.warn(`[tutor] could not record hypothesis (${claim.kind})`, error);
+    }
+  }
+}
+
 /* ─────────────────────────────────────────────────────────────
    SCHEMA VALIDATION
    ───────────────────────────────────────────────────────────── */
 
 const HINT_DEPENDENCE = ["none", "low", "medium", "high"] as const;
 const CALIBRATION = ["under", "over", "accurate"] as const;
+
+/** Structured hypotheses are capped so one turn cannot flood the learner model. */
+const MAX_TUTOR_HYPOTHESES_PER_TURN = 3;
+
+/**
+ * Validate the tutor's structured claims about the learner.
+ *
+ * `next_best_test` is enforced as hard as the claim itself. This is the single
+ * rule that stops the learner model from filling with unfalsifiable labels, and
+ * it is enforced in code rather than requested in the prompt because a rule the
+ * model is merely asked to follow is a rule that holds until the context gets
+ * long.
+ *
+ * Returns `null` only when the field is present but not an array — the shape is
+ * wrong and the turn should be retried. An absent field yields an empty list,
+ * because having nothing testable to say is a legitimate turn.
+ */
+function validateHypothesisClaims(
+  value: unknown,
+  path: string,
+  errors: string[]
+): TutorHypothesisClaim[] | null {
+  if (value === undefined || value === null) return [];
+  const arr = asArray(value, path, errors);
+  if (!arr) return null;
+
+  if (arr.length > MAX_TUTOR_HYPOTHESES_PER_TURN) {
+    errors.push(
+      `${path} has ${arr.length} entries; at most ${MAX_TUTOR_HYPOTHESES_PER_TURN} may be claimed in one turn. ` +
+        `A turn that proposes more explanations than it gathered observations is guessing.`
+    );
+  }
+
+  const claims: TutorHypothesisClaim[] = [];
+  arr.forEach((entry, i) => {
+    const rec = asRecord(entry, `${path}[${i}]`, errors);
+    if (!rec) return;
+    const kind = asEnum(rec.kind, HYPOTHESIS_KINDS, `${path}[${i}].kind`, errors);
+    const statement = asNonEmptyString(rec.statement, `${path}[${i}].statement`, errors);
+    const nextBestTest = asNonEmptyString(
+      rec.next_best_test ?? rec.nextBestTest,
+      `${path}[${i}].next_best_test`,
+      errors
+    );
+    if (rec.next_best_test === undefined && rec.nextBestTest === undefined) {
+      errors.push(
+        `${path}[${i}].next_best_test is required: state the observation that would confirm or refute this claim. ` +
+          `A claim about a learner that cannot be disproved is not recorded.`
+      );
+      return;
+    }
+    if (kind && statement && nextBestTest) {
+      claims.push({ kind, statement, nextBestTest });
+    }
+  });
+  return claims;
+}
 
 function validateBoardBlockSpec(value: unknown, path: string, errors: string[]): BoardBlockSpec | null {
   const rec = asRecord(value, path, errors);
@@ -1014,6 +1332,10 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
     case "place_widget": {
       const intent = validateWidgetIntentField(rec.intent, path, errors);
       if (!intent) return null;
+      // Rebuilt from validated fields only, which deliberately drops any
+      // model-authored `blockId`: that field is assigned by the client at
+      // placement to bind the block to its activity contract, and a model that
+      // could choose it could file a learner's answer under another task.
       return { op, intent };
     }
     case "update_widget": {
@@ -1138,8 +1460,15 @@ export function validateTutorPayload(
       const weakCriteria = asStringList(diag.weak_criteria, "diagnosis.weak_criteria", errors);
       const hintDependence = asEnum(diag.hint_dependence, HINT_DEPENDENCE, "diagnosis.hint_dependence", errors);
       const calibration = asEnum(diag.calibration, CALIBRATION, "diagnosis.calibration", errors);
-      if (misconceptions && weakCriteria && hintDependence && calibration) {
-        diagnosis = { misconceptions, weakCriteria, hintDependence, calibration };
+      const hypotheses = validateHypothesisClaims(diag.hypotheses, "diagnosis.hypotheses", errors);
+      if (misconceptions && weakCriteria && hintDependence && calibration && hypotheses !== null) {
+        diagnosis = {
+          misconceptions,
+          weakCriteria,
+          hintDependence,
+          calibration,
+          ...(hypotheses.length ? { hypotheses } : {}),
+        };
       }
     }
   }
@@ -1689,22 +2018,56 @@ export async function setSessionMasteryStage(
   saveDbSync();
 }
 
-/** Decide the session's next stage from a completed turn. Deterministic, and
- *  deliberately unable to skip stages or advance without evidence. */
+/**
+ * Decide the session's next stage from a completed turn.
+ *
+ * Advancement is decided by machine-checkable predicates over the evidence
+ * ledger — see `learning/predicates.ts`. The model's own `stage_advance.ready`
+ * is not sufficient and never was: the previous rule here accepted any non-empty
+ * evidence string, which meant a fluent sentence advanced the learner just as
+ * effectively as a demonstrated skill. A model that is asked "are they ready?"
+ * and rewarded for momentum will say yes.
+ *
+ * What the model retains is the power to move a learner BACK. Recognizing
+ * regression must never be harder than promoting, so a reported earlier stage is
+ * honoured immediately and without evidence.
+ *
+ * @param ledgerEvidence Recorded evidence for the skill in focus. When empty —
+ *   a session with no skill resolved, or an unwired call site — the gate falls
+ *   back to the model's claim, so this function degrades to the old behaviour
+ *   rather than freezing every learner at Encounter.
+ */
 export function resolveNextMasteryStage(
   current: MasteryStage,
-  turn: Pick<TutorTurn, "stage" | "stageAdvance">
+  turn: Pick<TutorTurn, "stage" | "stageAdvance">,
+  ledgerEvidence: LearningEvidenceEvent[] = []
 ): { stage: MasteryStage; evidence: string } | null {
   // A reported stage BEHIND the current one is a regression the tutor
   // observed. Honour it immediately; no evidence required to move back.
   if (turn.stage && MASTERY_STAGES.indexOf(turn.stage) < MASTERY_STAGES.indexOf(current)) {
     return { stage: turn.stage, evidence: turn.stageAdvance?.evidence ?? "" };
   }
+
+  const next = nextStage(current);
+  if (!next) return null;
+
+  if (ledgerEvidence.length > 0) {
+    const gate = evaluateStageExit(current, ledgerEvidence);
+    if (!gate.satisfied) return null;
+    // The model's narration is kept as the human-readable reason, but the
+    // decision was the predicate's. When the model said nothing, the gate
+    // summary speaks for itself.
+    const narration = turn.stageAdvance?.evidence?.trim();
+    return {
+      stage: next,
+      evidence: narration ? `${gate.summary} — ${narration}` : gate.summary,
+    };
+  }
+
   if (!turn.stageAdvance?.ready) return null;
   const evidence = turn.stageAdvance.evidence.trim();
   if (!evidence) return null;
-  const next = nextStage(current);
-  return next ? { stage: next, evidence } : null;
+  return { stage: next, evidence };
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -1721,6 +2084,15 @@ export function buildTutorUserPrompt(params: {
    *  put it there. Supplied so the tutor continues rather than re-guessing. */
   masteryStage?: MasteryStage;
   masteryStageEvidence?: string;
+  /** The rendered policy decision for this turn: computed evidence state, the
+   *  stage gate's outstanding requirements, the warranted move, the support
+   *  ceiling, and the response routing table. */
+  policyBrief?: string;
+  /** Widget kinds the policy warranted for this turn. When supplied, only these
+   *  are described in the catalog; the validator still governs what may render. */
+  permittedWidgetKinds?: readonly WidgetKind[];
+  /** Due retrievals to surface before new teaching. Empty mid-session. */
+  openingBrief?: string;
   learnerSummary: string;
   curriculumScope?: TutorCurriculumScopeItem[];
   cards: TutorEvidenceCard[];
@@ -1740,11 +2112,19 @@ export function buildTutorUserPrompt(params: {
 
   parts.push(
     params.awaitingFirstAttempt
-      ? `PHASE: awaiting_first_attempt — the learner has not yet made an independent attempt. ` +
-        `However, if the learner explicitly asked you to draw, plot, visualize, or show a structure, comply first with a best-effort board rendering instead of asking a gating question. ` +
-        `Otherwise open by locating what they have tried and, only if necessary, ask the one question whose answer distinguishes misconceptions.`
+      ? `PHASE: awaiting_first_attempt — the learner has not yet made an independent attempt. Apply the RESPONSE ROUTING table below to decide whether this turn asks or tells.`
       : `PHASE: in_flow — the learner is actively working with you. Continue from their latest message.`
   );
+
+  // Due retrievals come before anything else the turn might do. They are the
+  // one thing a session can lose permanently by postponing: an interval that
+  // passes unmeasured cannot be measured retroactively.
+  if (params.openingBrief) parts.push(params.openingBrief);
+
+  // The policy brief is placed ahead of the stage description and the learner
+  // model because it is the binding instruction; everything after it is context
+  // for carrying it out well.
+  if (params.policyBrief) parts.push(params.policyBrief);
 
   parts.push(formatMasteryDirective());
 
@@ -1760,9 +2140,9 @@ export function buildTutorUserPrompt(params: {
       ? `- Evidence that carried the learner into this stage: ${params.masteryStageEvidence}\n`
       : "") +
     (advanceTarget
-      ? `- Set stage_advance.ready=true ONLY when you have just observed that exit condition, and name the observation in stage_advance.evidence. The session then moves to ${MASTERY_STAGE_SPECS[advanceTarget].label}; you cannot skip ahead of it.`
-      : `- This is the final stage. Close with a mastery_card reporting all five evidence dimensions, and schedule the retrieval check that will detect forgetting.`) +
-    `\n- If the learner's work shows they are actually behind this stage, report the earlier "stage" instead. Moving back is correct behaviour.`
+      ? `- Advancement to ${MASTERY_STAGE_SPECS[advanceTarget].label} is decided by machine-checkable predicates over the evidence ledger, not by your assertion. Report what you observed in stage_advance.evidence; the gate reads the ledger and moves the stage when the evidence is genuinely there. Elicit the missing evidence rather than arguing for the promotion.`
+      : `- This is the final stage. Close with a mastery_card — its five dimensions, evidence trail, and review date are filled in from the ledger, so write only the prose.`) +
+    `\n- If the learner's work shows they are actually behind this stage, report the earlier "stage" instead. Moving back is honoured immediately and needs no evidence: noticing a regression must never be harder than granting a promotion.`
   );
 
   parts.push(`LEARNER MODEL SUMMARY:\n${params.learnerSummary}`);
@@ -1827,11 +2207,15 @@ export function buildTutorUserPrompt(params: {
   parts.push(
     `GLOBAL BEHAVIOR: The chalkboard is the primary teaching surface and interactive lesson. Do not teach, explain the lesson, or ask instructional/content questions in speech. Put teaching steps, Socratic questions, checks for understanding, examples, definitions, and practice prompts onto the chalkboard using board_ops. Speech must stay to a brief acknowledgement or transition (for example, “I put that on the board”). Only use speech for a direct learner clarification when no board content is needed. ` +
     `First decide whether changing the board is pedagogically necessary for this exact turn. Greetings, thanks, acknowledgements, social chat, navigation questions, and replies that are already clear in short speech MUST return board_ops exactly []. Do not create an equation, graph, diagram, chart, text block, callout, widget, or thread merely because a chalkboard is available. ` +
-    `THE LEARNER IS NEVER PASSIVE: every turn that teaches must leave the learner holding a task. If your board_ops add only presentational content (roadmap, concept card, text, bullets, diagram, worked example), you have explained AT the learner and stopped — pair it with the widget that hands the work back. Placing a roadmap alone is a forbidden turn: place it together with the question, scratchpad or reveal that opens its first step. Never close a turn with "let me know when you're ready" or "does that make sense?"; ask the question that starts the work instead. ` +
+    `THE LEARNER IS NEVER PASSIVE: the learner must always be holding a task. If your board_ops add only presentational content (roadmap, concept card, text, bullets, diagram, worked example) and nothing on the board is already awaiting their answer, you have explained AT the learner and stopped — pair it with the widget that hands the work back. Placing a roadmap alone is a forbidden turn: place it together with the question, scratchpad or reveal that opens its first step. Never close a turn with "let me know when you're ready" or "does that make sense?"; ask the question that starts the work instead. ` +
+    `ONE COMMITMENT PER CYCLE, NOT PER TURN: when an unanswered question, scratchpad or prediction is already on the board, do not add another. Answer what was asked, extend the explanation, and let the learner finish the task they are already in the middle of. A second demand stacked on an open one abandons the first. Never manufacture a filler question to satisfy the rule — a prompt attached to nothing teaches the learner that prompts can be skimmed past. ` +
     `When teaching IS happening, the study widgets are your teaching vocabulary, not a set of optional features. Prefer the widget that matches your pedagogical move over plain text: a check for understanding is a question widget, not a sentence; a worked example is an example widget with a reason on every step; a learner error is a mistake_check that diagnoses it; the learner's turn to work is a scratchpad. A turn that teaches with paragraphs where a widget exists for the move is a worse turn. ` +
     `Use a board operation only when the learner explicitly requests a board rendering/edit or when a specific visual/formal representation materially improves understanding and cannot be conveyed as clearly in the spoken response alone. If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
     `For every substantive explanation, layer simple plain-language intuition first, then precise terminology, assumptions, rigorous reasoning, and meaningful equations or worked steps; define jargon and connect formal details back to the intuitive idea. ` +
     `When a board representation is necessary, choose the smallest relevant set of equations, function graphs, data charts, or domain-faithful diagrams/scientific figures. Never add decorative, redundant, irrelevant, or semantically misleading visuals, and obey the enabled tool permissions. ` +
+    `DIAGNOSIS IS A HYPOTHESIS, NOT A LABEL. When you have an actual explanation for what you observed, put it in diagnosis.hypotheses with the kind that names the cause, because the cause determines the remedy: ` +
+    HYPOTHESIS_KINDS.map((kind) => `${kind} — ${HYPOTHESIS_KIND_REMEDY[kind]}`).join(" ") +
+    ` Every hypothesis MUST carry next_best_test: the specific observation that would confirm or refute it. A claim you cannot say how to test will be rejected. Propose a hypothesis only when you have seen something that supports it; a turn with no evidence for a cause should have no hypotheses. You do not decide whether a hypothesis is confirmed — repeated independent observations promote it, and the learner's own successful unaided work retires it. ` +
     `Always include speech, board_ops, and evidence_refs. Use an empty array when there are no board operations. ` +
     (params.cards.length === 0
       ? `No evidence handles were supplied, so evidence_refs MUST be exactly [].`
@@ -1845,7 +2229,7 @@ export function buildTutorUserPrompt(params: {
       `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "place_widget" | "update_widget" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text" | "redraw_block" | "spawn_thread", ...fields }, ... ],\n` +
       `  "stage": "encounter"|"understand"|"construct"|"apply"|"transfer"|"master" /* the mastery stage you are teaching in this turn */,\n` +
       `  "stage_advance": { "ready": boolean, "evidence": "<what the learner did that satisfies this stage's exit condition>" } /* optional; ready:true REQUIRES evidence */,\n` +
-      `  "diagnosis": { "misconceptions": [string], "weak_criteria": [string], "hint_dependence": "none"|"low"|"medium"|"high", "calibration": "under"|"over"|"accurate" } /* optional */,\n` +
+      `  "diagnosis": { "misconceptions": [string], "weak_criteria": [string], "hint_dependence": "none"|"low"|"medium"|"high", "calibration": "under"|"over"|"accurate", "hypotheses": [ { "kind": ${HYPOTHESIS_KINDS.map((kind) => `"${kind}"`).join("|")}, "statement": "<the claim, stated so it could be wrong>", "next_best_test": "<the specific observation that would confirm or refute it>" } ] } /* optional; at most ${MAX_TUTOR_HYPOTHESES_PER_TURN} hypotheses */,\n` +
       `  "evidence_refs": [ "<one of the supplied E-handles>" ],\n` +
       `  "requested_level": <0..${MAX_HINT_LEVEL}> /* optional: request a higher unlocked hint level when the learner is stuck */\n` +
       `}\n\n` +
@@ -1858,7 +2242,7 @@ export function buildTutorUserPrompt(params: {
       `- update_widget: { "op", targetAnchor?|targetIndex?|targetMatchText?, "intent": WidgetIntent } — reconfigures an existing widget in place, keeping the learner's answers and interaction state. Use it to mark the next roadmap step current, add a deeper hint level, or reveal a mistake_check correction after the learner has responded — never append a second copy of a widget you already placed.\n` +
       `- redraw_block: { "op", targetAnchor?|targetIndex?|targetMatchText? } — force a block to re-render from scratch, keeping its content exactly as-is. Use this ONLY when the learner reports they cannot see something you placed ("the widget is blank", "the diagram didn't load", "I can't see the equation"). It repairs a block that failed to draw; it does not change what the block says. Acknowledge it plainly ("Redrawing that now") and, if it still does not appear after one redraw, place the content again in a different form rather than redrawing a second time.\n` +
       `WIDGET CATALOG — a widget "intent" is keyed on its "kind" field (visualization intents remain keyed on "type"). Graphs, geometry/points, and equations are NOT widgets: emit those through visualize as "function", "geometry", and "equation" intents.\n` +
-      `${formatWidgetCatalog()}\n` +
+      `${formatWidgetCatalog(params.permittedWidgetKinds)}\n` +
       `- visualize: { "op", "intent": VisualizationIntent } — appends a new visualization block. Use this immediately when the learner explicitly asks for a diagram, graph, plot, or structure. ` +
       `Describe what the figure IS, not how to draw it; the renderer handles rendering. ` +
       `Geometry figures are auto-fitted to the available board space from their actual objects. Do not emit a geometry "viewport"; this build intentionally ignores it so shapes stay tight, fully visible, and draggable without a big empty interaction rectangle. ` +
@@ -1916,10 +2300,28 @@ export function buildTutorUserPrompt(params: {
   return parts.join("\n\n");
 }
 
+/**
+ * How many board blocks are described to the model.
+ *
+ * The board is the one part of the prompt that grows for the whole session:
+ * one line per block, forever. A long session is exactly when tokens are most
+ * expensive, so an uncapped board makes the last turn of a lesson the priciest.
+ * The tail is kept rather than the head because edits target recent work; the
+ * elision is announced so the model knows older anchors exist and does not
+ * conclude the board began where the listing does.
+ */
+const MAX_SUMMARIZED_BOARD_BLOCKS = 40;
+
 function summarizeBoardBlocks(board: BoardDoc): string {
   if (board.blocks.length === 0) return `- (board is empty)`;
-  return board.blocks
-    .map((block, index) => {
+  const hidden = Math.max(0, board.blocks.length - MAX_SUMMARIZED_BOARD_BLOCKS);
+  const shown = hidden > 0 ? board.blocks.slice(-MAX_SUMMARIZED_BOARD_BLOCKS) : board.blocks;
+  const elision = hidden > 0
+    ? `- (${hidden} earlier block(s) omitted; they are still on the board. Ask the learner to scroll to them by name if you need one, or place fresh content instead of editing them.)\n`
+    : ``;
+  return elision + shown
+    .map((block, offset) => {
+      const index = hidden + offset;
       const prefix = `- [${index}] anchor=${block.id}`;
       switch (block.kind) {
         case "title":
@@ -2005,6 +2407,15 @@ export interface TutorTurnRequest {
   }[];
   signal?: AbortSignal;
   endpoint?: ResolvedRoleEndpoint;
+  /** The skill this turn is about, for the evidence ledger and policy engine.
+   *
+   *  When omitted it is derived from the bound curriculum node or the session
+   *  title, so evidence still accumulates somewhere stable rather than being
+   *  silently dropped. */
+  skillId?: string;
+  /** Learner identity for the ledger. Single-user today; explicit so the
+   *  evidence store is not retrofitted later. */
+  learnerId?: string;
 }
 
 /**
@@ -2062,6 +2473,32 @@ export function selectTutorFileContentParts(
 }
 
 /**
+ * The skill a turn is about.
+ *
+ * Prefers an explicit id, then the first bound curriculum node, then the session
+ * title. The fallback matters: evidence attributed to a stable-but-coarse skill
+ * is still usable, whereas evidence dropped because no skill was named is gone.
+ */
+export function resolveTurnSkillId(req: Pick<TutorTurnRequest, "skillId" | "boundNodes" | "sessionTitle">): string {
+  const raw = req.skillId ?? req.boundNodes?.[0] ?? req.sessionTitle;
+  return raw.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 64) || "unspecified_skill";
+}
+
+/**
+ * Read correctness for a conversational turn from the tutor's own diagnosis.
+ *
+ * Conversation is not auto-gradable, so this deliberately never returns
+ * "correct": a free-text exchange the model felt good about is not the same
+ * class of fact as a graded response, and letting warmth become evidence of
+ * competence is the failure the whole ledger exists to prevent. A named
+ * misconception is a genuine negative observation and is recorded as such;
+ * everything else is honestly unknown.
+ */
+function correctnessFromDiagnosis(turn: TutorTurn): "incorrect" | "unknown" {
+  return (turn.diagnosis?.misconceptions?.length ?? 0) > 0 ? "incorrect" : "unknown";
+}
+
+/**
  * One tutor turn. Endpoint, authentication, cancellation, and transport errors
  * still propagate to the caller. Schema-invalid model output is repaired when
  * possible and otherwise deterministically reduced to safe speech plus the
@@ -2115,6 +2552,34 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     : [persistentSummary, getTutorSessionLearnerSummary(req.sessionId)].filter(Boolean).join("\n\n");
 
   const awaitingFirstAttempt = loadedHistory.filter((m) => m.role === "user").length <= 1;
+
+  // The policy engine decides what evidence is missing and which learning move
+  // is warranted; everything downstream of here decides only how to say it.
+  // A failure in the engine must never cost the learner their turn, so the whole
+  // brief is best-effort: an unreachable evidence store degrades the tutor to
+  // its previous prompt-only behaviour rather than to an error screen.
+  const learnerId = req.learnerId ?? DEFAULT_LEARNER_ID;
+  const skillId = resolveTurnSkillId(req);
+  let policyBrief: PolicyBrief | undefined;
+  let openingBrief = "";
+  try {
+    policyBrief = await buildPolicyBrief({
+      learnerId,
+      skillId,
+      learnerMessage: req.learnerMessage,
+      supportAlreadyUsed: Math.max(0, Math.min(3, hintLevel)) as 0 | 1 | 2 | 3,
+      fallbackStage: masteryStage.stage,
+    });
+    // Due retrievals belong at the top of a session, not buried mid-flow: a
+    // review surfaced after twenty minutes of new teaching is a review the
+    // learner has already been primed for, which measures priming.
+    if (awaitingFirstAttempt) {
+      openingBrief = await buildSessionOpeningBrief(learnerId);
+    }
+  } catch (error) {
+    console.warn("[tutor] policy engine unavailable; continuing without it", error);
+  }
+
   const knowledgeNodes = await resolveTutorKnowledgeNodes(req.boundNodes ?? [], studio);
   // Curriculum sequencing and source grounding are independent: disabling the
   // pedagogical phase sequence must not silently disable selected-source use.
@@ -2169,8 +2634,11 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     assistancePolicy: req.assistancePolicy ?? "progressive_hints",
     hintLevel,
     awaitingFirstAttempt,
-    masteryStage: masteryStage.stage,
+    masteryStage: policyBrief?.state.stage ?? masteryStage.stage,
     masteryStageEvidence: masteryStage.evidence,
+    policyBrief: policyBrief?.prompt,
+    permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
+    openingBrief,
     learnerSummary,
     curriculumScope,
     cards,
@@ -2208,15 +2676,34 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
       }
     },
   });
-  const result: StructuredCallResult<TutorTurn> = {
-    ...rawResult,
-    value: enforceLearnerAgency(
+  // Ceiling enforcement runs BEFORE the agency check, so that a turn whose only
+  // learner-facing element was an over-supportive widget is caught by the
+  // never-passive net rather than shipping as a bare explanation.
+  const policedTurn = enforceLearnerAgency(
+    enforceSupportCeiling(
       enforceTutorBoardNecessity(
         enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
         req.learnerMessage
-      )
+      ),
+      policyBrief?.support.granted ?? 3
     ),
-  };
+    req.board
+  );
+
+  // Any mastery card in this turn is rewritten from the ledger before it can
+  // reach the board. Whatever the model wrote into those five numbers never
+  // becomes visible to the learner.
+  let groundedTurn = policedTurn;
+  try {
+    groundedTurn = {
+      ...policedTurn,
+      boardOps: await groundMasteryCards(policedTurn.boardOps, { learnerId, fallbackSkillId: skillId }),
+    };
+  } catch (error) {
+    console.warn("[tutor] could not ground mastery cards from the ledger", error);
+  }
+
+  const result: StructuredCallResult<TutorTurn> = { ...rawResult, value: groundedTurn };
 
   await appendSessionMessage({
     sessionId: req.sessionId,
@@ -2232,13 +2719,85 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
   }
 
-  // Stage movement is resolved deterministically from the turn, never taken as
-  // a bare assertion: forward motion needs evidence and advances exactly one
-  // stage, while an observed regression is honoured immediately.
-  const resolvedStage = resolveNextMasteryStage(masteryStage.stage, result.value);
+  // Record what the learner actually did this turn, then let the predicates
+  // decide the stage. Writing evidence AFTER the model call is deliberate: a
+  // turn that failed to complete never happened as far as the ledger is
+  // concerned, and a ledger that records unseen instruction is worse than no
+  // ledger at all.
+  let ledgerEvidence: LearningEvidenceEvent[] = [];
+  let turnEvidenceId: string | undefined;
+  try {
+    if (policyBrief && !awaitingFirstAttempt && policyBrief.attempt.madeAttempt) {
+      const observation = await recordTutorObservation({
+        learnerId,
+        sessionId: req.sessionId,
+        skillIds: [skillId],
+        taskId: `${req.sessionId}:${loadedHistory.length}`,
+        // An obligation is owed against a specific family, so the evidence must
+        // be filed under that same family or the debt never clears: a due
+        // review is settled by matching (skill, taskFamily), and evidence
+        // landing under a route-derived name settles nothing. The review would
+        // come due again next session, and the learner would be asked the same
+        // question forever while their answers piled up out of the scheduler's
+        // sight.
+        taskFamily:
+          policyBrief.move.taskFamily ??
+          routeTaskFamily(skillId, policyBrief.move.route, loadedHistory.length),
+        evidenceType: policyBrief.move.requiredEvidence[0] ?? "explanation",
+        response: req.learnerMessage,
+        correctness: correctnessFromDiagnosis(result.value),
+        supportLevel: policyBrief.support.granted,
+        hintExposure: policyBrief.support.granted,
+        contextVariant: policyBrief.move.contextVariant,
+        evaluatorConfidence: result.value.diagnosis ? 70 : 50,
+      });
+      turnEvidenceId = observation.evidenceId;
+    }
+    ledgerEvidence = await getSkillEvidence(skillId, learnerId);
+  } catch (error) {
+    console.warn("[tutor] could not record turn evidence", error);
+  }
+
+  // Record the contract this turn's board activity is placed under, so that a
+  // widget the learner answers later resolves to a named task family, context
+  // variant and support ceiling rather than being filed as an anonymous click.
+  let turnActivityId: string | undefined;
+  if (policyBrief) {
+    const contract = await recordMoveActivity({
+      learnerId,
+      sessionId: req.sessionId,
+      skillId,
+      move: policyBrief.move,
+      turnOrdinal: loadedHistory.length,
+    });
+    turnActivityId = contract?.activityId;
+  }
+
+  // Hypotheses are written after the evidence they rest on, so each claim
+  // carries the id of the observation that prompted it. A claim with no
+  // evidence attached cannot later be shown to the learner as "here is why I
+  // think this", and an unexplainable claim about a learner is one they have no
+  // fair way to contest.
+  await recordTutorHypotheses({
+    learnerId,
+    skillId,
+    diagnosis: result.value.diagnosis,
+    preferences: studio,
+    evidenceIds: turnEvidenceId ? [turnEvidenceId] : [],
+  });
+
+  // Stage movement is resolved from the evidence ledger, never from a bare
+  // assertion: forward motion must satisfy the stage's predicate and advances
+  // exactly one stage, while an observed regression is honoured immediately.
+  const resolvedStage = resolveNextMasteryStage(masteryStage.stage, result.value, ledgerEvidence);
   if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
     await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
   }
+
+  // Hand the caller the contract these board ops were authored under so it can
+  // bind it to the blocks this turn creates. Binding at placement is what makes
+  // a late answer resolvable to the right activity.
+  if (turnActivityId) result.value.activityId = turnActivityId;
 
   return result;
 }

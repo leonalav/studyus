@@ -53,6 +53,8 @@ import {
   forgetTutorSessionLearnerObservation,
   testTutorStudioPrompt,
 } from "../../lib/tutor";
+import { disputeHypothesis, getHypotheses } from "../../lib/learning/store";
+import { HYPOTHESIS_KIND_REMEDY, type LearnerHypothesis } from "../../lib/learning/types";
 import type { CurriculumNodeRecord } from "../../lib/curriculum";
 import { useCurricula } from "../../state/curriculumStore";
 
@@ -405,6 +407,100 @@ function CurriculumPanel({ tutor, updateTutor }: PanelProps) {
   );
 }
 
+/** How a hypothesis status should read to the person it is about. */
+const HYPOTHESIS_STATUS_LABEL: Record<LearnerHypothesis["status"], string> = {
+  suspected: "Being checked",
+  supported: "Seen more than once",
+  resolved: "No longer applies",
+  disputed: "You disagreed",
+};
+
+/**
+ * What the tutor currently believes about the learner, and the button that
+ * lets them say no.
+ *
+ * Until this existed the structured learner model was invisible: claims about a
+ * person were used to route their instruction and there was no surface on which
+ * they could see, let alone contest, any of it. Two things make the difference
+ * between a learner model and a permanent record — the learner can read it, and
+ * the learner can reject an entry. A disputed hypothesis never enters prompt
+ * context again, and no later observation revives it.
+ *
+ * Resolved claims stay listed rather than disappearing, because seeing a
+ * misconception marked "no longer applies" is a piece of evidence about
+ * progress that a learner has earned and should get to keep.
+ */
+function HypothesesSection() {
+  const [hypotheses, setHypotheses] = useState<LearnerHypothesis[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      setHypotheses(await getHypotheses());
+    } catch {
+      setHypotheses([]);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { void refresh(); }, []);
+
+  const dispute = async (hypothesis: LearnerHypothesis) => {
+    const note = window.prompt(
+      `Tell the tutor why this is wrong (optional). It will stop using this and will not raise it again.\n\n"${hypothesis.statement}"`,
+      ""
+    );
+    // A null return is the learner cancelling the dialog, which is not the same
+    // as disputing with an empty note.
+    if (note === null) return;
+    await disputeHypothesis(hypothesis.hypothesisId, note);
+    await refresh();
+  };
+
+  return (
+    <>
+      <Subhead>What the tutor thinks · {hypotheses.length}</Subhead>
+      {loading ? (
+        <Empty text="Loading…" />
+      ) : hypotheses.length === 0 ? (
+        <Empty text="No standing hypotheses. The tutor has not formed a testable claim about you yet." />
+      ) : (
+        <div className="space-y-1.5">
+          {hypotheses.slice(0, 20).map((hypothesis) => (
+            <div key={hypothesis.hypothesisId} className="rounded-md border border-white/[0.07] p-2">
+              <div className="flex gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[9px] uppercase tracking-wide text-dim">
+                    {hypothesis.kind.replace(/_/g, " ")} · {HYPOTHESIS_STATUS_LABEL[hypothesis.status]} · {hypothesis.skillId}
+                  </div>
+                  <div className="mt-0.5 text-[10.5px] leading-relaxed text-mut">{hypothesis.statement}</div>
+                  <div className="mt-1 text-[9.5px] leading-relaxed text-dim">
+                    How it gets checked: {hypothesis.nextBestTest}
+                  </div>
+                  <div className="mt-1 text-[9.5px] leading-relaxed text-dim">
+                    {HYPOTHESIS_KIND_REMEDY[hypothesis.kind]}
+                  </div>
+                  {hypothesis.disputeNote ? (
+                    <div className="mt-1 text-[9.5px] italic leading-relaxed text-dim">
+                      You said: {hypothesis.disputeNote}
+                    </div>
+                  ) : null}
+                </div>
+                {hypothesis.learnerDisputed ? null : (
+                  <IconButton label="I disagree with this" onClick={() => void dispute(hypothesis)}>
+                    <X size={11} />
+                  </IconButton>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 function MemoryPanel({ tutor, updateTutor, onNotify }: PanelProps & { onNotify: (text: string) => void }) {
   const [entries, setEntries] = useState<LearnerModelEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -424,6 +520,7 @@ function MemoryPanel({ tutor, updateTutor, onNotify }: PanelProps & { onNotify: 
         <FieldGroup label="Minimum evidence"><Select value={String(memory.minimumEvidence)} onChange={(value) => patch({ minimumEvidence: Number(value) as 1 | 2 | 3 })} options={["1", "2", "3"]} /></FieldGroup>
         <FieldGroup label="Retention"><Select value={String(memory.retentionDays)} onChange={(value) => patch({ retentionDays: Number(value) as typeof memory.retentionDays })} options={["30", "90", "180", "365", "0"]} labels={{ "0": "Forever" }} /></FieldGroup>
       </div>
+      <HypothesesSection />
       <Subhead>Saved observations · {entries.length}</Subhead>
       {loading ? <Empty text="Loading learner-owned memory…" /> : entries.length === 0 ? <Empty text="No persistent observations saved." /> : (
         <div className="space-y-1.5">
