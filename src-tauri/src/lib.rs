@@ -92,7 +92,7 @@ const CUSTOM_MODEL_TIER_3: &str = "phatchau036/gpt-5.6-luna";     // Reasoning /
 /// automatically redirects the request to your CUSTOM_ENDPOINT_URL and rewrites
 /// the model IDs in the body, injecting the default API key natively in Rust.
 /// This prevents any custom endpoint details or keys from leaking into the compiled
-/// frontend JS package.
+/// frontend JS package. a
 #[tauri::command]
 async fn chat_completion(
     url: String,
