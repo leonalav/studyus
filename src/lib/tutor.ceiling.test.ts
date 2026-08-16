@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { enforceSupportCeiling, type BoardOp, type TutorTurn } from "./tutor";
+import { enforceLearnerAgency, enforceSupportCeiling, type BoardOp, type TutorTurn } from "./tutor";
+import type { BoardDoc } from "../data/boards";
 import type { WidgetIntent } from "./widgets/types";
 
 /**
@@ -195,5 +196,93 @@ describe("Support ceiling enforcement", () => {
     const loose = enforceSupportCeiling(turn([{ op: "place_widget", intent: hint([1, 3]) }]), 1);
     expect(strict.speech).not.toBe(loose.speech);
     expect(loose.speech).toContain("orientation");
+  });
+});
+
+/**
+ * The never-passive rule is right and its old unit was wrong.
+ *
+ * Demanding a fresh commitment on every single turn sounds like rigour and
+ * reads as harassment. A learner who asks a clarifying question halfway
+ * through a problem gets answered and immediately handed a second task, so the
+ * first is abandoned; do that four times and the board is a column of
+ * half-answered questions. The pressure also pushes the tutor toward filler —
+ * "and what do you think happens next?" — which teaches nothing and trains the
+ * learner that most prompts are noise worth skimming past.
+ *
+ * The obligation is unchanged. Only its unit moved, from the turn to the cycle.
+ */
+describe("One commitment per cycle", () => {
+  const openQuestion: BoardDoc = {
+    id: "b1",
+    title: "Chain rule",
+    subtitle: "",
+    domain: "math",
+    blocks: [{ id: "blk1", kind: "widget", intent: question }],
+  };
+
+  const answeredQuestion: BoardDoc = {
+    ...openQuestion,
+    blocks: [{ id: "blk1", kind: "widget", intent: question, state: { submitted: true } }],
+  };
+
+  const explanatoryTurn = turn([{ op: "write_text", text: "The outer function is the sine." }]);
+
+  it("nags a purely explanatory turn when nothing is outstanding", () => {
+    const result = enforceLearnerAgency(explanatoryTurn, answeredQuestion);
+    // With the previous task closed, an explanation that hands nothing back
+    // leaves the learner watching.
+    expect(result.speech).not.toBe(explanatoryTurn.speech);
+  });
+
+  it("lets an explanation stand while the learner is mid-task", () => {
+    const result = enforceLearnerAgency(explanatoryTurn, openQuestion);
+    // They asked something mid-problem. Answering it and letting them get back
+    // to work is the correct move, not a policy violation.
+    expect(result).toBe(explanatoryTurn);
+  });
+
+  it("still nags when there is no board at all", () => {
+    // No board means no evidence of an open commitment, and the safe default is
+    // to hand the work back.
+    expect(enforceLearnerAgency(explanatoryTurn).speech).not.toBe(explanatoryTurn.speech);
+  });
+
+  it("does not count a presentational widget as an open commitment", () => {
+    const board: BoardDoc = {
+      ...openQuestion,
+      blocks: [
+        { id: "blk1", kind: "widget", intent: { kind: "roadmap", id: "r", steps: [{ id: "s1", label: "Start" }] } },
+      ],
+    };
+    // Reading a roadmap is not owing an answer. Treating it as one would
+    // silently disable the never-passive rule for any board with a roadmap on
+    // it, which is most of them.
+    expect(enforceLearnerAgency(explanatoryTurn, board).speech).not.toBe(explanatoryTurn.speech);
+  });
+
+  it("finds an open commitment nested inside a row", () => {
+    const board: BoardDoc = {
+      ...openQuestion,
+      blocks: [
+        {
+          id: "row1",
+          kind: "row",
+          children: [{ id: "blk1", kind: "widget", intent: question }],
+        },
+      ],
+    };
+    expect(enforceLearnerAgency(explanatoryTurn, board)).toBe(explanatoryTurn);
+  });
+
+  it("never suppresses the check for a turn that already hands work back", () => {
+    const active = turn([{ op: "place_widget", intent: question }]);
+    expect(enforceLearnerAgency(active, openQuestion)).toBe(active);
+    expect(enforceLearnerAgency(active, answeredQuestion)).toBe(active);
+  });
+
+  it("leaves a pure-speech turn alone regardless of the board", () => {
+    const speechOnly = turn([], "Yes, exactly — the inside function is x squared.");
+    expect(enforceLearnerAgency(speechOnly, answeredQuestion)).toBe(speechOnly);
   });
 });

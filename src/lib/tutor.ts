@@ -518,17 +518,53 @@ const PASSIVE_TURN_NUDGE =
   "Before we go on — tell me what you already know about this, or ask me the first thing that looks unclear. I'll build the next step around your answer.";
 
 /**
- * Enforce the never-passive policy.
+ * Does the learner already owe an answer on the board?
+ *
+ * An actionable widget the learner has not submitted is an open commitment.
+ * While one is outstanding, the learner is not passive — they are mid-thought —
+ * and stacking a second demand on top of the first is not more engagement, it
+ * is interruption. It also produces the specific failure of a board where four
+ * half-answered questions sit in a column and none of them gets finished.
+ */
+export function boardHasOpenCommitment(board: BoardDoc | undefined): boolean {
+  if (!board) return false;
+
+  const walk = (blocks: BoardDoc["blocks"]): boolean =>
+    blocks.some((block) => {
+      if (block.kind === "row") return walk(block.children);
+      if (block.kind !== "widget") return false;
+      if (!isActionableWidget(block.intent)) return false;
+      return block.state?.submitted !== true;
+    });
+
+  return walk(board.blocks);
+}
+
+/**
+ * Enforce the never-passive policy, once per instructional cycle.
  *
  * The prompt asks for this, but a prompt is guidance and this is policy, so it
  * is also checked at runtime. We do NOT fabricate a widget: the agent chooses
  * the pedagogical move, and a synthesized question would be content the tutor
  * never wrote. Instead the turn is made to hand the work back in speech, which
  * is always honest and always answerable.
+ *
+ * The unit is the CYCLE, not the turn. Demanding a fresh commitment on every
+ * single turn sounds like rigour and reads as harassment: a learner who asked a
+ * clarifying question halfway through a problem gets answered and immediately
+ * handed a second task, so the first one is abandoned. Worse, the pressure
+ * pushes the tutor toward filler questions — "and what do you think happens
+ * next?" — which teach nothing and train the learner to skim past prompts
+ * because most of them turn out to be noise.
+ *
+ * So when the board already carries an unanswered commitment, an explanatory
+ * turn is allowed to be exactly that. The obligation is still enforced; it is
+ * just discharged by the question that is already waiting.
  */
-export function enforceLearnerAgency(turn: TutorTurn): TutorTurn {
+export function enforceLearnerAgency(turn: TutorTurn, board?: BoardDoc): TutorTurn {
   if (turn.boardOps.length === 0) return turn;
   if (turnLeavesLearnerSomethingToDo(turn)) return turn;
+  if (boardHasOpenCommitment(board)) return turn;
   const speech = turn.speech.trim();
   return { ...turn, speech: speech ? `${speech} ${PASSIVE_TURN_NUDGE}` : PASSIVE_TURN_NUDGE };
 }
@@ -2148,7 +2184,8 @@ export function buildTutorUserPrompt(params: {
   parts.push(
     `GLOBAL BEHAVIOR: The chalkboard is the primary teaching surface and interactive lesson. Do not teach, explain the lesson, or ask instructional/content questions in speech. Put teaching steps, Socratic questions, checks for understanding, examples, definitions, and practice prompts onto the chalkboard using board_ops. Speech must stay to a brief acknowledgement or transition (for example, “I put that on the board”). Only use speech for a direct learner clarification when no board content is needed. ` +
     `First decide whether changing the board is pedagogically necessary for this exact turn. Greetings, thanks, acknowledgements, social chat, navigation questions, and replies that are already clear in short speech MUST return board_ops exactly []. Do not create an equation, graph, diagram, chart, text block, callout, widget, or thread merely because a chalkboard is available. ` +
-    `THE LEARNER IS NEVER PASSIVE: every turn that teaches must leave the learner holding a task. If your board_ops add only presentational content (roadmap, concept card, text, bullets, diagram, worked example), you have explained AT the learner and stopped — pair it with the widget that hands the work back. Placing a roadmap alone is a forbidden turn: place it together with the question, scratchpad or reveal that opens its first step. Never close a turn with "let me know when you're ready" or "does that make sense?"; ask the question that starts the work instead. ` +
+    `THE LEARNER IS NEVER PASSIVE: the learner must always be holding a task. If your board_ops add only presentational content (roadmap, concept card, text, bullets, diagram, worked example) and nothing on the board is already awaiting their answer, you have explained AT the learner and stopped — pair it with the widget that hands the work back. Placing a roadmap alone is a forbidden turn: place it together with the question, scratchpad or reveal that opens its first step. Never close a turn with "let me know when you're ready" or "does that make sense?"; ask the question that starts the work instead. ` +
+    `ONE COMMITMENT PER CYCLE, NOT PER TURN: when an unanswered question, scratchpad or prediction is already on the board, do not add another. Answer what was asked, extend the explanation, and let the learner finish the task they are already in the middle of. A second demand stacked on an open one abandons the first. Never manufacture a filler question to satisfy the rule — a prompt attached to nothing teaches the learner that prompts can be skimmed past. ` +
     `When teaching IS happening, the study widgets are your teaching vocabulary, not a set of optional features. Prefer the widget that matches your pedagogical move over plain text: a check for understanding is a question widget, not a sentence; a worked example is an example widget with a reason on every step; a learner error is a mistake_check that diagnoses it; the learner's turn to work is a scratchpad. A turn that teaches with paragraphs where a widget exists for the move is a worse turn. ` +
     `Use a board operation only when the learner explicitly requests a board rendering/edit or when a specific visual/formal representation materially improves understanding and cannot be conveyed as clearly in the spoken response alone. If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
     `For every substantive explanation, layer simple plain-language intuition first, then precise terminology, assumptions, rigorous reasoning, and meaningful equations or worked steps; define jargon and connect formal details back to the intuitive idea. ` +
@@ -2607,7 +2644,8 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
         req.learnerMessage
       ),
       policyBrief?.support.granted ?? 3
-    )
+    ),
+    req.board
   );
 
   // Any mastery card in this turn is rewritten from the ledger before it can
