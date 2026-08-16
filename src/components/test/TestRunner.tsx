@@ -16,6 +16,7 @@ import {
   AlertCircle,
   AlertTriangle,
   Lightbulb,
+  LoaderCircle,
 } from "lucide-react";
 import {
   getAttemptForTaking,
@@ -69,6 +70,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   const [answers, setAnswers] = useState<Record<string, { mcq?: string; numeric?: string; proof?: string }>>({});
   const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">("saved");
   const [confirmSubmitOpen, setConfirmSubmitOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionResult, setSubmissionResult] = useState<AttemptResultDTO | null>(null);
   const [hintedItems, setHintedItems] = useState<Set<string>>(new Set());
   const questionFlagsRef = useRef<Record<string, string[]>>({});
@@ -78,6 +80,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     ordinal: number;
   }>());
   const saveTimeoutRef = useRef<number | null>(null);
+  const submittingRef = useRef(false);
   const examScrollRef = useRef<HTMLDivElement>(null);
   const [scrollAvailability, setScrollAvailability] = useState({ up: false, down: false });
   const [time, setTime] = useState(0);
@@ -89,6 +92,8 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     setIndex(0);
     setAnswers({});
     setSubmissionResult(null);
+    setIsSubmitting(false);
+    submittingRef.current = false;
     setHintedItems(new Set());
     questionFlagsRef.current = {};
     pendingDraftsRef.current.clear();
@@ -361,14 +366,20 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   };
 
   const requestSubmit = () => {
+    if (submittingRef.current) return;
     if (answered < total) {
       setConfirmSubmitOpen(true);
     } else {
-      executeSubmit();
+      void executeSubmit();
     }
   };
 
   const executeSubmit = async () => {
+    // The ref closes the tiny gap before React paints the disabled state, so a
+    // rapid double-click can never create two grading requests.
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setIsSubmitting(true);
     setConfirmSubmitOpen(false);
     try {
       // Scoring must observe the latest keystroke, even when Submit is pressed
@@ -383,6 +394,9 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
       );
     } catch (err) {
       onNotify(err instanceof Error ? err.message : "Submission error. Attempt recorded as retryable.");
+    } finally {
+      submittingRef.current = false;
+      setIsSubmitting(false);
     }
   };
 
@@ -396,6 +410,8 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
       setIndex(0);
       setAnswers({});
       setSubmissionResult(null);
+      setIsSubmitting(false);
+      submittingRef.current = false;
       setHintedItems(new Set());
       questionFlagsRef.current = {};
       setTime(0);
@@ -477,12 +493,7 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
           <span className="font-mono text-[12px] text-dim">
             {String(Math.floor(time / 60)).padStart(2, "0")}:{String(time % 60).padStart(2, "0")}
           </span>
-          <button
-            onClick={requestSubmit}
-            className="rounded-md bg-accent px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors hover:bg-accent-deep"
-          >
-            Submit exam
-          </button>
+          <SubmitExamButton submitting={isSubmitting} onSubmit={requestSubmit} />
         </div>
       </div>
 
@@ -613,8 +624,9 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
                 Keep working
               </button>
               <button
-                onClick={executeSubmit}
-                className="rounded-md bg-accent px-3.5 py-1.5 text-[12.5px] font-medium text-white hover:bg-accent-deep"
+                onClick={() => void executeSubmit()}
+                disabled={isSubmitting}
+                className="rounded-md bg-accent px-3.5 py-1.5 text-[12.5px] font-medium text-white hover:bg-accent-deep disabled:cursor-wait disabled:bg-white/[0.12] disabled:text-white/45"
               >
                 Submit anyway
               </button>
@@ -651,6 +663,33 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         </button>
       </div>
     </>
+  );
+}
+
+export function SubmitExamButton({
+  submitting,
+  onSubmit,
+}: {
+  submitting: boolean;
+  onSubmit: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSubmit}
+      disabled={submitting}
+      aria-busy={submitting}
+      className={`flex min-w-[112px] items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12.5px] font-medium transition-colors ${
+        submitting
+          ? "cursor-wait bg-white/[0.12] text-white/45"
+          : "bg-accent text-white hover:bg-accent-deep"
+      }`}
+    >
+      {submitting && (
+        <LoaderCircle size={13} aria-hidden="true" className="animate-spin motion-reduce:animate-none" />
+      )}
+      {submitting ? "Submitting..." : "Submit exam"}
+    </button>
   );
 }
 

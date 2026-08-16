@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { AssessmentFigure, ASSESSMENT_FIGURE_CONTAINER_CLASS } from "./AssessmentFigure";
-import { formatAttemptDuration, QuestionPrompt, SubmittedView } from "./TestRunner";
+import { formatAttemptDuration, QuestionPrompt, SubmitExamButton, SubmittedView } from "./TestRunner";
 
 vi.mock("../board/VisualizationSurface", () => ({
   VisualizationSurface: ({ intent, readOnly }: { intent: { type: string }; readOnly?: boolean }) => (
@@ -59,6 +59,19 @@ describe("AssessmentFigure", () => {
     expect(formatAttemptDuration(125)).toBe("02:05");
     expect(formatAttemptDuration(3725)).toBe("01:02:05");
     expect(formatAttemptDuration(null)).toBe("—");
+  });
+
+  it("greys and disables the submit button while showing its loading wheel", () => {
+    const idle = renderToStaticMarkup(<SubmitExamButton submitting={false} onSubmit={() => undefined} />);
+    const submitting = renderToStaticMarkup(<SubmitExamButton submitting onSubmit={() => undefined} />);
+
+    expect(idle).toContain("Submit exam");
+    expect(idle).not.toContain("disabled");
+    expect(submitting).toContain("Submitting...");
+    expect(submitting).toContain("disabled");
+    expect(submitting).toContain('aria-busy="true"');
+    expect(submitting).toContain("animate-spin");
+    expect(submitting).toContain("bg-white/[0.12]");
   });
 
   it("keeps the completed receipt scrollable with a persistent exit and human grading state", () => {
