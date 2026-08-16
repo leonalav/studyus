@@ -64,8 +64,13 @@ import { evaluateStageExit } from "./learning/predicates";
 import { buildPolicyBrief, buildSessionOpeningBrief, type PolicyBrief } from "./learning/session";
 import { groundMasteryCards } from "./learning/masteryCard";
 import { recordTutorObservation } from "./learning/bridge";
-import { getSkillEvidence, DEFAULT_LEARNER_ID } from "./learning/store";
-import type { LearningEvidenceEvent } from "./learning/types";
+import { getSkillEvidence, upsertHypothesis, DEFAULT_LEARNER_ID } from "./learning/store";
+import {
+  HYPOTHESIS_KINDS,
+  HYPOTHESIS_KIND_REMEDY,
+  type HypothesisKind,
+  type LearningEvidenceEvent,
+} from "./learning/types";
 import {
   buildTutorPreferenceReminder,
   loadPreferences,
@@ -148,11 +153,34 @@ export type BoardOp =
       initialBlocks: BoardBlockSpec[];
     };
 
+/**
+ * One structured, testable claim the tutor makes about the learner.
+ *
+ * This replaces free-text learner-model statements as the thing that actually
+ * drives instruction. The two added fields are what make it usable:
+ *
+ *  - `kind` is instructionally decisive. "They keep getting these wrong" tells
+ *    a planner nothing; a misconception needs a contrast case, a missing
+ *    prerequisite needs a drop to the prerequisite, a careless error needs
+ *    neither and re-teaching it is insulting.
+ *  - `nextBestTest` is what keeps the model falsifiable. A claim about a
+ *    learner with no stated way to disconfirm it is a label, and labels
+ *    accumulate into a permanent record nothing can remove.
+ */
+export interface TutorHypothesisClaim {
+  kind: HypothesisKind;
+  statement: string;
+  nextBestTest: string;
+}
+
 export interface TutorDiagnosis {
   misconceptions: string[];
   weakCriteria: string[];
   hintDependence: "none" | "low" | "medium" | "high";
   calibration: "under" | "over" | "accurate";
+  /** Structured, skill-linked hypotheses. Optional: a turn where the tutor has
+   *  nothing testable to claim should claim nothing. */
+  hypotheses?: TutorHypothesisClaim[];
 }
 
 export interface TutorTurn {
@@ -711,12 +739,135 @@ export async function rememberTutorDiagnosis(
   }
 }
 
+/**
+ * Persist the tutor's structured claims as revisable learner-model hypotheses.
+ *
+ * This is the write side of the structured learner model. What it deliberately
+ * does NOT do is let the model declare a claim confirmed: `upsertHypothesis`
+ * enters everything as `suspected` and promotes to `supported` only after two
+ * independent observations. A model that could assert `supported` in one turn
+ * would be able to talk itself into a diagnosis, and the policy engine routes
+ * hard off supported claims — a self-confirming misconception would send the
+ * learner into contrast cases for a belief they never held.
+ *
+ * A learner-disputed claim is never re-created, because `upsertHypothesis`
+ * matches only undisputed rows: once the learner has rejected a claim, the
+ * tutor repeating it does not bring it back.
+ *
+ * Best-effort by design. A hypothesis that fails to persist costs the next turn
+ * some context; a hypothesis that throws would cost the learner their reply.
+ */
+export async function recordTutorHypotheses(params: {
+  learnerId: string;
+  skillId: string;
+  diagnosis: TutorDiagnosis | undefined;
+  preferences: TutorPreferences;
+  evidenceIds: string[];
+}): Promise<void> {
+  const claims = params.diagnosis?.hypotheses ?? [];
+  if (claims.length === 0) return;
+  // The learner model is memory. If the learner turned memory off, or asked not
+  // to be learned from, no claim about them is retained — including this one.
+  if (params.preferences.memory.mode === "off" || !params.preferences.memory.learnFromSessions) {
+    return;
+  }
+
+  for (const claim of claims) {
+    // Honour the same per-category consent the free-text memory honours: a
+    // learner who opted out of misconception tracking has not opted into a
+    // structured version of the same record.
+    if (claim.kind === "misconception" && !params.preferences.memory.rememberMisconceptions) continue;
+    if (
+      (claim.kind === "low_confidence" || claim.kind === "overconfidence") &&
+      !params.preferences.memory.rememberCalibration
+    ) {
+      continue;
+    }
+    if (
+      (claim.kind === "missing_prerequisite" || claim.kind === "procedural_slip") &&
+      !params.preferences.memory.rememberWeakAreas
+    ) {
+      continue;
+    }
+
+    try {
+      await upsertHypothesis({
+        learnerId: params.learnerId,
+        skillId: params.skillId,
+        kind: claim.kind,
+        statement: claim.statement,
+        nextBestTest: claim.nextBestTest,
+        evidenceIds: params.evidenceIds,
+      });
+    } catch (error) {
+      console.warn(`[tutor] could not record hypothesis (${claim.kind})`, error);
+    }
+  }
+}
+
 /* ─────────────────────────────────────────────────────────────
    SCHEMA VALIDATION
    ───────────────────────────────────────────────────────────── */
 
 const HINT_DEPENDENCE = ["none", "low", "medium", "high"] as const;
 const CALIBRATION = ["under", "over", "accurate"] as const;
+
+/** Structured hypotheses are capped so one turn cannot flood the learner model. */
+const MAX_TUTOR_HYPOTHESES_PER_TURN = 3;
+
+/**
+ * Validate the tutor's structured claims about the learner.
+ *
+ * `next_best_test` is enforced as hard as the claim itself. This is the single
+ * rule that stops the learner model from filling with unfalsifiable labels, and
+ * it is enforced in code rather than requested in the prompt because a rule the
+ * model is merely asked to follow is a rule that holds until the context gets
+ * long.
+ *
+ * Returns `null` only when the field is present but not an array — the shape is
+ * wrong and the turn should be retried. An absent field yields an empty list,
+ * because having nothing testable to say is a legitimate turn.
+ */
+function validateHypothesisClaims(
+  value: unknown,
+  path: string,
+  errors: string[]
+): TutorHypothesisClaim[] | null {
+  if (value === undefined || value === null) return [];
+  const arr = asArray(value, path, errors);
+  if (!arr) return null;
+
+  if (arr.length > MAX_TUTOR_HYPOTHESES_PER_TURN) {
+    errors.push(
+      `${path} has ${arr.length} entries; at most ${MAX_TUTOR_HYPOTHESES_PER_TURN} may be claimed in one turn. ` +
+        `A turn that proposes more explanations than it gathered observations is guessing.`
+    );
+  }
+
+  const claims: TutorHypothesisClaim[] = [];
+  arr.forEach((entry, i) => {
+    const rec = asRecord(entry, `${path}[${i}]`, errors);
+    if (!rec) return;
+    const kind = asEnum(rec.kind, HYPOTHESIS_KINDS, `${path}[${i}].kind`, errors);
+    const statement = asNonEmptyString(rec.statement, `${path}[${i}].statement`, errors);
+    const nextBestTest = asNonEmptyString(
+      rec.next_best_test ?? rec.nextBestTest,
+      `${path}[${i}].next_best_test`,
+      errors
+    );
+    if (rec.next_best_test === undefined && rec.nextBestTest === undefined) {
+      errors.push(
+        `${path}[${i}].next_best_test is required: state the observation that would confirm or refute this claim. ` +
+          `A claim about a learner that cannot be disproved is not recorded.`
+      );
+      return;
+    }
+    if (kind && statement && nextBestTest) {
+      claims.push({ kind, statement, nextBestTest });
+    }
+  });
+  return claims;
+}
 
 function validateBoardBlockSpec(value: unknown, path: string, errors: string[]): BoardBlockSpec | null {
   const rec = asRecord(value, path, errors);
@@ -1144,8 +1295,15 @@ export function validateTutorPayload(
       const weakCriteria = asStringList(diag.weak_criteria, "diagnosis.weak_criteria", errors);
       const hintDependence = asEnum(diag.hint_dependence, HINT_DEPENDENCE, "diagnosis.hint_dependence", errors);
       const calibration = asEnum(diag.calibration, CALIBRATION, "diagnosis.calibration", errors);
-      if (misconceptions && weakCriteria && hintDependence && calibration) {
-        diagnosis = { misconceptions, weakCriteria, hintDependence, calibration };
+      const hypotheses = validateHypothesisClaims(diag.hypotheses, "diagnosis.hypotheses", errors);
+      if (misconceptions && weakCriteria && hintDependence && calibration && hypotheses !== null) {
+        diagnosis = {
+          misconceptions,
+          weakCriteria,
+          hintDependence,
+          calibration,
+          ...(hypotheses.length ? { hypotheses } : {}),
+        };
       }
     }
   }
@@ -1886,6 +2044,9 @@ export function buildTutorUserPrompt(params: {
     `Use a board operation only when the learner explicitly requests a board rendering/edit or when a specific visual/formal representation materially improves understanding and cannot be conveyed as clearly in the spoken response alone. If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
     `For every substantive explanation, layer simple plain-language intuition first, then precise terminology, assumptions, rigorous reasoning, and meaningful equations or worked steps; define jargon and connect formal details back to the intuitive idea. ` +
     `When a board representation is necessary, choose the smallest relevant set of equations, function graphs, data charts, or domain-faithful diagrams/scientific figures. Never add decorative, redundant, irrelevant, or semantically misleading visuals, and obey the enabled tool permissions. ` +
+    `DIAGNOSIS IS A HYPOTHESIS, NOT A LABEL. When you have an actual explanation for what you observed, put it in diagnosis.hypotheses with the kind that names the cause, because the cause determines the remedy: ` +
+    HYPOTHESIS_KINDS.map((kind) => `${kind} — ${HYPOTHESIS_KIND_REMEDY[kind]}`).join(" ") +
+    ` Every hypothesis MUST carry next_best_test: the specific observation that would confirm or refute it. A claim you cannot say how to test will be rejected. Propose a hypothesis only when you have seen something that supports it; a turn with no evidence for a cause should have no hypotheses. You do not decide whether a hypothesis is confirmed — repeated independent observations promote it, and the learner's own successful unaided work retires it. ` +
     `Always include speech, board_ops, and evidence_refs. Use an empty array when there are no board operations. ` +
     (params.cards.length === 0
       ? `No evidence handles were supplied, so evidence_refs MUST be exactly [].`
@@ -1899,7 +2060,7 @@ export function buildTutorUserPrompt(params: {
       `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "place_widget" | "update_widget" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text" | "redraw_block" | "spawn_thread", ...fields }, ... ],\n` +
       `  "stage": "encounter"|"understand"|"construct"|"apply"|"transfer"|"master" /* the mastery stage you are teaching in this turn */,\n` +
       `  "stage_advance": { "ready": boolean, "evidence": "<what the learner did that satisfies this stage's exit condition>" } /* optional; ready:true REQUIRES evidence */,\n` +
-      `  "diagnosis": { "misconceptions": [string], "weak_criteria": [string], "hint_dependence": "none"|"low"|"medium"|"high", "calibration": "under"|"over"|"accurate" } /* optional */,\n` +
+      `  "diagnosis": { "misconceptions": [string], "weak_criteria": [string], "hint_dependence": "none"|"low"|"medium"|"high", "calibration": "under"|"over"|"accurate", "hypotheses": [ { "kind": ${HYPOTHESIS_KINDS.map((kind) => `"${kind}"`).join("|")}, "statement": "<the claim, stated so it could be wrong>", "next_best_test": "<the specific observation that would confirm or refute it>" } ] } /* optional; at most ${MAX_TUTOR_HYPOTHESES_PER_TURN} hypotheses */,\n` +
       `  "evidence_refs": [ "<one of the supplied E-handles>" ],\n` +
       `  "requested_level": <0..${MAX_HINT_LEVEL}> /* optional: request a higher unlocked hint level when the learner is stuck */\n` +
       `}\n\n` +
@@ -2369,9 +2530,10 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // concerned, and a ledger that records unseen instruction is worse than no
   // ledger at all.
   let ledgerEvidence: LearningEvidenceEvent[] = [];
+  let turnEvidenceId: string | undefined;
   try {
     if (policyBrief && !awaitingFirstAttempt && policyBrief.attempt.madeAttempt) {
-      await recordTutorObservation({
+      const observation = await recordTutorObservation({
         learnerId,
         sessionId: req.sessionId,
         skillIds: [skillId],
@@ -2388,11 +2550,25 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
         contextVariant: policyBrief.move.contextVariant,
         evaluatorConfidence: result.value.diagnosis ? 70 : 50,
       });
+      turnEvidenceId = observation.evidenceId;
     }
     ledgerEvidence = await getSkillEvidence(skillId, learnerId);
   } catch (error) {
     console.warn("[tutor] could not record turn evidence", error);
   }
+
+  // Hypotheses are written after the evidence they rest on, so each claim
+  // carries the id of the observation that prompted it. A claim with no
+  // evidence attached cannot later be shown to the learner as "here is why I
+  // think this", and an unexplainable claim about a learner is one they have no
+  // fair way to contest.
+  await recordTutorHypotheses({
+    learnerId,
+    skillId,
+    diagnosis: result.value.diagnosis,
+    preferences: studio,
+    evidenceIds: turnEvidenceId ? [turnEvidenceId] : [],
+  });
 
   // Stage movement is resolved from the evidence ledger, never from a bare
   // assertion: forward motion must satisfy the stage's predicate and advances

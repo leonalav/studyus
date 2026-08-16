@@ -155,6 +155,7 @@ export async function recordEvidence(input: LearningEvidenceInput): Promise<Lear
     await rebuildSkillState(event.learnerId, skillId);
   }
   await applyReviewConsequences(event);
+  await applyHypothesisConsequences(event);
 
   saveDbSync();
   return event;
@@ -577,6 +578,77 @@ async function applyReviewConsequences(event: LearningEvidenceEvent): Promise<vo
           intervalIndex: state.successfulRetrievals,
           retrievalType: state.stage === "master" ? "free_recall" : "cued_recall",
         });
+      }
+    }
+  }
+}
+
+/**
+ * Kinds of hypothesis that an unaided success genuinely refutes.
+ *
+ * Being deliberate about this list is the whole point. A clean independent
+ * answer really does count against "they believe the wrong rule", "they are
+ * missing the prerequisite", "they cannot execute the procedure", "the wording
+ * is the obstacle", and "they can do it but do not believe they can". It counts
+ * against none of the others:
+ *
+ *  - **overconfidence** is not refuted by success; success is what an
+ *    overconfident learner expects, and their calibration is the open question.
+ *  - **careless_error** describes a rate, not a capability. One clean answer is
+ *    exactly what a careless learner produces most of the time.
+ *  - **disengagement** is about effort, not correctness, and is handled below
+ *    on its own terms.
+ */
+const REFUTED_BY_UNAIDED_SUCCESS: ReadonlySet<LearnerHypothesis["kind"]> = new Set([
+  "misconception",
+  "missing_prerequisite",
+  "procedural_slip",
+  "language_issue",
+  "low_confidence",
+]);
+
+/** A response long enough to represent real effort rather than a shrug. */
+const SUBSTANTIVE_RESPONSE_CHARS = 25;
+
+/**
+ * Let new evidence count against standing hypotheses.
+ *
+ * This is the path by which the learner model gets SMALLER, and it matters more
+ * than the path by which it grows. A model that only ever accumulates claims
+ * becomes a permanent record of a learner's worst day: months later the tutor
+ * is still routing around a misconception the learner fixed in one session,
+ * teaching the person they used to be. Automatic contradiction means the
+ * learner does not have to argue their way out of a label — demonstrating the
+ * skill is the argument.
+ *
+ * The learner's own dispute is respected absolutely: a disputed hypothesis is
+ * left exactly as it is, because re-touching it would be the system relitigating
+ * a claim the learner has already rejected.
+ */
+async function applyHypothesisConsequences(event: LearningEvidenceEvent): Promise<void> {
+  const unaidedSuccess =
+    event.correctness === "correct" && event.supportLevel === 0 && event.hintExposure === 0;
+  const substantive =
+    event.correctness !== "blank" && event.response.trim().length >= SUBSTANTIVE_RESPONSE_CHARS;
+  if (!unaidedSuccess && !substantive) return;
+
+  for (const skillId of event.skillIds) {
+    const open = (await getHypotheses(event.learnerId, skillId)).filter(
+      (hypothesis) =>
+        !hypothesis.learnerDisputed &&
+        (hypothesis.status === "suspected" || hypothesis.status === "supported")
+    );
+
+    for (const hypothesis of open) {
+      if (unaidedSuccess && REFUTED_BY_UNAIDED_SUCCESS.has(hypothesis.kind)) {
+        await contradictHypothesis(hypothesis.hypothesisId, event.evidenceId);
+        continue;
+      }
+      // Disengagement is a claim about effort. Real work refutes it whether or
+      // not the work was right — and treating a wrong but serious attempt as
+      // continued disengagement is how a struggling learner gets written off.
+      if (substantive && hypothesis.kind === "disengagement") {
+        await contradictHypothesis(hypothesis.hypothesisId, event.evidenceId);
       }
     }
   }

@@ -211,32 +211,58 @@ export async function recordAssessmentEvidence(params: {
   itemId: string;
   taskFamily: string;
   response: string;
+  /** `true` correct, `false` incorrect, `undefined` not machine-checkable. */
   correct: boolean | undefined;
+  /** Set for a partially credited rubric item, which is neither pass nor fail. */
+  correctness?: Correctness;
   /** Assessment items are unaided by definition unless stated otherwise. */
   supportLevel?: SupportLevel;
+  /**
+   * Hint levels the learner actually opened during the item.
+   *
+   * Defaults to the support level rather than to zero. An assessment that
+   * offered help and does not report whether it was taken must not be allowed
+   * to mint independence evidence by silence.
+   */
+  hintExposure?: number;
+  /** Rubric criteria this response was marked against, for auditability. */
+  rubricCriterionIds?: string[];
   responseTimeMs?: number;
   selfRatedConfidence?: number;
   /** True for a delayed/spaced assessment rather than an immediate check. */
   delayed?: boolean;
   evidenceType?: EvidenceType;
+  contextVariant?: LearningActivityContract["contextVariant"];
+  /**
+   * How much the grader trusts its own verdict, 0–100.
+   *
+   * A key-matched numeric or MCQ item is certain and defaults to 100. A rubric
+   * item marked by the evaluator model is not, and passing its own confidence
+   * through is what stops an uncertain rubric judgement from moving the
+   * learner's numbers as hard as a deterministic mark does.
+   */
+  evaluatorConfidence?: number;
 }): Promise<LearningEvidenceEvent> {
   return recordEvidence({
     learnerId: params.learnerId,
     skillIds: params.skillIds,
     taskId: params.itemId,
     taskFamily: params.taskFamily,
-    contextVariant: "same",
+    contextVariant: params.contextVariant ?? "same",
     sessionId: params.sessionId,
     evidenceType: params.evidenceType ?? (params.delayed ? "retrieval" : "procedure"),
     response: params.response,
     correctness:
-      params.correct === true ? "correct" : params.correct === false ? "incorrect" : "unknown",
-    rubricCriterionIds: [],
+      params.correctness ??
+      (params.correct === true ? "correct" : params.correct === false ? "incorrect" : "unknown"),
+    rubricCriterionIds: params.rubricCriterionIds ?? [],
     supportLevel: params.supportLevel ?? 0,
-    hintExposure: 0,
+    hintExposure: params.hintExposure ?? params.supportLevel ?? 0,
     responseTimeMs: params.responseTimeMs,
     selfRatedConfidence: params.selfRatedConfidence,
-    evaluatorConfidence: params.correct === undefined ? undefined : 100,
+    evaluatorConfidence:
+      params.evaluatorConfidence ??
+      (params.correct === undefined && params.correctness === undefined ? undefined : 100),
     delayed: params.delayed ?? false,
     source: "assessment",
   });
