@@ -66,6 +66,7 @@ import {
   buildPolicyBrief,
   buildSessionOpeningBrief,
   recordMoveActivity,
+  routeTaskFamily,
   type PolicyBrief,
 } from "./learning/session";
 import { groundMasteryCards } from "./learning/masteryCard";
@@ -2703,7 +2704,9 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
         // come due again next session, and the learner would be asked the same
         // question forever while their answers piled up out of the scheduler's
         // sight.
-        taskFamily: policyBrief.move.taskFamily ?? `${skillId}:${policyBrief.move.route}`,
+        taskFamily:
+          policyBrief.move.taskFamily ??
+          routeTaskFamily(skillId, policyBrief.move.route, loadedHistory.length),
         evidenceType: policyBrief.move.requiredEvidence[0] ?? "explanation",
         response: req.learnerMessage,
         correctness: correctnessFromDiagnosis(result.value),

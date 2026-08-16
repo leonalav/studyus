@@ -540,13 +540,38 @@ async function applyReviewConsequences(event: LearningEvidenceEvent): Promise<vo
   const succeeded = event.correctness === "correct" || event.correctness === "partial";
 
   for (const skillId of event.skillIds) {
-    if (event.evidenceType === "retrieval") {
+    // Only a DEFINITE verdict settles a review. A retrieval whose correctness
+    // is unknown or blank is not a failed retrieval — it is an unmarked one,
+    // and the two must not be conflated.
+    //
+    // This matters because the most common retrieval in the product is
+    // conversational, and a conversation cannot be graded: the tutor reports
+    // "unknown" for anything it did not positively identify as wrong. Settling
+    // on `correctness === "correct"` would therefore read every ordinary
+    // spoken review as a failure, mark the skill lapsed, and reset the spacing
+    // interval to zero. The learner would answer a review correctly, in
+    // words, and be punished for it — their intervals collapsing toward daily
+    // while the ledger recorded a competence they never lost.
+    //
+    // Leaving the review open is the honest outcome: the obligation has not
+    // been discharged, because nothing was actually measured. It comes due
+    // again and gets a markable task next time.
+    const settles =
+      event.correctness === "correct" ||
+      event.correctness === "partial" ||
+      event.correctness === "incorrect";
+
+    if (event.evidenceType === "retrieval" && settles) {
       const open = await getOpenReviews(event.learnerId);
       const match = open.find(
         (task) => task.skillId === skillId && task.taskFamily === event.taskFamily
       );
       if (match) {
-        await completeReview(match.reviewId, event.correctness === "correct");
+        // Partial recall is a pass for scheduling purposes: the trace was
+        // there and needed only prompting, which is what the next interval is
+        // meant to test. Treating it as a lapse would reset a learner who is
+        // remembering most of it back to day one.
+        await completeReview(match.reviewId, event.correctness !== "incorrect");
         continue;
       }
     }

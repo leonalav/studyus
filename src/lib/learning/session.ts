@@ -44,6 +44,7 @@ import {
   type ReviewTask,
   type SkillNode,
   type SkillState,
+  type LearningRoute,
 } from "./types";
 import { getSkillNodes, recordActivityContract } from "./store";
 
@@ -293,6 +294,20 @@ export async function buildSessionOpeningBrief(
  * should produce evidence with no contract rather than evidence with a
  * contract nothing recorded.
  */
+/**
+ * The task family for a move that carries no obligation family of its own.
+ *
+ * Scoped to the turn that posed it, because two different problems posed on
+ * two different turns are two families, not one.
+ */
+export function routeTaskFamily(
+  skillId: string,
+  route: LearningRoute,
+  turnOrdinal: number
+): string {
+  return `${skillId}:${route}#${turnOrdinal}`;
+}
+
 export async function recordMoveActivity(params: {
   learnerId: string;
   sessionId: string;
@@ -307,7 +322,21 @@ export async function recordMoveActivity(params: {
     stage: move.stage,
     mode: move.mode,
     route: move.route,
-    taskFamily: move.taskFamily ?? `${params.skillId}:${move.route}`,
+    // A route name is not a task family. Every independent-practice turn on a
+    // skill would otherwise be filed under the single family
+    // "<skill>:independent_practice", and the stage predicates count DISTINCT
+    // families: a learner could solve five different problems perfectly and
+    // unaided and the Apply gate would still read "have 0", because all five
+    // collapsed into one family. The gate would be unreachable through the
+    // board no matter how well anyone did.
+    //
+    // So when the move carries no obligation family of its own, the family is
+    // scoped to the activity that posed it — each turn poses a different
+    // problem, so each is its own family. When the move DOES carry a family it
+    // is used verbatim: that value is an obligation (a due review or an owed
+    // reconstruction) and reviews are settled by exact (skill, taskFamily)
+    // match, so appending anything here would leave the debt uncleared forever.
+    taskFamily: move.taskFamily ?? routeTaskFamily(params.skillId, move.route, params.turnOrdinal),
     contextVariant: move.contextVariant,
     supportCeiling: move.supportCeiling,
     expectedEvidence: move.requiredEvidence,

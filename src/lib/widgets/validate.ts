@@ -829,7 +829,10 @@ export function gradeAnswerableWidget(
 ): boolean | undefined {
   if (intent.format === "multiple_choice") {
     if (!state.selectedOptionId) return undefined;
-    const option = intent.options?.find((candidate) => candidate.id === state.selectedOptionId);
+    // An option set with nothing marked correct carries no key either; scoring
+    // the learner's pick against it would report a confident "wrong".
+    if (!intent.options?.some((candidate) => candidate.correct === true)) return undefined;
+    const option = intent.options.find((candidate) => candidate.id === state.selectedOptionId);
     return option ? option.correct === true : undefined;
   }
 
@@ -837,9 +840,17 @@ export function gradeAnswerableWidget(
   if (!response) return undefined;
 
   if (intent.format === "short_answer") {
+    // No answer key means UNGRADEABLE, not wrong. `[].some(...)` is false, so
+    // returning it directly would score every keyless short answer as
+    // incorrect — with full evaluator confidence, because a definite boolean
+    // reads as a definite verdict downstream. An open-ended prompt the tutor
+    // never keyed would mark the learner wrong for answering it well, drive
+    // their skill state down, and manufacture the failure streak that routes
+    // them into prerequisite repair they do not need.
+    if (!intent.acceptedAnswers?.length) return undefined;
     const normalize = (input: string) => input.toLowerCase().replace(/\s+/g, " ").replace(/[.,;:!?]+$/, "").trim();
     const target = normalize(response);
-    return (intent.acceptedAnswers ?? []).some((accepted) => normalize(accepted) === target);
+    return intent.acceptedAnswers.some((accepted) => normalize(accepted) === target);
   }
 
   if (intent.format === "numeric") {
