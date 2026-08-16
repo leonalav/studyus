@@ -710,6 +710,10 @@ function sameEndpoint(
     && endpoint.model === binding.modelId;
 }
 
+// Temporary product override: keep this single switch so the Pro gate can be
+// restored without touching endpoint persistence, credentials, or role binding.
+export const CUSTOM_ENDPOINTS_TEMPORARILY_UNLOCKED = true;
+
 function Models({ preferences, updatePreferences, onNotify }: {
   preferences: StudyusPreferences;
   updatePreferences: (updater: (current: StudyusPreferences) => StudyusPreferences) => void;
@@ -970,7 +974,7 @@ function Models({ preferences, updatePreferences, onNotify }: {
           className={`flex items-center justify-center gap-1.5 rounded px-2 py-1.5 text-[11.5px] transition-colors ${category === "custom" ? "bg-white/[0.14] text-fg" : "text-dim hover:text-mut"}`}
         >
           Custom endpoints · {customEndpoints.length}
-          <ProCrown />
+          {!CUSTOM_ENDPOINTS_TEMPORARILY_UNLOCKED && <ProCrown />}
         </button>
       </div>
 
@@ -1079,23 +1083,37 @@ function Models({ preferences, updatePreferences, onNotify }: {
       </div>
 
       {category === "custom" && (
-        <div className="mb-2 flex items-start gap-2 rounded-md border border-[#e2b73f]/25 bg-[#e2b73f]/[0.06] px-2.5 py-2">
-          <Crown size={12} className="mt-[2px] shrink-0 text-[#e2b73f]" />
-          <p className="text-[11.5px] leading-relaxed text-mut">
-            <span className="font-medium text-fg">Custom endpoints are a Pro feature.</span>{" "}
-            Bring your own OpenAI-compatible model and key. Endpoints you already saved keep
-            working — you can test, assign and remove them.
-          </p>
-        </div>
+        CUSTOM_ENDPOINTS_TEMPORARILY_UNLOCKED ? (
+          <div className="mb-2 rounded-md border border-accent/25 bg-accent/[0.06] px-2.5 py-2 text-[11.5px] leading-relaxed text-mut">
+            <span className="font-medium text-fg">Temporary access enabled.</span>{" "}
+            Add and assign your own OpenAI-compatible endpoint in this build. Credentials remain in the local credential store.
+          </div>
+        ) : (
+          <div className="mb-2 flex items-start gap-2 rounded-md border border-[#e2b73f]/25 bg-[#e2b73f]/[0.06] px-2.5 py-2">
+            <Crown size={12} className="mt-[2px] shrink-0 text-[#e2b73f]" />
+            <p className="text-[11.5px] leading-relaxed text-mut">
+              <span className="font-medium text-fg">Custom endpoints are a Pro feature.</span>{" "}
+              Bring your own OpenAI-compatible model and key. Endpoints you already saved keep
+              working — you can test, assign and remove them.
+            </p>
+          </div>
+        )
       )}
 
       {category === "custom" && (!showAdd ? (
         <button
-          onClick={() => onNotify("Custom endpoints are reserved for Studyus Pro")}
-          title="Reserved for Studyus Pro"
-          className="mb-2 flex w-full cursor-not-allowed items-center justify-center gap-1.5 rounded-md border border-dashed border-white/12 py-2 text-[12px] text-dim transition-colors hover:border-[#e2b73f]/30"
+          onClick={() => {
+            if (CUSTOM_ENDPOINTS_TEMPORARILY_UNLOCKED) setShowAdd(true);
+            else onNotify("Custom endpoints are reserved for Studyus Pro");
+          }}
+          title={CUSTOM_ENDPOINTS_TEMPORARILY_UNLOCKED ? "Add a custom endpoint" : "Reserved for Studyus Pro"}
+          className={`mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed py-2 text-[12px] transition-colors ${
+            CUSTOM_ENDPOINTS_TEMPORARILY_UNLOCKED
+              ? "border-accent/35 text-fg hover:border-accent/60 hover:bg-accent/[0.06]"
+              : "cursor-not-allowed border-white/12 text-dim hover:border-[#e2b73f]/30"
+          }`}
         >
-          <Crown size={12} className="text-[#e2b73f]" />
+          {!CUSTOM_ENDPOINTS_TEMPORARILY_UNLOCKED && <Crown size={12} className="text-[#e2b73f]" />}
           Add OpenAI-compatible endpoint
         </button>
       ) : (
