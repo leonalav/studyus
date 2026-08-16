@@ -1,0 +1,282 @@
+/**
+ * Assembling the policy brief for a tutor turn.
+ *
+ * This module is the seam between the policy engine and the tutor harness. It
+ * gathers everything the engine knows — per-skill state, due reviews, open
+ * hypotheses, the support the learner has earned — decides the move, and
+ * renders it as a prompt block.
+ *
+ * The tutor harness does not make instructional decisions. It calls
+ * `buildPolicyBrief`, drops the rendered block into the prompt, and records the
+ * resulting evidence. That division is the point: it means "the learner is never
+ * asked to work independently before they can do it with help" is a property of
+ * a function that can be tested, rather than a sentence in a prompt that can be
+ * ignored under sampling.
+ */
+
+import type { MasteryStage } from "../mastery";
+import { formatMoveDirective, planNextMove, readSignals, type PolicySignals } from "./policy";
+import { evaluateStageExit } from "./predicates";
+import {
+  decideSupport,
+  formatRoutingTable,
+  readAttemptSignal,
+  type AttemptSignal,
+  type SupportDecision,
+} from "./support";
+import {
+  DEFAULT_LEARNER_ID,
+  getDueReviews,
+  getHypotheses,
+  getSkillEvidence,
+  getSkillState,
+  normalizeSkillId,
+  rebuildSkillState,
+} from "./store";
+import {
+  buildSkillGraph,
+  emptySkillState,
+  prerequisiteChain,
+  type LearnerHypothesis,
+  type LearningEvidenceEvent,
+  type NextLearningMove,
+  type ReviewTask,
+  type SkillNode,
+  type SkillState,
+} from "./types";
+import { getSkillNodes } from "./store";
+
+export interface PolicyBrief {
+  /** The skill the turn is about. */
+  skillId: string;
+  state: SkillState;
+  move: NextLearningMove;
+  support: SupportDecision;
+  /** What the learner's message itself showed: attempt, help request, or neither. */
+  attempt: AttemptSignal;
+  signals: PolicySignals;
+  dueReviews: ReviewTask[];
+  hypotheses: LearnerHypothesis[];
+  /** The rendered prompt block. */
+  prompt: string;
+}
+
+export interface PolicyBriefInput {
+  learnerId?: string;
+  /** The skill in focus this turn, however the caller resolved it. */
+  skillId: string;
+  /** The learner's message, read for attempt and help-seeking signals. */
+  learnerMessage: string;
+  /** Support already spent on this task family this episode. */
+  supportAlreadyUsed?: 0 | 1 | 2 | 3;
+  /** Set when the learner's last graded response was wrong. */
+  lastAttemptFailed?: boolean;
+  /** Session-level stage, used only as a floor for a skill with no evidence. */
+  fallbackStage?: MasteryStage;
+}
+
+/**
+ * Build the full policy brief for one turn.
+ *
+ * Reads state; writes nothing. Evidence is recorded after the turn completes, so
+ * that a failed model call cannot leave the ledger claiming the learner did
+ * something they never saw.
+ */
+export async function buildPolicyBrief(input: PolicyBriefInput): Promise<PolicyBrief> {
+  const learnerId = input.learnerId ?? DEFAULT_LEARNER_ID;
+  const skillId = normalizeSkillId(input.skillId);
+
+  const [events, existingState, dueReviews, hypotheses, nodes] = await Promise.all([
+    getSkillEvidence(skillId, learnerId),
+    getSkillState(skillId, learnerId),
+    getDueReviews(learnerId, new Date(), 2),
+    getHypotheses(learnerId, skillId),
+    getSkillNodes(),
+  ]);
+
+  const state =
+    existingState ??
+    ({
+      ...emptySkillState(learnerId, skillId),
+      // A brand-new skill inherits the session's stage as a starting point so a
+      // learner mid-lesson is not thrown back to Encounter by the mere fact
+      // that the skill was only just named. Evidence overrides it immediately.
+      stage: input.fallbackStage ?? "encounter",
+    } satisfies SkillState);
+
+  const weakPrerequisites = await findWeakPrerequisites(learnerId, skillId, nodes);
+
+  const move = planNextMove({
+    state,
+    events,
+    dueReviews,
+    hypotheses: hypotheses.filter((hypothesis) => !hypothesis.learnerDisputed),
+    weakPrerequisites,
+  });
+
+  const attempt = readAttemptSignal(input.learnerMessage, {
+    attemptFailed: input.lastAttemptFailed,
+    supportAlreadyUsed: input.supportAlreadyUsed ?? 0,
+  });
+  const support = decideSupport(attempt, move.supportCeiling);
+  const signals = readSignals(events);
+
+  return {
+    skillId,
+    state,
+    move,
+    support,
+    attempt,
+    signals,
+    dueReviews,
+    hypotheses,
+    prompt: formatPolicyBrief({ state, events, move, support, hypotheses, dueReviews }),
+  };
+}
+
+/**
+ * Prerequisites that are themselves weak.
+ *
+ * Only the nearest few are checked; walking the whole graph would be both slow
+ * and pointless, since a failure three levels down is not the proximate cause
+ * of a failure here.
+ */
+async function findWeakPrerequisites(
+  learnerId: string,
+  skillId: string,
+  nodes: SkillNode[]
+): Promise<{ skillId: string; state: SkillState }[]> {
+  if (nodes.length === 0) return [];
+  const graph = buildSkillGraph(nodes);
+  const chain = prerequisiteChain(graph, skillId, 4);
+  const out: { skillId: string; state: SkillState }[] = [];
+
+  for (const prereqId of chain) {
+    const state = await getSkillState(prereqId, learnerId);
+    if (!state) continue;
+    // "Weak" means the prerequisite has evidence AND that evidence is poor.
+    // A prerequisite with no evidence at all is unknown, not weak, and
+    // dropping into repair on an unknown is how a competent learner gets
+    // marched through material they already have.
+    if (state.totalEvidenceCount >= 2 && (state.procedure < 60 || state.understanding < 60)) {
+      out.push({ skillId: prereqId, state });
+    }
+  }
+  return out;
+}
+
+/**
+ * Render the brief as the prompt block the tutor receives.
+ *
+ * Structured as: where the learner actually is → what the gate still needs →
+ * what move to make → how much help is allowed → how to route this specific
+ * message. The model is given the reasoning, not just the verdict, because a
+ * model that understands why a ceiling exists holds it better than one merely
+ * told to.
+ */
+export function formatPolicyBrief(params: {
+  state: SkillState;
+  events: LearningEvidenceEvent[];
+  move: NextLearningMove;
+  support: SupportDecision;
+  hypotheses: LearnerHypothesis[];
+  dueReviews: ReviewTask[];
+}): string {
+  const { state, events, move, support } = params;
+  const sections: string[] = [];
+
+  sections.push(
+    [
+      `EVIDENCE STATE — skill "${state.skillId}" (computed from ${state.totalEvidenceCount} recorded observation${state.totalEvidenceCount === 1 ? "" : "s"}; these numbers are derived, and you must not restate, revise, or invent them)`,
+      `Stage: ${state.stage}`,
+      `Recall ${state.recall} · Understanding ${state.understanding} · Procedure ${state.procedure} · Transfer ${state.transfer} · Independence ${state.independence}`,
+      `Unaided successes: ${state.unaidedSuccesses} · Supported successes: ${state.supportedSuccesses} · Successful delayed retrievals: ${state.successfulRetrievals}`,
+    ].join("\n")
+  );
+
+  const gate = evaluateStageExit(state.stage, events);
+  sections.push(
+    [
+      `STAGE GATE: ${gate.summary}`,
+      gate.satisfied
+        ? "This gate is met by the ledger. You do not need to argue for advancement; it happens automatically when the evidence supports it."
+        : `Still missing: ${gate.missing.join("; ")}`,
+      "Advancement is decided by these predicates, not by your judgement that the learner seems ready. Produce the missing evidence and the stage moves on its own.",
+    ].join("\n")
+  );
+
+  sections.push(formatMoveDirective(move));
+
+  if (support.instruction) {
+    sections.push(`SUPPORT DECISION FOR THIS TURN\n${support.instruction}`);
+  }
+
+  const live = params.hypotheses.filter(
+    (hypothesis) =>
+      !hypothesis.learnerDisputed &&
+      (hypothesis.status === "suspected" || hypothesis.status === "supported")
+  );
+  if (live.length > 0) {
+    sections.push(
+      [
+        "OPEN HYPOTHESES ABOUT THIS LEARNER — these are provisional claims, not facts. Treat them as things to test, and let the learner's work overturn them.",
+        ...live
+          .slice(0, 4)
+          .map(
+            (hypothesis) =>
+              `- [${hypothesis.status}] ${hypothesis.kind.replace(/_/g, " ")}: ${hypothesis.statement}\n  Next best test: ${hypothesis.nextBestTest}`
+          ),
+      ].join("\n")
+    );
+  }
+
+  sections.push(formatRoutingTable());
+
+  return sections.join("\n\n");
+}
+
+/**
+ * The session-opening brief: due reviews before new material.
+ *
+ * Returns an empty string when nothing is due, so the caller can append it
+ * unconditionally. Capped at two — a learner returning after a month has a long
+ * queue, and opening a session with all of it is how spaced repetition becomes
+ * the thing people quit.
+ */
+export async function buildSessionOpeningBrief(
+  learnerId = DEFAULT_LEARNER_ID,
+  now: Date = new Date()
+): Promise<string> {
+  const due = await getDueReviews(learnerId, now, 2);
+  if (due.length === 0) return "";
+
+  const lines = due.map((task) => {
+    const overdueDays = Math.max(
+      0,
+      Math.floor((now.getTime() - new Date(task.dueAt).getTime()) / 86_400_000)
+    );
+    const why = task.reconstruction
+      ? "an unaided reconstruction is owed — the learner's success here came with substantive support"
+      : `scheduled retrieval, ${overdueDays === 0 ? "due today" : `${overdueDays} day${overdueDays === 1 ? "" : "s"} overdue`}`;
+    return `- ${task.skillId} (family "${task.taskFamily}"): ${why}. Retrieval type: ${task.retrievalType.replace(/_/g, " ")}.`;
+  });
+
+  return [
+    "DUE RETRIEVALS — surface these before new teaching.",
+    ...lines,
+    "Each must be unaided: no hints, no worked steps, no narrowing of the option space, even if asked. A coached retrieval measures the coaching, and the whole value of a scheduled review is that it is uncoached.",
+    "If a retrieval fails, do not simply supply the answer. Route into targeted repair on the specific thing that was lost, then reschedule.",
+  ].join("\n");
+}
+
+/** Recompute a skill's state after a turn's evidence has been written. */
+export async function refreshSkillAfterTurn(
+  learnerId: string,
+  skillIds: string[]
+): Promise<SkillState[]> {
+  const out: SkillState[] = [];
+  for (const skillId of skillIds) {
+    out.push(await rebuildSkillState(learnerId, skillId));
+  }
+  return out;
+}

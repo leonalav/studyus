@@ -22,11 +22,14 @@ import {
   shouldSignalTutor,
 } from "../../lib/widgets/signal";
 import { clusterAllowsSignal, type ClusterMember } from "../../lib/widgets/cluster";
-import { getSessionMasteryStage } from "../../lib/tutor";
+import { getSessionHintLevel, getSessionMasteryStage } from "../../lib/tutor";
+import { recordWidgetEvidence } from "../../lib/learning/bridge";
+import { DEFAULT_LEARNER_ID } from "../../lib/learning/store";
 import { WIDGET_LABEL, type WidgetIntent, type WidgetState } from "../../lib/widgets/types";
 import {
   askTutorTurn,
   ensureChalkboardSession,
+  resolveTurnSkillId,
   getSessionThreads,
   recordSessionThread,
   replaceSessionTranscript,
@@ -382,6 +385,42 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         );
 
         if (!widget) return;
+
+        // Record the answer in the evidence ledger BEFORE deciding whether to
+        // wake the tutor, and independently of that decision. The two are
+        // different questions: the tutor is woken once per cluster and never by
+        // a widget already answered, whereas every graded answer is a fact the
+        // ledger must hold. Tying evidence to the signal would mean the second,
+        // third and fourth answers in a cluster — the ones that establish
+        // breadth across task families — are the ones that never get counted.
+        //
+        // Deterministically graded widget answers are also the only evidence in
+        // the system carrying `correct` with full evaluator confidence; a
+        // conversational turn can only ever report `unknown` or `incorrect`. If
+        // this call is missing, no stage gate above Encounter can be satisfied.
+        void (async () => {
+          try {
+            await recordWidgetEvidence(widget.intent, safe, {
+              learnerId: DEFAULT_LEARNER_ID,
+              sessionId,
+              taskId: `${activeId}:${blockId}`,
+              fallbackSkillIds: [
+                resolveTurnSkillId({
+                  boundNodes: resolvedBoundNodes,
+                  sessionTitle: initialBoard.title,
+                }),
+              ],
+              // What the learner actually opened is read from widget state
+              // inside the bridge; this is the ceiling that was in force.
+              supportCeiling: Math.max(0, Math.min(3, await getSessionHintLevel(sessionId))) as 0 | 1 | 2 | 3,
+            });
+          } catch (error) {
+            // A ledger write must never cost the learner their answer, which is
+            // already saved above.
+            console.error("[widget] failed to record evidence", error);
+          }
+        })();
+
         // Only a committed answer wakes the tutor; exploration must not. Decided
         // synchronously so a double click cannot slip two turns through the
         // await below.
@@ -459,7 +498,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         console.error("[widget] failed to record interaction", error);
       }
     },
-    [activeId, sessionId]
+    [activeId, sessionId, resolvedBoundNodes, initialBoard.title]
   );
 
   /**

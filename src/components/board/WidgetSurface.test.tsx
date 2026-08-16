@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { WidgetSurface } from "./WidgetSurface";
-import { WIDGET_KINDS, type WidgetIntent, type WidgetKind } from "../../lib/widgets/types";
+import { WIDGET_KINDS, type WidgetIntent, type WidgetKind, type WidgetState } from "../../lib/widgets/types";
 import { validateWidgetIntent } from "../../lib/widgets/validate";
 
 /**
@@ -53,6 +53,30 @@ const EXEMPLARS: Record<WidgetKind, WidgetIntent> = {
       { id: "f3", caption: "The secant becomes the tangent", latex: "f'(x)" },
     ],
     predictPrompt: "Before pressing play: what happens to the line as the points meet?",
+    respond: { prompt: "Commit your prediction before playback unlocks." },
+    controls: { step: true, replay: true, scrub: true },
+    checkpoints: [
+      {
+        id: "c1",
+        at: 0.5,
+        prompt: "The gap has halved. Has the slope of the line changed a little or a lot?",
+        options: [
+          { id: "a", label: "A little — it is settling toward a value", correct: true },
+          { id: "b", label: "A lot — it is still changing steeply" },
+        ],
+        rationale: "This is where convergence becomes visible rather than merely asserted.",
+      },
+    ],
+    linkedRepresentations: [
+      {
+        id: "lr1",
+        representation: "equation",
+        label: "Difference quotient",
+        tracks: "The value of (f(x+h) - f(x)) / h as h shrinks with the animation.",
+      },
+    ],
+    reconcilePrompt: "You predicted one thing and saw another — or the same. Which was it, and what accounts for the difference?",
+    reconstructPrompt: "Without replaying it: explain why the secant becomes the tangent.",
   },
   comparison: {
     kind: "comparison",
@@ -306,5 +330,111 @@ describe("WidgetSurface — all 17 widgets", () => {
     );
     expect(shown).not.toMatch(/blur\(/);
     expect(shown).toContain("Hide");
+  });
+});
+
+/**
+ * The animation is the one widget whose instructional value lives entirely in
+ * its sequencing. Every beat below is trivially skippable by a learner in a
+ * hurry, so each is gated in code rather than merely requested in prose.
+ */
+describe("WidgetSurface — animation as prediction, not video", () => {
+  const animation = EXEMPLARS.animation as Extract<WidgetIntent, { kind: "animation" }>;
+
+  const live = (intent: WidgetIntent, state?: WidgetState) =>
+    renderToStaticMarkup(
+      <WidgetSurface intent={intent} state={state} chalk="#e8e8ea" accent="#7dd3fc" onState={() => {}} />
+    );
+
+  /** The nth `disabled` state of the play control, which renders first. */
+  const playDisabled = (html: string) => {
+    const button = html.slice(html.indexOf("Play animation") - 200, html.indexOf("Play animation") + 40);
+    return /disabled=""/.test(button);
+  };
+
+  it("locks playback until the prediction is committed", () => {
+    const html = live(animation);
+    expect(html).toContain("Commit your prediction to unlock playback");
+    expect(playDisabled(html)).toBe(true);
+
+    // A prediction entered after watching is a description, so the lock is the
+    // difference between the two kinds of evidence — not a nicety.
+    const unlocked = live(animation, { predictionLocked: true, submitted: true, responseText: "It becomes the tangent" });
+    expect(unlocked).not.toContain("Commit your prediction to unlock playback");
+    expect(playDisabled(unlocked)).toBe(false);
+  });
+
+  it("halts at an unanswered checkpoint and blocks play until it is answered", () => {
+    const atCheckpoint = live(animation, { predictionLocked: true, animationProgress: 0.5 });
+    expect(atCheckpoint).toContain("Has the slope of the line changed a little or a lot?");
+    expect(atCheckpoint).toContain("A little — it is settling toward a value");
+    expect(playDisabled(atCheckpoint)).toBe(true);
+
+    const answered = live(animation, {
+      predictionLocked: true,
+      animationProgress: 0.5,
+      checkpointResponses: { c1: { response: "a", correct: true } },
+    });
+    expect(answered).not.toContain("Has the slope of the line changed a little or a lot?");
+    expect(playDisabled(answered)).toBe(false);
+  });
+
+  it("withholds reconciliation until observation is actually complete", () => {
+    const midway = live(animation, { predictionLocked: true, animationProgress: 0.5 });
+    expect(midway).not.toContain("what accounts for the difference?");
+
+    // Reaching the end with a checkpoint still unanswered is not completion.
+    const skipped = live(animation, { predictionLocked: true, animationProgress: 1 });
+    expect(skipped).not.toContain("what accounts for the difference?");
+
+    const complete = live(animation, {
+      predictionLocked: true,
+      animationProgress: 1,
+      checkpointResponses: { c1: { response: "a", correct: true } },
+    });
+    expect(complete).toContain("what accounts for the difference?");
+  });
+
+  it("orders reconstruction after reconciliation, never alongside it", () => {
+    const observed = {
+      predictionLocked: true,
+      animationProgress: 1,
+      checkpointResponses: { c1: { response: "a", correct: true } },
+    };
+    // Explaining the gap between prediction and observation is what makes a
+    // wrong prediction worth having; rebuilding the idea comes after that.
+    const beforeReconcile = live(animation, observed);
+    expect(beforeReconcile).not.toContain("explain why the secant becomes the tangent");
+
+    const afterReconcile = live(animation, { ...observed, reconcileText: "I expected a vertical line." });
+    expect(afterReconcile).toContain("explain why the secant becomes the tangent");
+    // A committed answer is not re-editable: revising it after the fact would
+    // erase the comparison the step exists to make.
+    expect(afterReconcile).toContain("I expected a vertical line.");
+  });
+
+  it("offers only the playback controls the intent declares", () => {
+    const full = live(animation, { predictionLocked: true });
+    expect(full).toContain("Scrub animation");
+    expect(full).toContain("Step forward one frame");
+    expect(full).toContain("Replay from the start");
+    // Speed was not declared, so it must not appear.
+    expect(full).not.toContain("Playback speed");
+
+    // Withholding scrub is a pedagogical choice — an unrewindable first viewing
+    // is what makes it worth attending to — so the surface must not restore it.
+    const watchOnly: WidgetIntent = { ...animation, controls: {} };
+    const bare = live(watchOnly, { predictionLocked: true });
+    expect(bare).not.toContain("Scrub animation");
+    expect(bare).not.toContain("Step forward one frame");
+    expect(bare).not.toContain("Replay from the start");
+    expect(bare).toContain("Play animation");
+  });
+
+  it("shows linked representations so one change can be read two ways", () => {
+    const html = live(animation, { predictionLocked: true });
+    expect(html).toContain("Difference quotient");
+    expect(html).toContain("as h shrinks");
+    expect(html).toContain("equation");
   });
 });

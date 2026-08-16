@@ -468,6 +468,195 @@ function runMigrations(db: Database) {
     db.run("COMMIT;");
   }
 
+  if (currentVersion < 6) {
+    db.run("BEGIN TRANSACTION;");
+
+    // ── The evidence ledger ──
+    //
+    // The append-only record of what the learner actually did. Every mastery
+    // number, stage advance, review schedule and learner-model hypothesis in
+    // the app is DERIVED from these rows; none of them may be written by the
+    // model directly. Rows are immutable: a mistaken observation is corrected
+    // by recording a new one, never by editing history, because a ledger that
+    // can be rewritten cannot support an audit trail.
+    //
+    // `support_level` and `hint_exposure` are stored separately on purpose. The
+    // ceiling the policy set and the help the learner actually took are
+    // different facts, and independence is computed from the latter.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS learning_evidence (
+        evidence_id TEXT PRIMARY KEY,
+        learner_id TEXT NOT NULL,
+        skill_ids TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        task_family TEXT NOT NULL,
+        context_variant TEXT NOT NULL,
+        activity_id TEXT,
+        session_id TEXT,
+        evidence_type TEXT NOT NULL,
+        response TEXT NOT NULL,
+        correctness TEXT NOT NULL,
+        rubric_criterion_ids TEXT NOT NULL,
+        support_level INTEGER NOT NULL,
+        hint_exposure INTEGER NOT NULL DEFAULT 0,
+        response_time_ms INTEGER,
+        self_rated_confidence INTEGER,
+        evaluator_confidence INTEGER,
+        delayed INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL,
+        timestamp TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_learning_evidence_learner ON learning_evidence(learner_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_learning_evidence_session ON learning_evidence(session_id);
+    `);
+
+    // Per-skill position on the ladder and the computed dimension scores.
+    //
+    // This replaces the single session-level `chalkboard_sessions.mastery_stage`
+    // as the authority. A session teaches several skills and a learner is
+    // rarely at the same stage on all of them; one stage per session forced the
+    // whole board to move at the pace of whichever skill was mentioned last.
+    // The session column is retained so existing sessions keep rendering, but
+    // it is now a display cache, not the gate.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS skill_state (
+        learner_id TEXT NOT NULL,
+        skill_id TEXT NOT NULL,
+        stage TEXT NOT NULL DEFAULT 'encounter',
+        stage_evidence_ids TEXT NOT NULL DEFAULT '[]',
+        recall INTEGER NOT NULL DEFAULT 0,
+        understanding INTEGER NOT NULL DEFAULT 0,
+        procedure INTEGER NOT NULL DEFAULT 0,
+        transfer INTEGER NOT NULL DEFAULT 0,
+        independence INTEGER NOT NULL DEFAULT 0,
+        unaided_successes INTEGER NOT NULL DEFAULT 0,
+        supported_successes INTEGER NOT NULL DEFAULT 0,
+        total_evidence_count INTEGER NOT NULL DEFAULT 0,
+        successful_retrievals INTEGER NOT NULL DEFAULT 0,
+        reconstruction_due_task_family TEXT,
+        last_evidence_at TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (learner_id, skill_id)
+      );
+    `);
+
+    // ── The spaced-review queue ──
+    //
+    // The spacing schedule already existed as pure functions that computed
+    // intervals nothing ever acted on. These rows are what make the schedule
+    // real: they persist across sessions, come due on a date, get surfaced at
+    // session start, and route failures into targeted repair.
+    //
+    // `required_mode` is fixed at 'unaided' by CHECK rather than convention. A
+    // coached retrieval measures the coaching.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS review_tasks (
+        review_id TEXT PRIMARY KEY,
+        learner_id TEXT NOT NULL,
+        skill_id TEXT NOT NULL,
+        task_family TEXT NOT NULL,
+        due_at TEXT NOT NULL,
+        interval_index INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'scheduled',
+        required_mode TEXT NOT NULL DEFAULT 'unaided' CHECK (required_mode = 'unaided'),
+        retrieval_type TEXT NOT NULL DEFAULT 'cued_recall',
+        reconstruction INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        last_attempted_at TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_review_tasks_due ON review_tasks(learner_id, state, due_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_review_tasks_open
+        ON review_tasks(learner_id, skill_id, task_family)
+        WHERE state IN ('scheduled', 'due');
+    `);
+
+    // ── Activity contracts ──
+    //
+    // The trace that makes a learner interaction interpretable as evidence.
+    // Without the contract, "the learner answered B" is a click; with it, it is
+    // a selection on a named skill, at a known support ceiling, in a known
+    // context variant. Contracts are what the evidence rows point back to.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS learning_activities (
+        activity_id TEXT PRIMARY KEY,
+        session_id TEXT,
+        learner_id TEXT NOT NULL,
+        target_skill_ids TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        route TEXT,
+        task_family TEXT NOT NULL,
+        context_variant TEXT NOT NULL,
+        support_ceiling INTEGER NOT NULL,
+        expected_evidence TEXT NOT NULL,
+        success_criteria TEXT NOT NULL,
+        representation_roles TEXT NOT NULL,
+        permitted_widget_kinds TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_learning_activities_session ON learning_activities(session_id, created_at);
+    `);
+
+    // ── Structured learner-model hypotheses ──
+    //
+    // Replaces free-text statements with revisable, skill-linked, testable
+    // claims. The load-bearing column is `next_best_test`: a hypothesis with no
+    // test attached is a label, and labels accumulate into a learner model that
+    // nothing can ever remove. NOT NULL enforces that a claim about a learner
+    // must come with the observation that could refute it.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS learner_hypotheses (
+        hypothesis_id TEXT PRIMARY KEY,
+        learner_id TEXT NOT NULL,
+        skill_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        statement TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'suspected',
+        supporting_evidence_ids TEXT NOT NULL DEFAULT '[]',
+        contradicting_evidence_ids TEXT NOT NULL DEFAULT '[]',
+        next_best_test TEXT NOT NULL,
+        first_observed TEXT NOT NULL,
+        last_observed TEXT NOT NULL,
+        learner_disputed INTEGER NOT NULL DEFAULT 0,
+        dispute_note TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_learner_hypotheses_skill ON learner_hypotheses(learner_id, skill_id, status);
+    `);
+
+    // The skill graph. Distinct from the curriculum sequence: the sequence says
+    // what order material is PRESENTED in, the graph says what depends on what.
+    // Conflating them is why "stuck on section 4" so often actually means
+    // "never had section 2's skill".
+    db.run(`
+      CREATE TABLE IF NOT EXISTS skill_nodes (
+        skill_id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        prerequisites TEXT NOT NULL DEFAULT '[]',
+        curriculum_node TEXT,
+        description TEXT
+      );
+    `);
+
+    const v6Now = new Date().toISOString();
+    db.run(
+      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
+      [
+        6,
+        "Evidence-led instructional policy engine: evidence ledger, per-skill state, spaced review queue, activity contracts, structured hypotheses, skill graph",
+        v6Now,
+        "Rule: learning_evidence is the append-only record of observed learner performance and is the ONLY source of mastery numbers, stage position, and review scheduling — a model may never author a mastery score. skill_state is derived and rebuildable from learning_evidence. review_tasks.required_mode is fixed at 'unaided' because a coached retrieval measures the coaching. learner_hypotheses.next_best_test is NOT NULL because a claim about a learner must carry the observation that would refute it. Support level and hint exposure are recorded separately: correct-after-hint never raises independence, and substantive support schedules a mandatory unaided reconstruction on a near-but-not-identical task.",
+      ]
+    );
+
+    db.run("PRAGMA user_version = 6;");
+    db.run("COMMIT;");
+  }
+
   // No legacy assessment fixtures are seeded in production. A fresh profile
   // starts with no forms/attempts so AvailableTests shows its empty state
   // (see plan §3 / verification: "Fresh profile shows no … seeded recent

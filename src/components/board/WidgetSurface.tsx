@@ -657,20 +657,144 @@ function SliderBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps 
 
 /* ── 7 · Animation ── */
 
+/**
+ * A short commit box for the reconciliation and reconstruction beats.
+ *
+ * Both are free text with no auto-grading, and both are one-way: once the
+ * learner has written what they expected, letting them quietly revise it after
+ * seeing the answer would destroy the very comparison the step exists to make.
+ */
+function CommitBox({
+  label,
+  prompt,
+  value,
+  placeholder,
+  chalk,
+  accent,
+  readOnly,
+  onCommit,
+}: {
+  label: string;
+  prompt: string;
+  value?: string;
+  placeholder: string;
+  chalk: string;
+  accent: string;
+  readOnly: boolean;
+  onCommit: (text: string) => void;
+}) {
+  const [draft, setDraft] = useState(value ?? "");
+  const committed = typeof value === "string" && value.trim().length > 0;
+
+  return (
+    <div className="mt-2.5 border-t pt-2.5" style={{ borderColor: `${chalk}18` }}>
+      <p className="m-0 mb-1.5 text-[10.5px] opacity-85">
+        <span style={{ color: accent }}>{label}: </span>
+        {prompt}
+      </p>
+      {committed ? (
+        <p className="m-0 whitespace-pre-wrap rounded-md bg-black/15 px-2.5 py-1.5 text-[10.5px] opacity-80">{value}</p>
+      ) : (
+        <div className="flex items-start gap-2">
+          <textarea
+            value={draft}
+            disabled={readOnly}
+            rows={2}
+            placeholder={placeholder}
+            onChange={(event) => setDraft(event.target.value)}
+            className="min-w-0 flex-1 resize-y rounded-md border bg-black/15 px-2.5 py-1.5 text-[10.5px] outline-none disabled:opacity-60"
+            style={{ borderColor: `${chalk}1f`, color: chalk }}
+          />
+          <button
+            type="button"
+            disabled={readOnly || !draft.trim()}
+            onClick={() => onCommit(draft.trim())}
+            className="flex-none rounded-md px-2.5 py-1.5 text-[10px] font-medium text-black disabled:opacity-30"
+            style={{ background: accent }}
+          >
+            Commit
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Playback speeds offered when the intent declares the speed control. */
+const ANIMATION_SPEEDS = [0.5, 1, 2] as const;
+
+/**
+ * Animation as an instrument of inquiry rather than a video.
+ *
+ * The sequence is prediction lock → controlled observation → checkpoints →
+ * reconciliation → reconstruction, and each beat is gated in code because each
+ * one is trivially skippable by a learner in a hurry, which is exactly the
+ * learner it is meant to slow down. A prediction that can be entered after
+ * watching is a description; a checkpoint that can be scrubbed past is
+ * decoration; and an animation that ends at "now you've seen it" reliably
+ * produces the feeling of understanding without the substance.
+ *
+ * Only the controls the intent declares are rendered. Withholding scrub is a
+ * pedagogical choice — being unable to rewind is what makes the first viewing
+ * worth attending to — so the surface must not hand back an affordance the
+ * author deliberately withheld.
+ */
 function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & { intent: Extract<WidgetIntent, { kind: "animation" }> }) {
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(state.animationProgress ?? 0);
-  const duration = intent.durationMs ?? Math.max(1600, intent.frames.length * 1200);
+  const [rate, setRate] = useState(1);
+  const baseDuration = intent.durationMs ?? Math.max(1600, intent.frames.length * 1200);
+  const duration = baseDuration / rate;
   const rafRef = useRef<number | null>(null);
   const startRef = useRef(0);
 
+  const checkpoints = useMemo(
+    () => [...(intent.checkpoints ?? [])].sort((a, b) => a.at - b.at),
+    [intent.checkpoints]
+  );
+  const controls = intent.controls ?? {};
+  const responses = state.checkpointResponses ?? {};
+
+  const predictionRequired = Boolean(intent.predictPrompt);
+  const predictionCommitted = state.predictionLocked === true;
+  // Playback stays locked until the prediction is on the record. This is the
+  // whole difference between predicting and describing.
+  const locked = predictionRequired && !predictionCommitted;
+
+  /** The first checkpoint at or before the playhead that is still unanswered. */
+  const pendingCheckpoint = useMemo(
+    () => checkpoints.find((checkpoint) => progress >= checkpoint.at - 1e-6 && !responses[checkpoint.id]) ?? null,
+    [checkpoints, progress, responses]
+  );
+
+  const allCheckpointsAnswered = checkpoints.every((checkpoint) => Boolean(responses[checkpoint.id]));
+  const finished = progress >= 1 - 1e-6;
+  const observationComplete = finished && allCheckpointsAnswered;
+
+  // A looping animation never finishes, so it can never reach reconciliation.
+  // Honour loop only for genuinely ambient playback.
+  const mayLoop = Boolean(intent.loop) && checkpoints.length === 0 && !intent.reconcilePrompt && !intent.reconstructPrompt;
+
   useEffect(() => {
-    if (!playing) return;
+    if (!playing || locked || pendingCheckpoint) return;
     startRef.current = performance.now() - progress * duration;
     const tick = (now: number) => {
       const next = (now - startRef.current) / duration;
+
+      // Halt at the next checkpoint the playhead is about to cross. The learner
+      // answers at the moment the thing happens, not in recollection afterwards.
+      const upcoming = checkpoints.find(
+        (checkpoint) => !responses[checkpoint.id] && checkpoint.at > progress + 1e-6 && checkpoint.at <= next
+      );
+      if (upcoming) {
+        setProgress(upcoming.at);
+        setPlaying(false);
+        emit({ animationProgress: upcoming.at });
+        return;
+      }
+
       if (next >= 1) {
-        if (intent.loop) {
+        if (mayLoop) {
           startRef.current = now;
           setProgress(0);
           rafRef.current = requestAnimationFrame(tick);
@@ -689,11 +813,30 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
     // `progress` is intentionally excluded: it is the animation's own output.
-  }, [playing, duration, intent.loop]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [playing, duration, mayLoop, locked, pendingCheckpoint, checkpoints, responses]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
   }, []);
+
+  /** Scrubbing and stepping stop at the earliest unanswered checkpoint. */
+  const clampToCheckpoint = (target: number) => {
+    const blocking = checkpoints.find((checkpoint) => !responses[checkpoint.id] && checkpoint.at < target - 1e-6);
+    return blocking ? blocking.at : target;
+  };
+
+  const seek = (target: number) => {
+    const next = clampToCheckpoint(Math.min(1, Math.max(0, target)));
+    setPlaying(false);
+    setProgress(next);
+    emit({ animationProgress: next });
+  };
+
+  const answerCheckpoint = (checkpointId: string, response: string, correct?: boolean) => {
+    emit({
+      checkpointResponses: { ...responses, [checkpointId]: { response, correct } },
+    });
+  };
 
   const frameIndex = Math.min(intent.frames.length - 1, Math.floor(progress * intent.frames.length));
   const frame = intent.frames[frameIndex];
@@ -730,10 +873,23 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
 
   return (
     <div>
+      {/* Beat 1 — prediction, committed before anything moves. */}
       {intent.predictPrompt ? (
-        <p className="m-0 mb-2 text-[10.5px] opacity-80">
-          <span style={{ color: accent }}>Predict first: </span>{intent.predictPrompt}
-        </p>
+        <div className="mb-2">
+          <p className="m-0 text-[10.5px] opacity-80">
+            <span style={{ color: accent }}>Predict first: </span>{intent.predictPrompt}
+          </p>
+          {intent.respond ? (
+            <RespondBlock
+              spec={intent.respond}
+              chalk={chalk}
+              accent={accent}
+              state={state}
+              emit={(patch) => emit(patch.submitted ? { ...patch, predictionLocked: true } : patch)}
+              readOnly={readOnly}
+            />
+          ) : null}
+        </div>
       ) : null}
 
       <div className="relative mb-2 h-[62px] overflow-hidden rounded" style={{ background: "rgba(0,0,0,0.18)" }}>
@@ -762,15 +918,37 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
             style={{ left: `calc(${progress * 100}% - 6px)`, background: "#ff7a33", boxShadow: "0 0 12px rgba(255,122,51,0.6)" }}
           />
         )}
+        {checkpoints.map((checkpoint) => (
+          <i
+            key={checkpoint.id}
+            aria-hidden
+            className="absolute top-0 h-full w-px"
+            style={{
+              left: `${checkpoint.at * 100}%`,
+              background: responses[checkpoint.id] ? `${chalk}33` : "#ff7a3399",
+            }}
+          />
+        ))}
+        {locked ? (
+          <div className="absolute inset-0 grid place-items-center bg-black/45 px-3 text-center">
+            <span className="text-[10px] opacity-80">Commit your prediction to unlock playback</span>
+          </div>
+        ) : null}
       </div>
 
+      {/* Beat 2 — controlled observation, with only the declared affordances. */}
       <div className="flex items-center gap-2">
         <button
           type="button"
-          disabled={readOnly}
+          disabled={readOnly || locked || Boolean(pendingCheckpoint)}
           aria-label={playing ? "Pause animation" : "Play animation"}
           onClick={() => {
-            if (!playing && progress >= 1) setProgress(0);
+            if (!playing && finished) {
+              if (!controls.replay) return;
+              seek(0);
+              setPlaying(true);
+              return;
+            }
             setPlaying((current) => !current);
           }}
           className="grid h-6 w-6 flex-none place-items-center rounded-full text-white transition-colors hover:bg-white/20 disabled:opacity-40"
@@ -780,9 +958,76 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
             {playing ? <path d="M7 5h3v14H7zM14 5h3v14h-3z" /> : <path d="M7 5v14l11-7z" />}
           </svg>
         </button>
-        <div className="h-[3px] flex-1 overflow-hidden rounded-full" style={{ background: "rgba(255,255,255,0.1)" }}>
-          <i className="block h-full" style={{ width: `${progress * 100}%`, background: accent }} />
-        </div>
+
+        {controls.step ? (
+          <>
+            <button
+              type="button"
+              disabled={readOnly || locked || frameIndex === 0}
+              aria-label="Step back one frame"
+              onClick={() => seek((frameIndex - 1) / intent.frames.length)}
+              className="flex-none rounded px-1.5 py-0.5 font-mono text-[9px] hover:bg-white/10 disabled:opacity-30"
+            >
+              ‹
+            </button>
+            <button
+              type="button"
+              disabled={readOnly || locked || frameIndex >= intent.frames.length - 1}
+              aria-label="Step forward one frame"
+              onClick={() => seek((frameIndex + 1) / intent.frames.length)}
+              className="flex-none rounded px-1.5 py-0.5 font-mono text-[9px] hover:bg-white/10 disabled:opacity-30"
+            >
+              ›
+            </button>
+          </>
+        ) : null}
+
+        {controls.scrub ? (
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={progress}
+            disabled={readOnly || locked}
+            aria-label="Scrub animation"
+            onChange={(event) => seek(Number(event.target.value))}
+            className="h-[3px] flex-1 accent-current disabled:opacity-40"
+            style={{ color: accent }}
+          />
+        ) : (
+          <div className="h-[3px] flex-1 overflow-hidden rounded-full" style={{ background: "rgba(255,255,255,0.1)" }}>
+            <i className="block h-full" style={{ width: `${progress * 100}%`, background: accent }} />
+          </div>
+        )}
+
+        {controls.speed ? (
+          <select
+            value={rate}
+            disabled={readOnly || locked}
+            aria-label="Playback speed"
+            onChange={(event) => setRate(Number(event.target.value))}
+            className="flex-none rounded bg-black/25 px-1 py-0.5 font-mono text-[9px] outline-none disabled:opacity-40"
+            style={{ color: chalk }}
+          >
+            {ANIMATION_SPEEDS.map((speed) => (
+              <option key={speed} value={speed}>{speed}×</option>
+            ))}
+          </select>
+        ) : null}
+
+        {controls.replay ? (
+          <button
+            type="button"
+            disabled={readOnly || locked || progress === 0}
+            aria-label="Replay from the start"
+            onClick={() => seek(0)}
+            className="flex-none rounded px-1.5 py-0.5 text-[9px] hover:bg-white/10 disabled:opacity-30"
+          >
+            ↺
+          </button>
+        ) : null}
+
         <span className="font-mono text-[9px] opacity-45">{frameIndex + 1}/{intent.frames.length}</span>
       </div>
 
@@ -791,9 +1036,140 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
         {frame.latex ? <div className="mt-1"><TexBlock tex={frame.latex} color={chalk} size={16} /></div> : null}
       </div>
 
-      {intent.respond ? (
+      {/* Representations held in sync, so the same change is read two ways. */}
+      {intent.linkedRepresentations?.length ? (
+        <div className="mt-2 grid gap-1">
+          {intent.linkedRepresentations.map((linked) => (
+            <div
+              key={linked.id}
+              className="flex items-baseline gap-2 rounded border-l-2 px-2 py-1 text-[10px]"
+              style={{ borderColor: `${accent}66`, background: "rgba(0,0,0,0.12)" }}
+            >
+              <span className="font-mono text-[8.5px] uppercase tracking-wide opacity-45">{linked.representation.replace(/_/g, " ")}</span>
+              <span className="opacity-80">{linked.label}</span>
+              <span className="opacity-55">— {linked.tracks}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {/* Beat 3 — the checkpoint currently blocking playback. */}
+      {pendingCheckpoint ? (
+        <div className="mt-2.5 rounded-md border px-2.5 py-2" style={{ borderColor: `${accent}55`, background: "rgba(0,0,0,0.15)" }}>
+          <p className="m-0 mb-1.5 text-[10.5px] opacity-85">
+            <span style={{ color: accent }}>Checkpoint: </span>{pendingCheckpoint.prompt}
+          </p>
+          <CheckpointAnswer
+            checkpoint={pendingCheckpoint}
+            chalk={chalk}
+            accent={accent}
+            readOnly={readOnly}
+            onAnswer={(response, correct) => answerCheckpoint(pendingCheckpoint.id, response, correct)}
+          />
+        </div>
+      ) : null}
+
+      {/* Beat 4 — reconciliation: what you expected, what happened, why. */}
+      {intent.reconcilePrompt && observationComplete ? (
+        <CommitBox
+          label="Reconcile"
+          prompt={intent.reconcilePrompt}
+          value={state.reconcileText}
+          placeholder="I expected… what happened was… the difference is because…"
+          chalk={chalk}
+          accent={accent}
+          readOnly={readOnly}
+          onCommit={(text) => emit({ reconcileText: text })}
+        />
+      ) : null}
+
+      {/* Beat 5 — reconstruction, unaided and in the learner's own words. */}
+      {intent.reconstructPrompt && observationComplete && (!intent.reconcilePrompt || Boolean(state.reconcileText)) ? (
+        <CommitBox
+          label="Now rebuild it"
+          prompt={intent.reconstructPrompt}
+          value={state.reconstructText}
+          placeholder="In your own words, without replaying it…"
+          chalk={chalk}
+          accent={accent}
+          readOnly={readOnly}
+          onCommit={(text) => emit({ reconstructText: text })}
+        />
+      ) : null}
+
+      {/* A respond spec with no prediction prompt is a plain post-observation
+          question, so it belongs at the end rather than gating playback. */}
+      {intent.respond && !intent.predictPrompt ? (
         <RespondBlock spec={intent.respond} chalk={chalk} accent={accent} state={state} emit={emit} readOnly={readOnly} />
       ) : null}
+    </div>
+  );
+}
+
+/** The answer control for a halted checkpoint: options when given, else text. */
+function CheckpointAnswer({
+  checkpoint,
+  chalk,
+  accent,
+  readOnly,
+  onAnswer,
+}: {
+  checkpoint: NonNullable<Extract<WidgetIntent, { kind: "animation" }>["checkpoints"]>[number];
+  chalk: string;
+  accent: string;
+  readOnly: boolean;
+  onAnswer: (response: string, correct?: boolean) => void;
+}) {
+  const [draft, setDraft] = useState("");
+
+  if (checkpoint.options?.length) {
+    return (
+      <div className="grid gap-1.5">
+        {checkpoint.options.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            disabled={readOnly}
+            onClick={() => onAnswer(option.id, option.correct === true)}
+            className="rounded-md border px-2 py-1 text-left text-[10.5px] hover:bg-white/10 disabled:opacity-40"
+            style={{ borderColor: `${chalk}22`, color: chalk }}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-start gap-2">
+      <input
+        value={draft}
+        disabled={readOnly}
+        placeholder="Your answer…"
+        onChange={(event) => setDraft(event.target.value)}
+        className="min-w-0 flex-1 rounded-md border bg-black/15 px-2 py-1 text-[10.5px] outline-none disabled:opacity-60"
+        style={{ borderColor: `${chalk}1f`, color: chalk }}
+      />
+      <button
+        type="button"
+        disabled={readOnly || !draft.trim()}
+        onClick={() =>
+          onAnswer(
+            draft.trim(),
+            checkpoint.acceptedAnswers?.length
+              ? gradeAnswerableWidget(
+                  { format: "short_answer", acceptedAnswers: checkpoint.acceptedAnswers },
+                  { responseText: draft.trim() }
+                )
+              : undefined
+          )
+        }
+        className="flex-none rounded-md px-2 py-1 text-[10px] font-medium text-black disabled:opacity-30"
+        style={{ background: accent }}
+      >
+        Answer
+      </button>
     </div>
   );
 }
@@ -1408,7 +1784,17 @@ function ReflectionBody({ intent, chalk, accent, state, emit, readOnly }: BodyPr
 function MasteryCardBody({ intent, chalk, accent }: BodyProps & { intent: Extract<WidgetIntent, { kind: "mastery_card" }> }) {
   // The verdict is computed here, never taken from the model. "You got 90%,
   // therefore mastered" is exactly the claim the mastery gate exists to refuse.
-  const assessment = assessMastery(intent.evidence);
+  //
+  // By the time a card reaches this renderer its `evidence` has been filled in
+  // from the evidence ledger by the harness. A card with no evidence at all is
+  // therefore a card about a skill nothing has been recorded against, and it
+  // must say so: rendering five 0% bars would report an absence of measurement
+  // as a measurement of absence, which is a different and much crueller claim.
+  const unproven = !intent.evidence;
+  const evidence = intent.evidence ?? {
+    recall: 0, understanding: 0, procedure: 0, transfer: 0, independence: 0,
+  };
+  const assessment = assessMastery(evidence);
 
   const section = (label: string, items?: string[], mark = "✓") =>
     items?.length ? (
@@ -1429,12 +1815,22 @@ function MasteryCardBody({ intent, chalk, accent }: BodyProps & { intent: Extrac
     <div>
       <div className="text-[13px] font-semibold opacity-90">{intent.concept}</div>
 
-      <div className="mt-2 space-y-1">
+      {unproven ? (
+        <div
+          className="mt-2 rounded-md px-2.5 py-2 text-[10px] opacity-80"
+          style={{ background: "rgba(255,255,255,0.05)", border: `1px solid ${chalk}22` }}
+        >
+          No evidence has been recorded for this skill yet. These dimensions are unproven —
+          not scored at zero. Work through a check and the card fills itself in.
+        </div>
+      ) : null}
+
+      <div className="mt-2 space-y-1" style={unproven ? { opacity: 0.35 } : undefined}>
         {MASTERY_EVIDENCE_DIMENSIONS.map((dimension) => {
           // A dimension absent from a drifted payload reads as 0 rather than
           // NaN: an unproven dimension is exactly what a missing score means,
           // and the weakest-link verdict stays honest.
-          const raw = intent.evidence[dimension];
+          const raw = evidence[dimension];
           const score = Math.round(Math.min(100, Math.max(0, Number.isFinite(raw) ? raw : 0)));
           const isWeakest = dimension === assessment.weakestLink;
           const met = score >= MASTERY_THRESHOLD;
@@ -1464,6 +1860,11 @@ function MasteryCardBody({ intent, chalk, accent }: BodyProps & { intent: Extrac
           {assessment.mastered ? "Mastered" : "Mastered: not yet"}
         </div>
         <div className="mt-0.5 text-[10px] opacity-80">{assessment.summary}</div>
+        {!unproven && intent.weakestLink ? (
+          <div className="mt-1 text-[10px] opacity-70">
+            Weakest link: <span style={{ color: "#fca5a5" }}>{MASTERY_DIMENSION_LABEL[intent.weakestLink]}</span>
+          </div>
+        ) : null}
       </div>
 
       {section("Understands", intent.understands)}
@@ -1474,7 +1875,18 @@ function MasteryCardBody({ intent, chalk, accent }: BodyProps & { intent: Extrac
       {(intent.next || intent.reviewIn) ? (
         <div className="mt-2 border-t pt-2 text-[10px] opacity-70" style={{ borderColor: `${chalk}18` }}>
           {intent.next ? <div><span className="opacity-60">Next: </span><span style={{ color: accent }}>{intent.next}</span></div> : null}
-          {intent.reviewIn ? <div className="mt-0.5"><span className="opacity-60">Retrieval check: </span>{intent.reviewIn}</div> : null}
+          {intent.reviewIn ? <div className="mt-0.5"><span className="opacity-60">Scheduled review: </span>{intent.reviewIn}</div> : null}
+        </div>
+      ) : null}
+
+      {intent.evidenceIds?.length ? (
+        <div className="mt-2 border-t pt-2" style={{ borderColor: `${chalk}18` }}>
+          <Muted className="mb-1">
+            Based on {intent.evidenceIds.length} recorded observation{intent.evidenceIds.length === 1 ? "" : "s"}
+          </Muted>
+          <div className="font-mono text-[8.5px] leading-relaxed opacity-40">
+            {intent.evidenceIds.join(" · ")}
+          </div>
         </div>
       ) : null}
     </div>

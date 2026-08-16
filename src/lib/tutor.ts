@@ -60,6 +60,12 @@ import { WIDGET_LABEL, isActionableWidget } from "./widgets/types";
 import { validateWidgetIntent } from "./widgets/validate";
 import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
 import { MASTERY_STAGES, MASTERY_STAGE_SPECS, isMasteryStage, nextStage, type MasteryStage } from "./mastery";
+import { evaluateStageExit } from "./learning/predicates";
+import { buildPolicyBrief, buildSessionOpeningBrief, type PolicyBrief } from "./learning/session";
+import { groundMasteryCards } from "./learning/masteryCard";
+import { recordTutorObservation } from "./learning/bridge";
+import { getSkillEvidence, DEFAULT_LEARNER_ID } from "./learning/store";
+import type { LearningEvidenceEvent } from "./learning/types";
 import {
   buildTutorPreferenceReminder,
   loadPreferences,
@@ -1689,22 +1695,56 @@ export async function setSessionMasteryStage(
   saveDbSync();
 }
 
-/** Decide the session's next stage from a completed turn. Deterministic, and
- *  deliberately unable to skip stages or advance without evidence. */
+/**
+ * Decide the session's next stage from a completed turn.
+ *
+ * Advancement is decided by machine-checkable predicates over the evidence
+ * ledger — see `learning/predicates.ts`. The model's own `stage_advance.ready`
+ * is not sufficient and never was: the previous rule here accepted any non-empty
+ * evidence string, which meant a fluent sentence advanced the learner just as
+ * effectively as a demonstrated skill. A model that is asked "are they ready?"
+ * and rewarded for momentum will say yes.
+ *
+ * What the model retains is the power to move a learner BACK. Recognizing
+ * regression must never be harder than promoting, so a reported earlier stage is
+ * honoured immediately and without evidence.
+ *
+ * @param ledgerEvidence Recorded evidence for the skill in focus. When empty —
+ *   a session with no skill resolved, or an unwired call site — the gate falls
+ *   back to the model's claim, so this function degrades to the old behaviour
+ *   rather than freezing every learner at Encounter.
+ */
 export function resolveNextMasteryStage(
   current: MasteryStage,
-  turn: Pick<TutorTurn, "stage" | "stageAdvance">
+  turn: Pick<TutorTurn, "stage" | "stageAdvance">,
+  ledgerEvidence: LearningEvidenceEvent[] = []
 ): { stage: MasteryStage; evidence: string } | null {
   // A reported stage BEHIND the current one is a regression the tutor
   // observed. Honour it immediately; no evidence required to move back.
   if (turn.stage && MASTERY_STAGES.indexOf(turn.stage) < MASTERY_STAGES.indexOf(current)) {
     return { stage: turn.stage, evidence: turn.stageAdvance?.evidence ?? "" };
   }
+
+  const next = nextStage(current);
+  if (!next) return null;
+
+  if (ledgerEvidence.length > 0) {
+    const gate = evaluateStageExit(current, ledgerEvidence);
+    if (!gate.satisfied) return null;
+    // The model's narration is kept as the human-readable reason, but the
+    // decision was the predicate's. When the model said nothing, the gate
+    // summary speaks for itself.
+    const narration = turn.stageAdvance?.evidence?.trim();
+    return {
+      stage: next,
+      evidence: narration ? `${gate.summary} — ${narration}` : gate.summary,
+    };
+  }
+
   if (!turn.stageAdvance?.ready) return null;
   const evidence = turn.stageAdvance.evidence.trim();
   if (!evidence) return null;
-  const next = nextStage(current);
-  return next ? { stage: next, evidence } : null;
+  return { stage: next, evidence };
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -1721,6 +1761,12 @@ export function buildTutorUserPrompt(params: {
    *  put it there. Supplied so the tutor continues rather than re-guessing. */
   masteryStage?: MasteryStage;
   masteryStageEvidence?: string;
+  /** The rendered policy decision for this turn: computed evidence state, the
+   *  stage gate's outstanding requirements, the warranted move, the support
+   *  ceiling, and the response routing table. */
+  policyBrief?: string;
+  /** Due retrievals to surface before new teaching. Empty mid-session. */
+  openingBrief?: string;
   learnerSummary: string;
   curriculumScope?: TutorCurriculumScopeItem[];
   cards: TutorEvidenceCard[];
@@ -1740,11 +1786,19 @@ export function buildTutorUserPrompt(params: {
 
   parts.push(
     params.awaitingFirstAttempt
-      ? `PHASE: awaiting_first_attempt — the learner has not yet made an independent attempt. ` +
-        `However, if the learner explicitly asked you to draw, plot, visualize, or show a structure, comply first with a best-effort board rendering instead of asking a gating question. ` +
-        `Otherwise open by locating what they have tried and, only if necessary, ask the one question whose answer distinguishes misconceptions.`
+      ? `PHASE: awaiting_first_attempt — the learner has not yet made an independent attempt. Apply the RESPONSE ROUTING table below to decide whether this turn asks or tells.`
       : `PHASE: in_flow — the learner is actively working with you. Continue from their latest message.`
   );
+
+  // Due retrievals come before anything else the turn might do. They are the
+  // one thing a session can lose permanently by postponing: an interval that
+  // passes unmeasured cannot be measured retroactively.
+  if (params.openingBrief) parts.push(params.openingBrief);
+
+  // The policy brief is placed ahead of the stage description and the learner
+  // model because it is the binding instruction; everything after it is context
+  // for carrying it out well.
+  if (params.policyBrief) parts.push(params.policyBrief);
 
   parts.push(formatMasteryDirective());
 
@@ -1760,9 +1814,9 @@ export function buildTutorUserPrompt(params: {
       ? `- Evidence that carried the learner into this stage: ${params.masteryStageEvidence}\n`
       : "") +
     (advanceTarget
-      ? `- Set stage_advance.ready=true ONLY when you have just observed that exit condition, and name the observation in stage_advance.evidence. The session then moves to ${MASTERY_STAGE_SPECS[advanceTarget].label}; you cannot skip ahead of it.`
-      : `- This is the final stage. Close with a mastery_card reporting all five evidence dimensions, and schedule the retrieval check that will detect forgetting.`) +
-    `\n- If the learner's work shows they are actually behind this stage, report the earlier "stage" instead. Moving back is correct behaviour.`
+      ? `- Advancement to ${MASTERY_STAGE_SPECS[advanceTarget].label} is decided by machine-checkable predicates over the evidence ledger, not by your assertion. Report what you observed in stage_advance.evidence; the gate reads the ledger and moves the stage when the evidence is genuinely there. Elicit the missing evidence rather than arguing for the promotion.`
+      : `- This is the final stage. Close with a mastery_card — its five dimensions, evidence trail, and review date are filled in from the ledger, so write only the prose.`) +
+    `\n- If the learner's work shows they are actually behind this stage, report the earlier "stage" instead. Moving back is honoured immediately and needs no evidence: noticing a regression must never be harder than granting a promotion.`
   );
 
   parts.push(`LEARNER MODEL SUMMARY:\n${params.learnerSummary}`);
@@ -2005,6 +2059,15 @@ export interface TutorTurnRequest {
   }[];
   signal?: AbortSignal;
   endpoint?: ResolvedRoleEndpoint;
+  /** The skill this turn is about, for the evidence ledger and policy engine.
+   *
+   *  When omitted it is derived from the bound curriculum node or the session
+   *  title, so evidence still accumulates somewhere stable rather than being
+   *  silently dropped. */
+  skillId?: string;
+  /** Learner identity for the ledger. Single-user today; explicit so the
+   *  evidence store is not retrofitted later. */
+  learnerId?: string;
 }
 
 /**
@@ -2062,6 +2125,32 @@ export function selectTutorFileContentParts(
 }
 
 /**
+ * The skill a turn is about.
+ *
+ * Prefers an explicit id, then the first bound curriculum node, then the session
+ * title. The fallback matters: evidence attributed to a stable-but-coarse skill
+ * is still usable, whereas evidence dropped because no skill was named is gone.
+ */
+export function resolveTurnSkillId(req: Pick<TutorTurnRequest, "skillId" | "boundNodes" | "sessionTitle">): string {
+  const raw = req.skillId ?? req.boundNodes?.[0] ?? req.sessionTitle;
+  return raw.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 64) || "unspecified_skill";
+}
+
+/**
+ * Read correctness for a conversational turn from the tutor's own diagnosis.
+ *
+ * Conversation is not auto-gradable, so this deliberately never returns
+ * "correct": a free-text exchange the model felt good about is not the same
+ * class of fact as a graded response, and letting warmth become evidence of
+ * competence is the failure the whole ledger exists to prevent. A named
+ * misconception is a genuine negative observation and is recorded as such;
+ * everything else is honestly unknown.
+ */
+function correctnessFromDiagnosis(turn: TutorTurn): "incorrect" | "unknown" {
+  return (turn.diagnosis?.misconceptions?.length ?? 0) > 0 ? "incorrect" : "unknown";
+}
+
+/**
  * One tutor turn. Endpoint, authentication, cancellation, and transport errors
  * still propagate to the caller. Schema-invalid model output is repaired when
  * possible and otherwise deterministically reduced to safe speech plus the
@@ -2115,6 +2204,34 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     : [persistentSummary, getTutorSessionLearnerSummary(req.sessionId)].filter(Boolean).join("\n\n");
 
   const awaitingFirstAttempt = loadedHistory.filter((m) => m.role === "user").length <= 1;
+
+  // The policy engine decides what evidence is missing and which learning move
+  // is warranted; everything downstream of here decides only how to say it.
+  // A failure in the engine must never cost the learner their turn, so the whole
+  // brief is best-effort: an unreachable evidence store degrades the tutor to
+  // its previous prompt-only behaviour rather than to an error screen.
+  const learnerId = req.learnerId ?? DEFAULT_LEARNER_ID;
+  const skillId = resolveTurnSkillId(req);
+  let policyBrief: PolicyBrief | undefined;
+  let openingBrief = "";
+  try {
+    policyBrief = await buildPolicyBrief({
+      learnerId,
+      skillId,
+      learnerMessage: req.learnerMessage,
+      supportAlreadyUsed: Math.max(0, Math.min(3, hintLevel)) as 0 | 1 | 2 | 3,
+      fallbackStage: masteryStage.stage,
+    });
+    // Due retrievals belong at the top of a session, not buried mid-flow: a
+    // review surfaced after twenty minutes of new teaching is a review the
+    // learner has already been primed for, which measures priming.
+    if (awaitingFirstAttempt) {
+      openingBrief = await buildSessionOpeningBrief(learnerId);
+    }
+  } catch (error) {
+    console.warn("[tutor] policy engine unavailable; continuing without it", error);
+  }
+
   const knowledgeNodes = await resolveTutorKnowledgeNodes(req.boundNodes ?? [], studio);
   // Curriculum sequencing and source grounding are independent: disabling the
   // pedagogical phase sequence must not silently disable selected-source use.
@@ -2169,8 +2286,10 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     assistancePolicy: req.assistancePolicy ?? "progressive_hints",
     hintLevel,
     awaitingFirstAttempt,
-    masteryStage: masteryStage.stage,
+    masteryStage: policyBrief?.state.stage ?? masteryStage.stage,
     masteryStageEvidence: masteryStage.evidence,
+    policyBrief: policyBrief?.prompt,
+    openingBrief,
     learnerSummary,
     curriculumScope,
     cards,
@@ -2208,15 +2327,27 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
       }
     },
   });
-  const result: StructuredCallResult<TutorTurn> = {
-    ...rawResult,
-    value: enforceLearnerAgency(
-      enforceTutorBoardNecessity(
-        enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
-        req.learnerMessage
-      )
-    ),
-  };
+  const policedTurn = enforceLearnerAgency(
+    enforceTutorBoardNecessity(
+      enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
+      req.learnerMessage
+    )
+  );
+
+  // Any mastery card in this turn is rewritten from the ledger before it can
+  // reach the board. Whatever the model wrote into those five numbers never
+  // becomes visible to the learner.
+  let groundedTurn = policedTurn;
+  try {
+    groundedTurn = {
+      ...policedTurn,
+      boardOps: await groundMasteryCards(policedTurn.boardOps, { learnerId, fallbackSkillId: skillId }),
+    };
+  } catch (error) {
+    console.warn("[tutor] could not ground mastery cards from the ledger", error);
+  }
+
+  const result: StructuredCallResult<TutorTurn> = { ...rawResult, value: groundedTurn };
 
   await appendSessionMessage({
     sessionId: req.sessionId,
@@ -2232,10 +2363,41 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
   }
 
-  // Stage movement is resolved deterministically from the turn, never taken as
-  // a bare assertion: forward motion needs evidence and advances exactly one
-  // stage, while an observed regression is honoured immediately.
-  const resolvedStage = resolveNextMasteryStage(masteryStage.stage, result.value);
+  // Record what the learner actually did this turn, then let the predicates
+  // decide the stage. Writing evidence AFTER the model call is deliberate: a
+  // turn that failed to complete never happened as far as the ledger is
+  // concerned, and a ledger that records unseen instruction is worse than no
+  // ledger at all.
+  let ledgerEvidence: LearningEvidenceEvent[] = [];
+  try {
+    if (policyBrief && !awaitingFirstAttempt && policyBrief.attempt.madeAttempt) {
+      await recordTutorObservation({
+        learnerId,
+        sessionId: req.sessionId,
+        skillIds: [skillId],
+        taskId: `${req.sessionId}:${loadedHistory.length}`,
+        // A reconstruction is owed against a specific family, so it must be
+        // recorded against that same family or the debt never clears.
+        taskFamily:
+          policyBrief.move.reconstructionTaskFamily ?? `${skillId}:${policyBrief.move.route}`,
+        evidenceType: policyBrief.move.requiredEvidence[0] ?? "explanation",
+        response: req.learnerMessage,
+        correctness: correctnessFromDiagnosis(result.value),
+        supportLevel: policyBrief.support.granted,
+        hintExposure: policyBrief.support.granted,
+        contextVariant: policyBrief.move.contextVariant,
+        evaluatorConfidence: result.value.diagnosis ? 70 : 50,
+      });
+    }
+    ledgerEvidence = await getSkillEvidence(skillId, learnerId);
+  } catch (error) {
+    console.warn("[tutor] could not record turn evidence", error);
+  }
+
+  // Stage movement is resolved from the evidence ledger, never from a bare
+  // assertion: forward motion must satisfy the stage's predicate and advances
+  // exactly one stage, while an observed regression is honoured immediately.
+  const resolvedStage = resolveNextMasteryStage(masteryStage.stage, result.value, ledgerEvidence);
   if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
     await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
   }

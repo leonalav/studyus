@@ -331,8 +331,119 @@ function validateAnimation(intent: Record<string, unknown>): ValidationResult {
     if ((domain[0] as number) >= (domain[1] as number)) return fail("Animation motion tDomain start must be less than end");
     if (!optionalBoolean(motion.trace)) return fail("Animation motion trace must be a boolean");
   }
+
+  const checkpoints = validateAnimationCheckpoints(intent.checkpoints);
+  if (!checkpoints.valid) return checkpoints;
+
+  if (intent.controls !== undefined && intent.controls !== null) {
+    const controls = intent.controls;
+    if (!isPlainObject(controls)) return fail("Animation controls must be an object");
+    for (const key of ["scrub", "step", "speed", "replay"]) {
+      if (!optionalBoolean(controls[key])) return fail(`Animation controls.${key} must be a boolean`);
+    }
+  }
+
+  const linked = validateLinkedRepresentations(intent.linkedRepresentations);
+  if (!linked.valid) return linked;
+
+  if (!optionalText(intent.reconcilePrompt, MAX_TEXT_LENGTH)) {
+    return fail("Animation reconcilePrompt is too long");
+  }
+  if (!optionalText(intent.reconstructPrompt, MAX_TEXT_LENGTH)) {
+    return fail("Animation reconstructPrompt is too long");
+  }
+
+  // A prediction the learner cannot commit is not a prediction. If the model
+  // asks for one, it must also supply the means to record it, otherwise the
+  // surface locks playback behind an input that does not exist.
+  if (text(intent.predictPrompt, MAX_TEXT_LENGTH) && !isPlainObject(intent.respond)) {
+    return fail("Animation predictPrompt requires a respond spec so the prediction can be committed before playback");
+  }
+  // Reconciliation only means something against a recorded prediction.
+  if (text(intent.reconcilePrompt, MAX_TEXT_LENGTH) && !text(intent.predictPrompt, MAX_TEXT_LENGTH)) {
+    return fail("Animation reconcilePrompt requires a predictPrompt — there is nothing to reconcile without a prediction");
+  }
+
   const respond = validateRespond(intent.respond, "Animation");
   if (!respond.valid) return respond;
+  return ok;
+}
+
+/** Upper bound on checkpoints. More than this and the animation is a quiz. */
+export const MAX_CHECKPOINTS = 6;
+
+function validateAnimationCheckpoints(value: unknown): ValidationResult {
+  if (value === undefined || value === null) return ok;
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CHECKPOINTS) {
+    return fail(`Animation supports 1–${MAX_CHECKPOINTS} checkpoints`);
+  }
+  const ids = uniqueIds(value, "animation.checkpoints");
+  if (!ids.valid) return ids;
+
+  let previousAt = -1;
+  for (const raw of value) {
+    if (!isPlainObject(raw)) return fail("Each animation checkpoint must be an object");
+    if (!finiteNumber(raw.at) || raw.at < 0 || raw.at > 1) {
+      return fail("Animation checkpoint 'at' must be a playhead position between 0 and 1");
+    }
+    // Ordering is not cosmetic: the surface halts playback in sequence, and an
+    // out-of-order checkpoint would either be skipped or rewind the learner.
+    if (raw.at <= previousAt) {
+      return fail("Animation checkpoints must be in strictly increasing playhead order");
+    }
+    previousAt = raw.at;
+
+    if (!text(raw.prompt, MAX_TEXT_LENGTH)) return fail("Each animation checkpoint needs a prompt");
+    if (!optionalText(raw.rationale, MAX_TEXT_LENGTH)) return fail("Animation checkpoint rationale is too long");
+
+    if (raw.options !== undefined && raw.options !== null) {
+      const options = requiredList(raw.options, MAX_OPTIONS);
+      if (!options || options.length < 2) {
+        return fail(`Animation checkpoint options need 2–${MAX_OPTIONS} entries`);
+      }
+      const optionIds = uniqueIds(options, "animation.checkpoints.options");
+      if (!optionIds.valid) return optionIds;
+      for (const option of options as Record<string, unknown>[]) {
+        if (!text(option.label, MAX_SHORT_TEXT_LENGTH)) return fail("Animation checkpoint options need labels");
+        if (!optionalBoolean(option.correct)) return fail("Animation checkpoint option 'correct' must be a boolean");
+      }
+      // A graded checkpoint with no key grades nothing, and silently accepting
+      // every answer is worse than not asking.
+      const hasKey = (options as Record<string, unknown>[]).some((option) => option.correct === true);
+      if (!hasKey) return fail("Animation checkpoint options must mark exactly one correct option");
+    }
+
+    if (raw.acceptedAnswers !== undefined && raw.acceptedAnswers !== null) {
+      if (!stringList(raw.acceptedAnswers, MAX_OPTIONS, MAX_SHORT_TEXT_LENGTH)) {
+        return fail("Animation checkpoint acceptedAnswers must be short strings");
+      }
+    }
+  }
+  return ok;
+}
+
+const LINKED_REPRESENTATIONS = ["graph", "table", "equation", "number_line", "diagram"];
+
+function validateLinkedRepresentations(value: unknown): ValidationResult {
+  if (value === undefined || value === null) return ok;
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_COLUMNS) {
+    return fail(`Animation supports 1–${MAX_COLUMNS} linked representations`);
+  }
+  const ids = uniqueIds(value, "animation.linkedRepresentations");
+  if (!ids.valid) return ids;
+
+  for (const raw of value) {
+    if (!isPlainObject(raw)) return fail("Each linked representation must be an object");
+    if (!LINKED_REPRESENTATIONS.includes(String(raw.representation))) {
+      return fail(`Linked representation must be one of ${LINKED_REPRESENTATIONS.join(", ")}`);
+    }
+    if (!text(raw.label, MAX_SHORT_TEXT_LENGTH)) return fail("Each linked representation needs a label");
+    // Without naming what tracks the animation, a "linked" view is just a second
+    // picture sitting next to the first.
+    if (!text(raw.tracks, MAX_TEXT_LENGTH)) {
+      return fail("Each linked representation must state what it tracks in the animation");
+    }
+  }
   return ok;
 }
 
@@ -611,12 +722,32 @@ function validateReflection(intent: Record<string, unknown>): ValidationResult {
 
 function validateMasteryCard(intent: Record<string, unknown>): ValidationResult {
   if (!text(intent.concept, MAX_SHORT_TEXT_LENGTH)) return fail("Mastery card needs a concept");
+
+  // `evidence` is accepted but not required, and never trusted. The harness
+  // overwrites it from the ledger before the card renders. Validating it
+  // strictly here would only teach the model that authoring plausible-looking
+  // mastery percentages is a legitimate move, which is the exact behaviour the
+  // evidence engine exists to remove.
   const evidence = intent.evidence;
-  if (!isPlainObject(evidence)) return fail("Mastery card needs an evidence object");
-  for (const dimension of ["recall", "understanding", "procedure", "transfer", "independence"]) {
-    const score = (evidence as Record<string, unknown>)[dimension];
-    if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 100) {
-      return fail(`Mastery card evidence.${dimension} must be a number between 0 and 100`);
+  if (evidence !== undefined && evidence !== null) {
+    if (!isPlainObject(evidence)) return fail("Mastery card evidence must be an object when present");
+    for (const dimension of ["recall", "understanding", "procedure", "transfer", "independence"]) {
+      const score = (evidence as Record<string, unknown>)[dimension];
+      if (score === undefined || score === null) continue;
+      if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 100) {
+        return fail(`Mastery card evidence.${dimension} must be a number between 0 and 100`);
+      }
+    }
+  }
+  if (!optionalText(intent.skillId, MAX_ID_LENGTH)) return fail("Mastery card skillId is too long");
+  if (intent.evidenceIds !== undefined && intent.evidenceIds !== null) {
+    if (!stringList(intent.evidenceIds, 24, MAX_ID_LENGTH)) {
+      return fail("Mastery card evidenceIds must be short id strings");
+    }
+  }
+  if (intent.weakestLink !== undefined && intent.weakestLink !== null) {
+    if (!["recall", "understanding", "procedure", "transfer", "independence"].includes(String(intent.weakestLink))) {
+      return fail("Mastery card weakestLink must be one of the five evidence dimensions");
     }
   }
   if (!stringList(intent.understands, 8)) return fail("Mastery card 'understands' must be short strings");
@@ -651,6 +782,28 @@ export function sanitizeWidgetState(value: unknown): WidgetState | undefined {
   }
   if (Number.isInteger(value.hintLevelOpened)) {
     next.hintLevelOpened = Math.min(3, Math.max(0, value.hintLevelOpened as number));
+  }
+  if (finiteNumber(value.confidence)) {
+    next.confidence = Math.min(100, Math.max(0, Math.round(value.confidence)));
+  }
+  if (typeof value.predictionLocked === "boolean") next.predictionLocked = value.predictionLocked;
+  if (isPlainObject(value.checkpointResponses)) {
+    const responses: Record<string, { response: string; correct?: boolean }> = {};
+    for (const [key, raw] of Object.entries(value.checkpointResponses).slice(0, MAX_CHECKPOINTS)) {
+      if (!identifier(key) || !isPlainObject(raw)) continue;
+      if (typeof raw.response !== "string") continue;
+      responses[key] = {
+        response: raw.response.slice(0, MAX_SHORT_TEXT_LENGTH),
+        ...(typeof raw.correct === "boolean" ? { correct: raw.correct } : {}),
+      };
+    }
+    if (Object.keys(responses).length > 0) next.checkpointResponses = responses;
+  }
+  if (typeof value.reconcileText === "string") {
+    next.reconcileText = value.reconcileText.slice(0, MAX_RESPONSE_TEXT);
+  }
+  if (typeof value.reconstructText === "string") {
+    next.reconstructText = value.reconstructText.slice(0, MAX_RESPONSE_TEXT);
   }
   if (Array.isArray(value.revealedIds)) {
     next.revealedIds = value.revealedIds.filter(identifier).map(String).slice(0, MAX_STEPS);

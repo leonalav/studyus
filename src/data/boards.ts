@@ -269,8 +269,15 @@ function widgetToMarkdown(intent: WidgetIntent, state?: WidgetState): string[] {
       break;
     case "mastery_card": {
       lines.push(`### ${intent.concept}`);
-      for (const [dimension, score] of Object.entries(intent.evidence)) {
-        lines.push(`- ${dimension}: ${Math.round(score)}%`);
+      // Absent evidence exports as "unproven" rather than as zeros: a markdown
+      // export claiming 0% across the board reads as a measured failure, when
+      // what actually happened is that nothing was measured.
+      if (intent.evidence) {
+        for (const [dimension, score] of Object.entries(intent.evidence)) {
+          lines.push(`- ${dimension}: ${Math.round(Number(score) || 0)}%`);
+        }
+      } else {
+        lines.push("- evidence: not yet established");
       }
       if (intent.understands?.length) { lines.push("_Understands_"); bullet(intent.understands); }
       if (intent.canDo?.length) { lines.push("_Can do_"); bullet(intent.canDo); }
