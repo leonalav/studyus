@@ -129,7 +129,10 @@ export interface AttemptResultDTO {
   aggregateScore: number;
   totalPossibleMarks: number;
   gradingStatus: string;
+  /** Persisted attempt boundaries used to show a stable completion duration. */
+  startedAt: string;
   completedAt: string | null;
+  durationSeconds: number | null;
   questions: {
     itemId: string;
     stem: string;
@@ -787,6 +790,8 @@ export async function submitAttempt(attemptId: string): Promise<AttemptResultDTO
   const assistancePolicy = (preRes[0].values[0][4] as string) ?? "no_hints";
 
   // Idempotent: if already completed, return the existing result untouched.
+  // A grading-blocked attempt remains retryable after its evaluator or answer
+  // specification has been repaired.
   if (preStatus === "completed") {
     return getAttemptResult(attemptId);
   }
@@ -1088,7 +1093,7 @@ export async function getAttemptResult(attemptId: string): Promise<AttemptResult
   const db = await getDb();
 
   const attRes = db.exec(`
-    SELECT id, form_id, status, aggregate_score, grading_status, completed_at
+    SELECT id, form_id, status, aggregate_score, grading_status, started_at, completed_at
     FROM assessment_attempts
     WHERE id = ?;
   `, [attemptId]);
@@ -1178,6 +1183,14 @@ export async function getAttemptResult(attemptId: string): Promise<AttemptResult
     };
   });
 
+  const startedAt = att[5] as string;
+  const completedAt = att[6] as string | null;
+  const startedMs = new Date(startedAt).getTime();
+  const completedMs = completedAt ? new Date(completedAt).getTime() : Number.NaN;
+  const durationSeconds = Number.isFinite(startedMs) && Number.isFinite(completedMs)
+    ? Math.max(0, Math.floor((completedMs - startedMs) / 1000))
+    : null;
+
   return {
     attemptId: att[0] as string,
     formId: att[1] as string,
@@ -1185,7 +1198,9 @@ export async function getAttemptResult(attemptId: string): Promise<AttemptResult
     aggregateScore: att[3] as number,
     totalPossibleMarks: totalPossible,
     gradingStatus: att[4] as string,
-    completedAt: att[5] as string | null,
+    startedAt,
+    completedAt,
+    durationSeconds,
     questions,
   };
 }

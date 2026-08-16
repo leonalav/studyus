@@ -14,6 +14,7 @@ import {
   Sigma,
   Save,
   AlertCircle,
+  AlertTriangle,
   Lightbulb,
 } from "lucide-react";
 import {
@@ -22,6 +23,7 @@ import {
   createRetakeAttempt,
   autosaveDraft,
   submitAttempt,
+  getAttemptResult,
   AttemptForTakingDTO,
   AttemptResultDTO,
 } from "../../api";
@@ -79,7 +81,6 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   const examScrollRef = useRef<HTMLDivElement>(null);
   const [scrollAvailability, setScrollAvailability] = useState({ up: false, down: false });
   const [time, setTime] = useState(0);
-  const startTime = useRef(Date.now());
 
   useEffect(() => {
     setRunnerAttemptId(attemptId);
@@ -91,21 +92,27 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
     setHintedItems(new Set());
     questionFlagsRef.current = {};
     pendingDraftsRef.current.clear();
-    startTime.current = Date.now();
     setTime(0);
   }, [attemptId]);
 
-  /* Load the real attempt: items, drafts and flags all come from SQLite. */
+  /* Load the real attempt: items, drafts and flags all come from SQLite. A
+     finished attempt loads its immutable receipt instead of briefly reopening
+     an editable exam. */
   useEffect(() => {
     let cancelled = false;
-    getAttemptForTaking(runnerAttemptId)
-      .then((d) => {
+    (async () => {
+      try {
+        const d = await getAttemptForTaking(runnerAttemptId);
         if (cancelled) return;
         if (!d || d.questions.length === 0) {
           setLoadError("This attempt holds no questions.");
           return;
         }
-        setDto(d);
+
+        const finished = d.status === "completed" || d.status === "grading_blocked";
+        const storedResult = finished ? await getAttemptResult(runnerAttemptId) : null;
+        if (cancelled) return;
+
         const restored: Record<string, { mcq?: string; numeric?: string; proof?: string }> = {};
         const restoredFlags: Record<string, string[]> = {};
         const restoredHints = new Set<string>();
@@ -120,10 +127,12 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         questionFlagsRef.current = restoredFlags;
         setHintedItems(restoredHints);
         setAnswers(restored);
-      })
-      .catch(() => {
+        setSubmissionResult(storedResult);
+        setDto(d);
+      } catch {
         if (!cancelled) setLoadError("Could not load the attempt.");
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -174,9 +183,30 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
   }, [total]);
 
   useEffect(() => {
-    const t = window.setInterval(() => setTime(Math.floor((Date.now() - startTime.current) / 1000)), 1000);
-    return () => window.clearInterval(t);
-  }, []);
+    if (!dto?.startedAt) return;
+
+    if (submissionResult) {
+      if (submissionResult.durationSeconds !== null) {
+        setTime(submissionResult.durationSeconds);
+        return;
+      }
+      const completedMs = submissionResult.completedAt
+        ? new Date(submissionResult.completedAt).getTime()
+        : Number.NaN;
+      const startedMs = new Date(submissionResult.startedAt).getTime();
+      if (Number.isFinite(startedMs) && Number.isFinite(completedMs)) {
+        setTime(Math.max(0, Math.floor((completedMs - startedMs) / 1000)));
+      }
+      return;
+    }
+
+    const startedMs = new Date(dto.startedAt).getTime();
+    if (!Number.isFinite(startedMs)) return;
+    const update = () => setTime(Math.max(0, Math.floor((Date.now() - startedMs) / 1000)));
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [dto?.startedAt, submissionResult]);
 
   // Fullscreen exam mode intentionally hides the app shell's scroller. Give the
   // runner its own persistent scroll region and keep explicit up/down controls
@@ -346,7 +376,11 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
       await flushPendingDrafts();
       const res = await submitAttempt(runnerAttemptId);
       setSubmissionResult(res);
-      onNotify(`Exam submitted · Final score: ${res.aggregateScore}/${res.totalPossibleMarks}`);
+      onNotify(
+        res.gradingStatus === "grading_blocked"
+          ? "Exam submitted · Some answers need review"
+          : `Exam submitted · Final score: ${res.aggregateScore}/${res.totalPossibleMarks}`
+      );
     } catch (err) {
       onNotify(err instanceof Error ? err.message : "Submission error. Attempt recorded as retryable.");
     }
@@ -364,7 +398,6 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
       setSubmissionResult(null);
       setHintedItems(new Set());
       questionFlagsRef.current = {};
-      startTime.current = Date.now();
       setTime(0);
       setSaveStatus("saved");
       setRunnerAttemptId(nextAttemptId);
@@ -407,7 +440,6 @@ export function TestRunner({ attemptId, title, rigor, onExit, onNotify }: Props)
         result={submissionResult}
         onRetake={() => void startRetake()}
         onExit={onExit}
-        time={time}
       />
     );
   }
@@ -957,89 +989,167 @@ function Katex({ math }: { math: string }) {
 
 /* ── Submitted view consuming Authoritative DTO ── */
 
-function SubmittedView({
+export function formatAttemptDuration(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const wholeSeconds = Math.floor(seconds);
+  const hours = Math.floor(wholeSeconds / 3600);
+  const minutes = Math.floor((wholeSeconds % 3600) / 60);
+  const remainder = wholeSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+export function SubmittedView({
   result,
   onRetake,
   onExit,
-  time,
 }: {
   result: AttemptResultDTO;
   onRetake: () => void;
   onExit: () => void;
-  time: number;
 }) {
   const total = result.totalPossibleMarks;
   const score = result.aggregateScore;
-  const mm = String(Math.floor(time / 60)).padStart(2, "0");
-  const ss = String(time % 60).padStart(2, "0");
+  const gradingBlocked = result.gradingStatus === "grading_blocked"
+    || result.questions.some((question) => question.gradingStatus === "grading_blocked");
+  const completionTime = formatAttemptDuration(result.durationSeconds);
 
   return (
-    <div className="mx-auto w-full max-w-[860px] px-5 pt-10 pb-20 select-none">
-      <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Authoritative Evaluation</div>
-      <h1 className="mb-1 text-[40px] font-bold leading-tight text-fg tabular-nums">
-        {score} <span className="text-[20px] text-dim">/ {total}</span>
-      </h1>
-      <p className="mb-6 text-[13.5px] text-dim">
-        Criterion-referenced result evaluated deterministically by backend. Demonstrated criterion mastery.
-      </p>
-
-      <div className="mb-6 grid grid-cols-3 gap-3">
-        {[
-          { label: "Grading Status", val: result.status, color: "text-fg" },
-          { label: "Completion Time", val: `${mm}:${ss}`, color: "text-[#fcd34d]" },
-          { label: "Demonstrated Score", val: `${score}/${total}`, color: "text-[#86efac]" },
-        ].map((m) => (
-          <div key={m.label} className="rounded-md border border-edge bg-raise p-3">
-            <div className={`text-[18px] font-semibold capitalize ${m.color}`}>{m.val}</div>
-            <div className="text-[11px] text-dim">{m.label}</div>
-          </div>
-        ))}
+    <div className="h-screen w-full overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
+      <div className="sticky top-0 z-30 border-b border-edge bg-[#181819]/95 backdrop-blur">
+        <div className="mx-auto flex w-full max-w-[860px] items-center justify-between gap-3 px-5 py-3">
+          <button
+            type="button"
+            onClick={onExit}
+            className="flex items-center gap-1.5 rounded-md border border-edge bg-raise px-3 py-1.5 text-[12.5px] text-mut transition-colors hover:bg-white/[0.08] hover:text-fg"
+          >
+            <ArrowLeft size={13} />
+            Back to Available tests
+          </button>
+          <span className="font-mono text-[10px] uppercase tracking-wider text-dim">Submission receipt</span>
+        </div>
       </div>
 
-      <div className="mb-6 overflow-hidden rounded-md border border-edge">
-        {result.questions.map((q, i) => (
-          <div key={q.itemId} className={i > 0 ? "border-t border-edge-soft" : ""}>
-            <div className="flex items-start gap-3 px-4 py-3">
-              <span className="w-7 shrink-0 font-mono text-[12px] text-dim">{String(i + 1).padStart(2, "0")}</span>
-              <div className="min-w-0 flex-1">
-                <div className="break-words text-[13px] text-fg">{q.stem}</div>
-                {q.figure && <AssessmentFigure intent={q.figure} />}
-                <div className="mt-1 font-mono text-[10.5px] text-dim">
-                  Committed: {q.committedResponse || "blank"}
-                </div>
-                {q.criteria.length > 0 && (
-                  <div className="mt-2 space-y-1">
-                    {q.criteria.map((c) => (
-                      <div key={c.criterionId} className="flex items-center justify-between text-[11px] text-dim bg-black/20 px-2 py-1 rounded">
-                        <span>Criterion [{c.criterionId}]: {c.rationale}</span>
-                        <span className="font-mono text-fg font-medium">{c.awardedMark}/{c.maximumMark}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <span className="shrink-0 font-mono text-[13px] font-semibold text-[#86efac]">
-                {q.awardedMarks}/{q.maximumMarks}
-              </span>
+      <main className="mx-auto w-full max-w-[860px] px-5 pb-20 pt-8 select-none">
+        <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Authoritative Evaluation</div>
+        <h1 className="mb-1 text-[40px] font-bold leading-tight text-fg tabular-nums">
+          {score} <span className="text-[20px] text-dim">/ {total}</span>
+        </h1>
+        <p className="mb-6 text-[13.5px] text-dim">
+          {gradingBlocked
+            ? "Your submission is complete. Reliably graded marks are shown below; held answers are not counted as wrong."
+            : "Criterion-referenced result evaluated by the assessment backend."}
+        </p>
+
+        <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          {[
+            {
+              label: "Grading Status",
+              val: gradingBlocked ? "Needs review" : "Graded",
+              color: gradingBlocked ? "text-[#fcd34d]" : "text-[#86efac]",
+            },
+            { label: "Completion Time", val: completionTime, color: "text-[#fcd34d]" },
+            {
+              label: gradingBlocked ? "Scored Marks" : "Demonstrated Score",
+              val: `${score}/${total}`,
+              color: gradingBlocked ? "text-fg" : "text-[#86efac]",
+            },
+          ].map((metric) => (
+            <div key={metric.label} className="rounded-md border border-edge bg-raise p-3">
+              <div className={`text-[18px] font-semibold ${metric.color}`}>{metric.val}</div>
+              <div className="text-[11px] text-dim">{metric.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {gradingBlocked && (
+          <div className="mb-6 flex items-start gap-3 rounded-lg border border-[#fcd34d]/30 bg-[#fcd34d]/[0.06] px-4 py-3">
+            <AlertTriangle size={17} className="mt-0.5 shrink-0 text-[#fcd34d]" />
+            <div>
+              <div className="text-[13px] font-semibold text-fg">What “Needs review” means</div>
+              <p className="mt-0.5 text-[12.5px] leading-relaxed text-dim">
+                Grading blocked is a real safety state, not a placeholder. At least one answer could not be graded reliably—for example, the evaluator was unavailable or an answer key was missing. Studyus holds that answer for review instead of guessing a mark.
+              </p>
             </div>
           </div>
-        ))}
-      </div>
+        )}
 
-      <div className="flex items-center gap-2">
-        <button
-          onClick={onRetake}
-          className="rounded-md bg-accent px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent-deep"
-        >
-          Retake exam
-        </button>
-        <button
-          onClick={onExit}
-          className="rounded-md border border-edge bg-raise px-3.5 py-2 text-[13px] text-mut transition-colors hover:bg-white/[0.07] hover:text-fg"
-        >
-          Back to dashboard
-        </button>
-      </div>
+        <div className="mb-6 overflow-hidden rounded-md border border-edge">
+          {result.questions.map((question, index) => {
+            const heldForReview = question.gradingStatus === "grading_blocked";
+            const fullMarks = question.awardedMarks >= question.maximumMarks;
+            return (
+              <section key={question.itemId} className={index > 0 ? "border-t border-edge-soft" : ""}>
+                <div className="flex items-start gap-3 px-4 py-4">
+                  <span className="w-7 shrink-0 font-mono text-[12px] text-dim">
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="break-words text-[13px] leading-relaxed text-fg">{question.stem}</div>
+                    {question.figure && <AssessmentFigure intent={question.figure} />}
+                    <div className="mt-2 rounded-md bg-black/20 px-2.5 py-2">
+                      <div className="font-mono text-[9.5px] uppercase tracking-wider text-faint">Your submitted answer</div>
+                      <div className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-dim">
+                        {question.committedResponse || "Blank"}
+                      </div>
+                    </div>
+                    {question.criteria.length > 0 && (
+                      <div className="mt-2 space-y-1.5">
+                        {question.criteria.map((criterion) => (
+                          <div
+                            key={criterion.criterionId}
+                            className="flex items-start justify-between gap-3 rounded bg-black/20 px-2.5 py-2 text-[11px] text-dim"
+                          >
+                            <span className="min-w-0 break-words leading-relaxed">
+                              Criterion [{criterion.criterionId}]: {criterion.rationale}
+                            </span>
+                            {!heldForReview && (
+                              <span className="shrink-0 font-mono font-medium text-fg">
+                                {criterion.awardedMark}/{criterion.maximumMark}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {heldForReview && question.criteria.length === 0 && (
+                      <p className="mt-2 rounded bg-[#fcd34d]/[0.06] px-2.5 py-2 text-[11.5px] text-[#fcd34d]">
+                        No reliable automatic evaluation was recorded for this answer.
+                      </p>
+                    )}
+                  </div>
+                  {heldForReview ? (
+                    <span className="shrink-0 rounded-full bg-[#fcd34d]/15 px-2 py-1 font-mono text-[9.5px] text-[#fcd34d]">
+                      Needs review
+                    </span>
+                  ) : (
+                    <span className={`shrink-0 font-mono text-[13px] font-semibold ${fullMarks ? "text-[#86efac]" : "text-[#fca5a5]"}`}>
+                      {question.awardedMarks}/{question.maximumMarks}
+                    </span>
+                  )}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={onRetake}
+            className="rounded-md bg-accent px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent-deep"
+          >
+            Retake exam
+          </button>
+          <button
+            onClick={onExit}
+            className="rounded-md border border-edge bg-raise px-3.5 py-2 text-[13px] text-mut transition-colors hover:bg-white/[0.07] hover:text-fg"
+          >
+            Back to Available tests
+          </button>
+        </div>
+      </main>
     </div>
   );
 }

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, X as XIcon, MinusCircle } from "lucide-react";
+import { AlertTriangle, Check, X as XIcon, MinusCircle } from "lucide-react";
 import {
   getCompletedQuestionBankRecords,
+  type QuestionBankFormat,
   type QuestionBankRecord,
   type QuestionBankStatus,
 } from "../../lib/questionBank";
@@ -12,14 +13,15 @@ type Status = QuestionBankStatus;
 
 export function QuestionBank({ onNotify }: { onNotify: (t: string) => void }) {
   const [subject, setSubject] = useState<string>("all");
-  const [format, setFormat] = useState<"all" | "mcq" | "proof">("all");
+  const [format, setFormat] = useState<"all" | QuestionBankFormat>("all");
   const [status, setStatus] = useState<"all" | Status>("all");
   const [q, setQ] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [questions, setQuestions] = useState<QuestionBankRecord[]>([]);
 
-  // Only completed attempts become learner-history records. Generated and
-  // in-progress tests stay out of Question bank until submission finishes.
+  // All generated items are logged in SQLite when authored, but this feature
+  // reveals them only after submission. That keeps questions and answer keys
+  // out of Question bank while their test is new or in progress.
   useEffect(() => {
     let cancelled = false;
     getCompletedQuestionBankRecords()
@@ -50,12 +52,22 @@ export function QuestionBank({ onNotify }: { onNotify: (t: string) => void }) {
   }, [questions, subject, format, status, q]);
 
   const counts = useMemo(() => {
-    const base = { correct: 0, wrong: 0, unattempted: 0 };
+    const base: Record<QuestionBankStatus, number> = {
+      correct: 0,
+      wrong: 0,
+      unattempted: 0,
+      "needs-review": 0,
+    };
     for (const item of questions) {
       base[item.status] += 1;
     }
     return base;
   }, [questions]);
+
+  const subjects = useMemo(
+    () => [...new Set(questions.map((item) => item.subject))].sort((a, b) => a.localeCompare(b)),
+    [questions]
+  );
 
   const selected = selectedId ? questions.find((item) => item.id === selectedId) : null;
 
@@ -64,13 +76,14 @@ export function QuestionBank({ onNotify }: { onNotify: (t: string) => void }) {
       <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">Testing & Practice</div>
       <h1 className="mb-1 text-[36px] font-bold leading-tight tracking-tight text-fg">Question bank</h1>
       <p className="mb-6 text-[13.5px] text-dim">
-        Questions from completed tests, recorded with your submitted answers and evaluation rationale in SQLite.
+        Every generated question is logged privately. Questions, answers, and evaluation details appear here only after their test is submitted.
       </p>
 
-      <div className="mb-5 grid grid-cols-3 gap-2">
+      <div className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-4">
         <StatCard label="Correct" value={counts.correct} color="#86efac" />
         <StatCard label="Wrong" value={counts.wrong} color="#fca5a5" />
         <StatCard label="Unattempted" value={counts.unattempted} color="#a5b4fc" />
+        <StatCard label="Needs review" value={counts["needs-review"]} color="#fcd34d" />
       </div>
 
       <input
@@ -84,23 +97,22 @@ export function QuestionBank({ onNotify }: { onNotify: (t: string) => void }) {
         <Pill active={subject === "all"} onClick={() => setSubject("all")}>
           All subjects
         </Pill>
-        <Pill active={subject === "physics"} onClick={() => setSubject("physics")}>
-          Physics
-        </Pill>
-        <Pill active={subject === "math"} onClick={() => setSubject("math")}>
-          Math
-        </Pill>
+        {subjects.map((name) => (
+          <Pill key={name} active={subject === name} onClick={() => setSubject(name)}>
+            {name}
+          </Pill>
+        ))}
       </div>
       <div className="mb-5 flex flex-wrap items-center gap-1.5">
-        {(["all", "mcq", "proof"] as const).map((f) => (
+        {(["all", "mcq", "numeric", "proof"] as const).map((f) => (
           <Pill key={f} active={format === f} onClick={() => setFormat(f)}>
-            {f === "all" ? "All formats" : f === "mcq" ? "MCQ" : "Proof"}
+            {f === "all" ? "All formats" : f === "mcq" ? "MCQ" : f.charAt(0).toUpperCase() + f.slice(1)}
           </Pill>
         ))}
         <span className="mx-1 h-4 w-px bg-edge" />
-        {(["all", "correct", "wrong", "unattempted"] as const).map((s) => (
+        {(["all", "correct", "wrong", "unattempted", "needs-review"] as const).map((s) => (
           <Pill key={s} active={status === s} onClick={() => setStatus(s)}>
-            {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
+            {s === "all" ? "All" : s === "needs-review" ? "Needs review" : s.charAt(0).toUpperCase() + s.slice(1)}
           </Pill>
         ))}
       </div>
@@ -128,8 +140,13 @@ export function QuestionBank({ onNotify }: { onNotify: (t: string) => void }) {
             <span
               className="mt-0.5 shrink-0 rounded px-1.5 py-0.5 font-mono text-[9.5px] uppercase"
               style={{
-                background: item.format === "mcq" ? "rgba(125,211,252,0.14)" : "rgba(165,180,252,0.14)",
-                color: item.format === "mcq" ? "#7dd3fc" : "#a5b4fc",
+                background:
+                  item.format === "mcq"
+                    ? "rgba(125,211,252,0.14)"
+                    : item.format === "numeric"
+                      ? "rgba(252,211,77,0.14)"
+                      : "rgba(165,180,252,0.14)",
+                color: item.format === "mcq" ? "#7dd3fc" : item.format === "numeric" ? "#fcd34d" : "#a5b4fc",
               }}
             >
               {item.format}
@@ -191,8 +208,10 @@ function StatusDot({ status }: { status: Status }) {
     status === "correct"
       ? { bg: "bg-[#86efac]/15", ring: "border-[#86efac]", icon: <Check size={11} className="text-[#86efac]" strokeWidth={3} /> }
       : status === "wrong"
-      ? { bg: "bg-[#fca5a5]/15", ring: "border-[#fca5a5]", icon: <XIcon size={11} className="text-[#fca5a5]" strokeWidth={3} /> }
-      : { bg: "bg-white/[0.05]", ring: "border-white/20", icon: <MinusCircle size={11} className="text-dim" /> };
+        ? { bg: "bg-[#fca5a5]/15", ring: "border-[#fca5a5]", icon: <XIcon size={11} className="text-[#fca5a5]" strokeWidth={3} /> }
+        : status === "needs-review"
+          ? { bg: "bg-[#fcd34d]/15", ring: "border-[#fcd34d]", icon: <AlertTriangle size={11} className="text-[#fcd34d]" /> }
+          : { bg: "bg-white/[0.05]", ring: "border-white/20", icon: <MinusCircle size={11} className="text-dim" /> };
   return (
     <span
       className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full border ${style.bg} ${style.ring}`}
@@ -207,8 +226,10 @@ function StatusChip({ status }: { status: Status }) {
     status === "correct"
       ? { bg: "bg-[#86efac]/15", fg: "text-[#86efac]", label: "Correct" }
       : status === "wrong"
-      ? { bg: "bg-[#fca5a5]/15", fg: "text-[#fca5a5]", label: "Wrong" }
-      : { bg: "bg-white/[0.05]", fg: "text-dim", label: "Unattempted" };
+        ? { bg: "bg-[#fca5a5]/15", fg: "text-[#fca5a5]", label: "Wrong" }
+        : status === "needs-review"
+          ? { bg: "bg-[#fcd34d]/15", fg: "text-[#fcd34d]", label: "Needs review" }
+          : { bg: "bg-white/[0.05]", fg: "text-dim", label: "Unattempted" };
   return (
     <span className={`mt-0.5 shrink-0 rounded-full px-2 py-[1px] font-mono text-[9.5px] ${style.bg} ${style.fg}`}>
       {style.label}
@@ -229,11 +250,15 @@ function QuestionDetail({
   prompt: string;
   topic: string;
   subject: string;
-  format: "mcq" | "proof";
+  format: QuestionBankFormat;
   item: QuestionBankRecord;
   onClose: () => void;
 }) {
-  const isWrong = item.status === "wrong";
+  const answerTone = item.status === "wrong"
+    ? { border: "rgba(252,165,165,0.35)", background: "rgba(252,165,165,0.05)" }
+    : item.status === "needs-review"
+      ? { border: "rgba(252,211,77,0.35)", background: "rgba(252,211,77,0.05)" }
+      : { border: "rgba(134,239,172,0.35)", background: "rgba(134,239,172,0.05)" };
 
   return (
     <div className="fixed inset-0 z-[80] flex justify-center bg-black/50 px-4 pt-[6vh]" onMouseDown={onClose}>
@@ -276,10 +301,7 @@ function QuestionDetail({
             </div>
             <div
               className="whitespace-pre-wrap rounded-md border px-3.5 py-2.5 text-[13px] leading-relaxed text-fg/90"
-              style={{
-                borderColor: isWrong ? "rgba(252,165,165,0.35)" : "rgba(134,239,172,0.35)",
-                background: isWrong ? "rgba(252,165,165,0.05)" : "rgba(134,239,172,0.05)",
-              }}
+              style={{ borderColor: answerTone.border, background: answerTone.background }}
             >
               {item.yourAnswer}
             </div>
@@ -296,13 +318,21 @@ function QuestionDetail({
 
           <section>
             <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-dim">
-              Evaluation Rationale & Wrong Reason
+              Evaluation rationale
             </div>
             <div
               className="rounded-md border border-dashed px-3.5 py-2.5 text-[13px] leading-relaxed text-fg/85"
               style={{
-                borderColor: isWrong ? "rgba(252,165,165,0.4)" : "rgba(165,180,252,0.35)",
-                background: isWrong ? "rgba(252,165,165,0.04)" : "rgba(165,180,252,0.04)",
+                borderColor: item.status === "wrong"
+                  ? "rgba(252,165,165,0.4)"
+                  : item.status === "needs-review"
+                    ? "rgba(252,211,77,0.4)"
+                    : "rgba(165,180,252,0.35)",
+                background: item.status === "wrong"
+                  ? "rgba(252,165,165,0.04)"
+                  : item.status === "needs-review"
+                    ? "rgba(252,211,77,0.04)"
+                    : "rgba(165,180,252,0.04)",
               }}
             >
               {item.reason}

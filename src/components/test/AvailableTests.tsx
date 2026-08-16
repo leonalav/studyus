@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Play } from "lucide-react";
+import { Eye, Play } from "lucide-react";
 import { getDb } from "../../db/database";
 import { beginAttempt } from "../../api";
 import type { TestParams } from "../testTabIds";
@@ -138,11 +138,16 @@ export function AvailableTests({ onNotify, onStart, refreshKey }: Props) {
     if (openingAttemptId) return;
     setOpeningAttemptId(test.id);
     try {
-      // Only this explicit learner action turns a never-opened test into an
-      // active attempt. Generation itself must leave it in the Start state.
-      await beginAttempt(test.id);
+      const finished = test.status === "completed" || test.status === "grading-blocked";
+      // Only a start/resume action transitions an attempt. Finished attempts
+      // reopen their immutable receipt and must never be started or re-graded.
+      if (!finished) await beginAttempt(test.id);
       onStart(test.params);
-      onNotify(`${test.status === "in-progress" ? "Resuming" : "Starting"} "${test.title}"`);
+      onNotify(
+        finished
+          ? `Reviewing "${test.title}"`
+          : `${test.status === "in-progress" ? "Resuming" : "Starting"} "${test.title}"`
+      );
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "Could not open this test");
     } finally {
@@ -162,11 +167,11 @@ export function AvailableTests({ onNotify, onStart, refreshKey }: Props) {
       : s === "in-progress"
       ? { bg: "rgba(252,211,77,0.14)", fg: "#fcd34d", label: "In progress" }
       : s === "grading-blocked"
-        ? { bg: "rgba(252,165,165,0.14)", fg: "#fca5a5", label: "Grading blocked" }
+        ? { bg: "rgba(252,211,77,0.14)", fg: "#fcd34d", label: "Needs review" }
         : { bg: "rgba(134,239,172,0.14)", fg: "#86efac", label: "Completed" };
 
   const pendingCount = tests.filter((t) => t.status === "new" || t.status === "in-progress").length;
-  const completedCount = tests.filter((t) => t.status === "completed").length;
+  const completedCount = tests.filter((t) => t.status === "completed" || t.status === "grading-blocked").length;
   const completedTests = tests.filter((t) => t.status === "completed" && t.score !== undefined);
   const avgScore = completedTests.length
     ? Math.round(completedTests.reduce((n, t) => n + (t.score ?? 0), 0) / completedTests.length)
@@ -229,20 +234,33 @@ export function AvailableTests({ onNotify, onStart, refreshKey }: Props) {
                   {t.subject} · {t.questions} questions · {t.format} · {t.rigor} · {t.due}
                 </div>
               </div>
-              {t.score !== undefined ? (
-                <span className="shrink-0 font-mono text-[15px] font-semibold text-[#86efac]">{t.score}%</span>
-              ) : t.status === "grading-blocked" ? (
-                <span className="shrink-0 font-mono text-[10.5px] text-[#fca5a5]">Needs review</span>
-              ) : (
+              <div className="flex shrink-0 items-center gap-2">
+                {t.score !== undefined && (
+                  <span className="font-mono text-[15px] font-semibold text-[#86efac]">{t.score}%</span>
+                )}
                 <button
                   onClick={() => void openTest(t)}
                   disabled={openingAttemptId !== null}
-                  className="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-accent-deep disabled:cursor-wait disabled:opacity-55"
+                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors disabled:cursor-wait disabled:opacity-55 ${
+                    t.status === "completed" || t.status === "grading-blocked"
+                      ? "border border-edge bg-white/[0.05] text-mut hover:bg-white/[0.1] hover:text-fg"
+                      : "bg-accent text-white hover:bg-accent-deep"
+                  }`}
                 >
-                  <Play size={11} fill="currentColor" />
-                  {openingAttemptId === t.id ? "Opening…" : t.status === "in-progress" ? "Resume" : "Start"}
+                  {t.status === "completed" || t.status === "grading-blocked" ? (
+                    <Eye size={11} />
+                  ) : (
+                    <Play size={11} fill="currentColor" />
+                  )}
+                  {openingAttemptId === t.id
+                    ? "Opening…"
+                    : t.status === "completed" || t.status === "grading-blocked"
+                      ? "Review"
+                      : t.status === "in-progress"
+                        ? "Resume"
+                        : "Start"}
                 </button>
-              )}
+              </div>
             </div>
           );
         })}

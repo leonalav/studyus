@@ -8,6 +8,7 @@ import {
   createRetakeAttempt,
   autosaveDraft,
   submitAttempt,
+  getAttemptResult,
   applyScoreOverride,
   TypedNumericAnswerSpec,
 } from "./assessment";
@@ -96,6 +97,19 @@ describe("Assessment & Numeric Grader Engine", () => {
       const res2 = await submitAttempt("attempt-legacy-1");
       expect(res2.status).toBe("completed");
       expect(res2.aggregateScore).toBe(res1.aggregateScore);
+    });
+
+    it("derives a stable completion duration from persisted attempt boundaries", async () => {
+      const db = await getDb();
+      db.run(
+        "UPDATE assessment_attempts SET started_at = ?, completed_at = ? WHERE id = 'attempt-legacy-1';",
+        ["2026-08-16T12:00:00.000Z", "2026-08-16T12:02:05.900Z"]
+      );
+
+      const result = await getAttemptResult("attempt-legacy-1");
+      expect(result.startedAt).toBe("2026-08-16T12:00:00.000Z");
+      expect(result.completedAt).toBe("2026-08-16T12:02:05.900Z");
+      expect(result.durationSeconds).toBe(125);
     });
 
     it("creates retakes as clean attempts against the same immutable form", async () => {

@@ -311,11 +311,11 @@ export default function App() {
 
   const exitTest = useCallback(() => {
     setActiveTest(null);
-    setTabs((current) => current.some((tab) => tab.id === "test-take")
+    setTabs((current) => current.some((tab) => tab.id === "test-available")
       ? current
-      : [...current, { id: "test-take", title: "Available tests", kind: "test" }]
+      : [...current, { id: "test-available", title: "Available tests", kind: "test" }]
     );
-    setActiveTabId("test-take");
+    setActiveTabId("test-available");
   }, []);
 
   /* global shortcuts: ⌘K search · ⌘, settings */
