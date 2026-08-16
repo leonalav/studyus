@@ -23,6 +23,8 @@ For each page image, return the page's instructional content as clean prose with
 - Do NOT wrap the whole response in a code fence. Do NOT use \\begin{equation}/\\begin{align} environments; use $$...$$ and $...$ only.
 - If a page is blank or non-instructional (cover, toc, license), return the single word: BLANK`;
 
+import { seedSkillGraphFromCurriculum } from "./learning/skillGraph";
+
 export interface CurriculumNodeRecord {
   id: string;
   sourceId: string;
@@ -341,6 +343,20 @@ export async function parseAndIngestPdfOutline({
   }
 
   saveDbSync();
+
+  // Derive the skill graph from the outline that was just written. This is what
+  // makes prerequisite repair possible at all: without a graph, a learner
+  // failing repeatedly gets a generic diagnostic probe, because the engine has
+  // no way to know what sits underneath the thing they are failing at.
+  //
+  // Best-effort on purpose. The graph is an inference layered on top of the
+  // curriculum; failing to derive it must not fail the ingest of the source
+  // material itself, which is the thing the learner actually asked for.
+  try {
+    await seedSkillGraphFromCurriculum(sourceId);
+  } catch (error) {
+    console.warn("[curriculum] could not derive a skill graph from this outline", error);
+  }
 
   return {
     id: sourceId,

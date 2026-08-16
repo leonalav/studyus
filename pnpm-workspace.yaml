@@ -1,0 +1,4 @@
+# pnpm 11 project settings (the old "pnpm" field in package.json is no longer read).
+# esbuild ships a postinstall that validates its platform binary; allow it to run.
+allowBuilds:
+  esbuild: true

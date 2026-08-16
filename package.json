@@ -8,9 +8,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "tauri": "cross-env CARGO_TARGET_DIR=C:/rust_targets STUDYUS_TAURI=1 tauri",
-    "tauri:dev": "cross-env CARGO_TARGET_DIR=C:/rust_targets STUDYUS_TAURI=1 tauri dev",
-    "tauri:build": "cross-env CARGO_TARGET_DIR=C:/rust_targets STUDYUS_TAURI=1 tauri build"
+    "tauri": "node scripts/tauri.mjs",
+    "tauri:dev": "node scripts/tauri.mjs dev",
+    "tauri:build": "node scripts/tauri.mjs build"
   },
   "dependencies": {
     "@rdkit/rdkit": "^2025.3.4-1.0.0",
@@ -49,5 +49,6 @@
     "vite": "^7.3.6",
     "vite-plugin-singlefile": "2.3.0",
     "vitest": "^4.1.10"
-  }
+  },
+  "packageManager": "pnpm@11.21.0"
 }

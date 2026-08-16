@@ -474,13 +474,8 @@ export default function App() {
             onNotify={notify}
             onOpenSearch={() => setSearchOpen(true)}
             onOpenSettings={openSettingsRoot}
-<<<<<<< HEAD
             onOpenHelp={() => setHelpOpen(true)}
             onOpenMarketplace={() => openTab({ id: MARKETPLACE_TAB_ID, title: "Marketplace", kind: "marketplace" })}
-=======
-        onOpenHelp={() => setHelpOpen(true)}
-        onOpenMarketplace={() => openTab({ id: MARKETPLACE_TAB_ID, title: "Marketplace", kind: "marketplace" })}
->>>>>>> 0dcb05ff90fdf81355927b7ea4ee3d575aa8fc16
             onOpenTab={openTab}
             onPastNoteDeleted={(id) => removeResourceTabs("note", `note-${id}`)}
             onPastNoteRenamed={(id, title) => renameResourceTabs("note", `note-${id}`, title)}
@@ -504,18 +499,10 @@ export default function App() {
             placeholder content would imply there is something down there to
             reach. Every other tab keeps its normal scroll. */}
         <div
-<<<<<<< HEAD
           className={`relative flex-1 ${activeTab.kind === "marketplace"
               ? "flex min-h-0 flex-col overflow-hidden"
               : "overflow-y-auto"
             }`}
-=======
-          className={`relative flex-1 ${
-            activeTab.kind === "marketplace"
-              ? "flex min-h-0 flex-col overflow-hidden"
-              : "overflow-y-auto"
-          }`}
->>>>>>> 0dcb05ff90fdf81355927b7ea4ee3d575aa8fc16
         >
           <div className="sticky top-0 z-20 shrink-0 bg-ink/85 backdrop-blur-sm">
             <Toolbar

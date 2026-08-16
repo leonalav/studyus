@@ -239,6 +239,57 @@ export interface AnimationMotion {
   guideYExpression?: string;
 }
 
+/**
+ * A point in the animation where the learner must answer before continuing.
+ *
+ * Checkpoints are what turn watching into thinking. An animation that plays
+ * straight through produces a learner who has seen a thing happen and can tell
+ * you nothing about why; stopping it at the moment the interesting change occurs
+ * and requiring an answer is the difference between a demonstration and an
+ * activity.
+ */
+export interface AnimationCheckpoint {
+  id: string;
+  /** Normalized playhead position, 0–1, where playback halts. */
+  at: number;
+  /** The question asked at this point. */
+  prompt: string;
+  /** Options when the checkpoint is a discrimination rather than open. */
+  options?: QuestionOption[];
+  /** Accepted free-text answers, for deterministic grading. */
+  acceptedAnswers?: string[];
+  /** Why this moment. Kept so a checkpoint cannot be placed decoratively. */
+  rationale?: string;
+}
+
+/** Which playback affordances the learner is given. */
+export interface AnimationControls {
+  /** Learner can scrub the playhead freely. */
+  scrub?: boolean;
+  /** Learner can step one frame at a time. */
+  step?: boolean;
+  /** Learner can vary playback rate. */
+  speed?: boolean;
+  /** Learner can replay from the start. */
+  replay?: boolean;
+}
+
+/**
+ * Another representation kept in sync with the animation.
+ *
+ * A learner who can watch a value change on a graph while the same value changes
+ * in a table is being shown that the two are the same fact in different clothes.
+ * That linkage is the instructional content; presenting either alone loses it.
+ */
+export interface AnimationLinkedRepresentation {
+  id: string;
+  /** Semantic kind of the linked view — never a component name. */
+  representation: "graph" | "table" | "equation" | "number_line" | "diagram";
+  label: string;
+  /** What in this view tracks the animation. */
+  tracks: string;
+}
+
 export interface AnimationWidget extends WidgetBase {
   kind: "animation";
   frames: AnimationFrame[];
@@ -246,11 +297,32 @@ export interface AnimationWidget extends WidgetBase {
   /** Total run time across all frames. */
   durationMs?: number;
   loop?: boolean;
-  /** The prediction the learner should make before pressing play. */
+  /** The prediction the learner must commit BEFORE playback is unlocked.
+   *
+   *  When present, the surface locks the play control until an answer is
+   *  submitted. An unlocked prediction is not a prediction — a learner who can
+   *  watch first and answer after has been asked to describe, not to predict,
+   *  and the two produce completely different evidence. */
   predictPrompt?: string;
-  /** Optional prompt so the learner can commit that prediction in writing
-   *  before playing, which is the whole point of predicting. */
+  /** Prompt for committing that prediction in writing. */
   respond?: WidgetRespondSpec;
+  /** Points where playback halts and an answer is required. */
+  checkpoints?: AnimationCheckpoint[];
+  /** Playback affordances offered to the learner. Controlled observation beats
+   *  passive playback: a learner who can stop and step is examining, and one who
+   *  can only watch is spectating. */
+  controls?: AnimationControls;
+  /** Other representations held in sync with the animation. */
+  linkedRepresentations?: AnimationLinkedRepresentation[];
+  /** Asked after playback, to reconcile prediction against observation.
+   *
+   *  This is the step that makes a wrong prediction valuable. Without it the
+   *  learner sees they were wrong and moves on; with it they have to say what
+   *  they expected, what happened, and what accounts for the gap — which is the
+   *  moment the belief actually changes. */
+  reconcilePrompt?: string;
+  /** Asked last: rebuild the idea unaided, in the learner's own terms. */
+  reconstructPrompt?: string;
 }
 
 /* ── 8 · Comparison — put two ideas side by side ── */
@@ -577,14 +649,30 @@ export type MasteryEvidenceDimension = typeof MASTERY_EVIDENCE_DIMENSIONS[number
 export interface MasteryCardWidget extends WidgetBase {
   kind: "mastery_card";
   concept: string;
-  evidence: MasteryEvidence;
+  /** The skill whose ledger fills this card in.
+   *
+   *  Supplied by the agent so the harness knows which evidence to read. */
+  skillId?: string;
+  /** The five dimensions — COMPUTED from the evidence ledger, never authored.
+   *
+   *  Optional in the wire schema because the agent is not permitted to supply
+   *  it: whatever arrives here is overwritten by the harness before the card
+   *  reaches the board. A card whose skill has no ledger entries renders as
+   *  unproven rather than as zeros presented like measurements. */
+  evidence?: MasteryEvidence;
+  /** Ids of the evidence events behind the numbers, so a claim about the
+   *  learner can be traced back to the thing the learner actually did. */
+  evidenceIds?: string[];
+  /** The weakest dimension, named by the mastery gate. */
+  weakestLink?: keyof MasteryEvidence;
   understands?: string[];
   canDo?: string[];
   recalls?: string[];
   /** Things the agent does not yet trust — the honest part of the card. */
   watch?: string[];
   next?: string;
-  /** When the agent plans to resurface this concept for retrieval. */
+  /** When this concept is actually scheduled to resurface. Filled in from the
+   *  review queue, not from the agent's intention to remember. */
   reviewIn?: string;
 }
 
@@ -608,8 +696,32 @@ export interface WidgetState {
   sliderValue?: number;
   /** animation: playhead position, 0–1. */
   animationProgress?: number;
+  /** animation: the prediction was committed, which unlocks playback. */
+  predictionLocked?: boolean;
+  /** animation: answers given at checkpoints, keyed by checkpoint id.
+   *
+   *  Deliberately a compact semantic record rather than a playback trace. What
+   *  a learner answered at the moment the curve changed direction is evidence;
+   *  the sequence of scrub positions that got them there is telemetry, and
+   *  storing telemetry as if it were evidence is how systems end up concluding
+   *  that the learner who fidgeted with the slider understands more than the one
+   *  who thought before answering. */
+  checkpointResponses?: Record<string, { response: string; correct?: boolean }>;
+  /** animation: the post-playback reconciliation of prediction vs observation. */
+  reconcileText?: string;
+  /** animation: the unaided reconstruction written after reconciliation. */
+  reconstructText?: string;
   /** hint: highest hint level the learner has opened. */
   hintLevelOpened?: number;
+  /** Learner's own confidence in this answer, 0–100.
+   *
+   *  Recorded only when the surface asked for it explicitly. It is never
+   *  inferred from hesitation, typing speed, or edit count — inferring
+   *  confidence from behaviour is a guess dressed as a measurement. Its purpose
+   *  is calibration: the gap between what a learner believes they know and what
+   *  they demonstrate is itself a teachable fact, and it cannot be computed
+   *  without asking. */
+  confidence?: number;
   /** reveal: ids the learner has uncovered. */
   revealedIds?: string[];
   /** ISO timestamp of the learner's last interaction. */
