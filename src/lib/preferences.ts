@@ -3,7 +3,7 @@ export const PREFERENCES_STORAGE_KEY = "studyus.preferences.v1";
 export const PREFERENCES_CHANGED_EVENT = "studyus:preferences-changed";
 
 export type ThemePreference = "system" | "dark" | "light";
-export type FontPreference = "system" | "grotesk" | "inter" | "serif" | "mono";
+export type FontPreference = "helvetica" | "system" | "grotesk" | "inter" | "serif" | "mono";
 export type DensityPreference = "comfortable" | "compact";
 export type NotificationChannel = "in-app" | "desktop" | "both" | "email";
 export type NotificationEventId = "testReady" | "sessionComplete";
@@ -386,7 +386,7 @@ export const DEFAULT_TUTOR: TutorPreferences = {
 export const DEFAULT_PREFERENCES: StudyusPreferences = {
   appearance: {
     theme: "system",
-    font: "grotesk",
+    font: "helvetica",
     density: "comfortable",
     textSize: 100,
     reducedMotion: false,
@@ -701,7 +701,7 @@ export function sanitizePreferences(value: unknown): StudyusPreferences {
   return {
     appearance: {
       theme: enumValue(appearance.theme, ["system", "dark", "light"], DEFAULT_PREFERENCES.appearance.theme),
-      font: enumValue(appearance.font, ["system", "grotesk", "inter", "serif", "mono"], DEFAULT_PREFERENCES.appearance.font),
+      font: enumValue(appearance.font, ["helvetica", "system", "grotesk", "inter", "serif", "mono"], DEFAULT_PREFERENCES.appearance.font),
       density: enumValue(appearance.density, ["comfortable", "compact"], DEFAULT_PREFERENCES.appearance.density),
       textSize: numberValue(appearance.textSize, DEFAULT_PREFERENCES.appearance.textSize, 80, 140),
       reducedMotion: booleanValue(appearance.reducedMotion, DEFAULT_PREFERENCES.appearance.reducedMotion),

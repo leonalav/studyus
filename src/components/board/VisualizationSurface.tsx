@@ -2195,7 +2195,14 @@ function JsxGraphSurface({
     // We take that decision away from it: expand the figure box symmetrically
     // until its aspect EXACTLY matches the container, so the fit is an identity
     // and the whole figure is guaranteed visible with square units.
-    const fitted = () => fitBoxToAspect(figureBox, host.clientWidth, host.clientHeight);
+    //
+    // Function graphs opt out of this: they run with keepaspectratio=false, so
+    // JSXGraph would fit the padded domain/range box EXACTLY with no cropping
+    // decision to worry about. Aspect-widening that box only injected dead
+    // side-margins between the frame and the curve — the plotted line stopped
+    // at the prompt-declared domain inside a wider window, i.e. "not rendered
+    // in full". Geometry keeps the fit; functions take the figure box as-is.
+    const fitted = () => resolveBoardBox(figureBox, isGeometry, host.clientWidth, host.clientHeight);
 
     const board: Board = JXG.JSXGraph.initBoard(containerId, {
       boundingbox: fitted(),
@@ -2305,10 +2312,12 @@ function JsxGraphSurface({
     board.update();
 
     // JSXGraph sizes its SVG to the host, and the host's height comes from the
-    // figure's aspect (see BoardHost). On every resize we recompute the
-    // aspect-matched box for the CURRENT container and apply it, so the whole
-    // figure stays visible at any column width. Drag persistence is unaffected —
-    // resizing does not re-init the board.
+    // figure's aspect (see BoardHost). On every resize we recompute the box for
+    // the CURRENT container and apply it — aspect-matched for geometry, the
+    // verbatim figure box for functions (see resolveBoardBox) — so the whole
+    // figure stays visible at any column width without dead space around a
+    // graph. Drag persistence is unaffected — resizing does not re-init the
+    // board.
     //
     // We always apply a freshly-computed box rather than letting resizeContainer
     // round-trip through getBoundingBox(): that getter returns the currently
@@ -2327,7 +2336,7 @@ function JsxGraphSurface({
           const liveBox = isGeometry
             ? computeBoundingBox(intent, { pointPositions: positions })
             : figureBox;
-          board.setBoundingBox(fitBoxToAspect(liveBox, w, h), isGeometry, "reset");
+          board.setBoundingBox(resolveBoardBox(liveBox, isGeometry, w, h), isGeometry, "reset");
           board.fullUpdate();
         } catch {
           /* board already freed */
@@ -2904,7 +2913,13 @@ function renderFunction(board: Board, intent: FunctionIntent, chalk: string, acc
     try {
       const fn = compileExpression(expr.expression);
       compiled.set(expr.id, fn);
-      const curve = board.create("functiongraph", [(x: number) => fn(x), x0, x1], {
+      // No explicit [left, right] bounds: with bounds frozen to the declared
+      // domain the curve stopped at the domain edges and left dead margins
+      // inside the (padded, possibly panned or zoomed) frame — the "line not
+      // rendered in full" report. Unbounded functiongraphs instead re-plot
+      // over JSXGraph's live viewport on every update, so the line always
+      // reaches both graph edges, including while the learner pans or zooms.
+      const curve = board.create("functiongraph", [(x: number) => fn(x)], {
         strokeColor: color,
         strokeWidth: 2.2,
         highlight: false,
@@ -4221,7 +4236,29 @@ export function fitBoxToAspect(
   return [xMin, cy + newH / 2, xMax, cy - newH / 2];
 }
 
-/* Compute a JSXGraph bounding box from the intent (geometry viewport or function domain).
+/**
+ * The box that is actually given to JSXGraph for an intent.
+ *
+ * Geometry boards keep square units (`keepaspectratio`), so the figure box is
+ * aspect-fitted to the container to make the fit an identity (see
+ * {@link fitBoxToAspect}). Function boards stretch non-uniformly
+ * (`keepaspectratio` off), which can fit any box exactly — aspect-fitting
+ * their box would only pad it with dead space around the declared frame and
+ * make the plotted curve stop visibly short of the graph's edges. They render
+ * at the figure box verbatim.
+ *
+ * Exported for unit testing (pure math, no JSXGraph needed).
+ */
+export function resolveBoardBox(
+  figureBox: [number, number, number, number],
+  isGeometry: boolean,
+  containerW: number,
+  containerH: number
+): [number, number, number, number] {
+  return isGeometry ? fitBoxToAspect(figureBox, containerW, containerH) : figureBox;
+}
+
+ /* Compute a JSXGraph bounding box from the intent (geometry viewport or function domain).
    Exported for unit testing of the pure geometry-extent math (no JSXGraph needed). */
 export function computeBoundingBox(intent: VisualizationIntent, state?: VisualizationState): [number, number, number, number] {
   if (intent.type === "geometry") {

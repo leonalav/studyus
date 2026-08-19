@@ -8,6 +8,7 @@ import {
   fitBoxToAspect,
   getGraph3DSamplingPlan,
   getVisualizationPrewarmTargets,
+  resolveBoardBox,
   resolveDisplayMode,
 } from "./VisualizationSurface";
 
@@ -282,6 +283,21 @@ describe("fitBoxToAspect — figure is never cropped, only grown", () => {
   it("returns the box unchanged when the container has no measured size", () => {
     const box: [number, number, number, number] = [-1, 1, 1, -1];
     expect(fitBoxToAspect(box, 0, 0)).toEqual(box);
+  });
+});
+
+describe("resolveBoardBox — function graphs fill their frame", () => {
+  it("never widens a function box to the container aspect", () => {
+    // The reported bug: aspect-widening a function box (here the padded
+    // domain/range frame) left dead margins inside the graph, so a curve drawn
+    // across the declared domain reached only the middle of the visible plot.
+    const figureBox: [number, number, number, number] = [-9.6, 3.39, 9.6, -3.39];
+    expect(resolveBoardBox(figureBox, false, 920, 230)).toEqual(figureBox);
+  });
+
+  it("still aspect-fits geometry so square units are preserved without cropping", () => {
+    const figureBox: [number, number, number, number] = [-1, 5, 1, -5];
+    expect(resolveBoardBox(figureBox, true, 920, 230)).toEqual(fitBoxToAspect(figureBox, 920, 230));
   });
 });
 
