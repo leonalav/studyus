@@ -14,7 +14,9 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { renderMath } from "../../lib/latex/render";
+import { generateAxisTicks } from "./Visuals";
 import { gradeAnswerableWidget } from "../../lib/widgets/validate";
 import { WIDGET_LABEL, type WidgetIntent, type WidgetState, type WidgetKind, type WidgetRespondSpec } from "../../lib/widgets/types";
 import { assessMastery, MASTERY_DIMENSION_LABEL, MASTERY_THRESHOLD } from "../../lib/mastery";
@@ -52,6 +54,7 @@ export interface WidgetSurfaceProps {
 
 const MARKS: Record<WidgetKind, string> = {
   roadmap: "M4 18c0-3 4-3 4-6s-4-3-4-6M20 6c0 3-4 3-4 6s4 3 4 6",
+  plan: "M7 5.5h9M7 12h9M7 18.5h5M4 5.2l.9.9L6.5 4.5M4 11.7l.9.9 1.6-1.6M4 18.2l.9.9 1.6-1.6",
   concept_card: "M6 4h9l4 4v12H6zM14 4v5h5M9 13h6M9 16h4",
   slider: "M3 12h18",
   animation: "M4 16c4-9 12-9 16 0",
@@ -79,6 +82,7 @@ const EXTRA_MARK_SHAPES: Partial<Record<WidgetKind, React.ReactElement>> = {
 
 const DEFAULT_TAGS: Record<WidgetKind, string> = {
   roadmap: "Path",
+  plan: "Your say",
   concept_card: "Idea",
   slider: "Manipulate",
   animation: "Over time",
@@ -269,10 +273,11 @@ interface BodyProps {
  * the renderer unchecked. Those bodies used to throw on the missing field and —
  * before error boundaries existed — blank the entire application. Naming the
  * requirement here keeps the check in one auditable place instead of scattering
- * optional chaining through seventeen components.
+ * optional chaining through eighteen components.
  */
 const REQUIRED_LIST: Partial<Record<WidgetIntent["kind"], string>> = {
   roadmap: "steps",
+  plan: "steps",
   animation: "frames",
   comparison: "columns",
   hint: "steps",
@@ -305,7 +310,7 @@ function usableEntries(value: unknown): Record<string, unknown>[] {
  * Placement validates intents, but three paths reach the renderer unchecked: a
  * board restored from a saved session, a payload truncated mid-write, and a
  * widget authored by an older build. Rather than scatter optional chaining
- * across seventeen components, normalize once here so each body keeps its
+ * across eighteen components, normalize once here so each body keeps its
  * straightforward, readable shape.
  *
  * Returns the repaired intent, or a reason string when nothing renderable is
@@ -367,6 +372,14 @@ function normalizeIntent(intent: WidgetIntent): { intent: WidgetIntent } | { rea
         typeof m.xExpression === "string" &&
         typeof m.yExpression === "string";
       if (!ok) patch.motion = undefined;
+      else if (
+        // A stray non-string z from a truncated write would otherwise silently
+        // promote the scene to a broken 3D view.
+        (m as { zExpression?: unknown }).zExpression !== undefined &&
+        typeof (m as { zExpression?: unknown }).zExpression !== "string"
+      ) {
+        patch.motion = { ...(m as Record<string, unknown>), zExpression: undefined };
+      }
     }
   }
 
@@ -410,6 +423,7 @@ function renderBody(rawIntent: WidgetIntent, props: BodyProps) {
 
   switch (intent.kind) {
     case "roadmap": return <RoadmapBody intent={intent} {...props} />;
+    case "plan": return <PlanBody intent={intent} {...props} />;
     case "concept_card": return <ConceptCardBody intent={intent} {...props} />;
     case "slider": return <SliderBody intent={intent} {...props} />;
     case "animation": return <AnimationBody intent={intent} {...props} />;
@@ -531,6 +545,259 @@ function RoadmapBody({ intent, chalk, accent }: BodyProps & { intent: Extract<Wi
         })}
       </ol>
     </div>
+  );
+}
+
+/* ── 21 · Plan — the agreed route from zero to mastery ── */
+
+function PlanBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & { intent: Extract<WidgetIntent, { kind: "plan" }> }) {
+  const [editing, setEditing] = useState(false);
+  const agreed = state.submitted === true;
+
+  // The learner's edited route wins whenever present — what renders (and what
+  // the tutor is told about on agreement) is THEIR version of the plan.
+  const heading = state.planDraft?.heading ?? intent.heading;
+  const steps = state.planDraft?.steps ?? intent.steps;
+
+  const start = () => emit({ submitted: true });
+
+  return (
+    <div>
+      <div className="mb-2 flex items-baseline justify-between gap-2">
+        <div className="text-[13px] font-semibold leading-snug opacity-90">{heading}</div>
+        {state.planDraft ? (
+          <span
+            className="flex-none rounded-full px-1.5 py-px font-mono text-[8px] uppercase tracking-wide"
+            style={{ background: `${accent}1f`, color: accent }}
+            title="You edited this plan"
+          >
+            your version
+          </span>
+        ) : null}
+      </div>
+
+      <ol className="m-0 list-none space-y-0.5 p-0">
+        {steps.map((step, index) => (
+          <li key={step.id} className="grid grid-cols-[20px_1fr] gap-2.5">
+            <span className="relative flex flex-col items-center">
+              <span
+                className="grid h-[18px] w-[18px] flex-none place-items-center rounded-md border font-mono text-[9px]"
+                style={{ borderColor: `${accent}4d`, color: accent, background: "rgba(255,255,255,0.04)" }}
+              >
+                {index + 1}
+              </span>
+              {index < steps.length - 1 ? <span className="mt-0.5 w-px flex-1" style={{ background: `${chalk}1f` }} /> : null}
+            </span>
+            <div className="min-w-0 pb-2.5">
+              <div className="text-[11.5px] font-medium leading-snug opacity-90">{step.label}</div>
+              {step.details?.length ? (
+                <ol className="m-0 mt-1 list-none space-y-0.5 p-0">
+                  {step.details.map((detail, i) => (
+                    <li key={i} className="text-[10px] leading-snug opacity-65">
+                      <span className="mr-1 font-mono opacity-70">({i + 1})</span>
+                      {detail}
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      {/* Consent, not a time estimate: nothing is taught until the learner
+          signs the route off — or rewrites it. */}
+      <div className="mt-1 border-t pt-2.5" style={{ borderColor: `${chalk}18` }}>
+        <p className="m-0 mb-2 text-[10.5px] opacity-85">{intent.agreementPrompt ?? "Do you agree with this plan?"}</p>
+        {agreed ? (
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[9.5px] opacity-55">Agreed — the session is on this plan.</span>
+            <span
+              className="rounded-full px-2 py-[3px] font-mono text-[9px]"
+              style={{ background: "rgba(134,239,172,0.12)", color: "#86efac" }}
+            >
+              ✓ Started
+            </span>
+          </div>
+        ) : (
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={() => setEditing(true)}
+              className="rounded-md px-2.5 py-1.5 text-[11px] opacity-80 transition-colors hover:bg-white/10 disabled:opacity-40"
+            >
+              Edit plan
+            </button>
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={start}
+              className="rounded-md px-3 py-1.5 text-[11px] font-medium text-white transition-colors disabled:opacity-40"
+              style={{ background: "#33479e" }}
+            >
+              Start learning
+            </button>
+          </div>
+        )}
+      </div>
+
+      {editing ? (
+        <PlanEditSheet
+          heading={heading}
+          steps={steps}
+          onClose={() => setEditing(false)}
+          onSave={(next) => {
+            setEditing(false);
+            // A save that changed nothing is not an edit — leaving no draft
+            // means the card keeps presenting the agent's proposal as itself.
+            const unchanged =
+              next.heading === intent.heading &&
+              JSON.stringify(next.steps) ===
+                JSON.stringify(intent.steps.map((s) => ({ id: s.id, label: s.label, ...(s.details?.length ? { details: s.details } : {}) })));
+            if (!unchanged) emit({ planDraft: next });
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** The floating editor behind "Edit plan": every line is free text, steps add
+ *  and remove freely, and a save that empties the route is refused — a plan
+ *  with one step is a sentence, with zero it's a shrug. */
+function PlanEditSheet({
+  heading,
+  steps,
+  onSave,
+  onClose,
+}: {
+  heading: string;
+  steps: { id: string; label: string; details?: string[] }[];
+  onSave: (next: { heading: string; steps: { id: string; label: string; details?: string[] }[] }) => void;
+  onClose: () => void;
+}) {
+  const [draftHeading, setDraftHeading] = useState(heading);
+  const [draftSteps, setDraftSteps] = useState<{ id: string; label: string; details: string }[]>(
+    steps.map((step) => ({ id: step.id, label: step.label, details: (step.details ?? []).join("\n") }))
+  );
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const patchStep = (id: string, patch: Partial<{ label: string; details: string }>) =>
+    setDraftSteps((current) => current.map((step) => (step.id === id ? { ...step, ...patch } : step)));
+  const removeStep = (id: string) => setDraftSteps((current) => current.filter((step) => step.id !== id));
+  const addStep = () =>
+    setDraftSteps((current) => [...current, { id: `edit-${Date.now()}`, label: "", details: "" }]);
+
+  const normalized = {
+    heading: draftHeading.trim(),
+    steps: draftSteps
+      .map((step, index) => ({
+        id: step.id || `s${index + 1}`,
+        label: step.label.trim(),
+        details: step.details.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+      }))
+      .filter((step) => step.label),
+  };
+  const savable = normalized.heading.length > 0 && normalized.steps.length >= 2;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit plan"
+        className="anim-msg flex min-h-[420px] w-[min(380px,94vw)] max-h-[86vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
+      >
+        <div className="flex items-center justify-between border-b border-white/8 px-4 py-3">
+          <h2 className="m-0 text-[14px] font-medium text-fg">Edit plan</h2>
+          <button
+            onClick={onClose}
+            aria-label="Close editor"
+            className="grid h-6 w-6 place-items-center rounded-md text-dim transition-colors hover:bg-white/[0.07] hover:text-fg"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+          <div>
+            <label className="mb-1 block font-mono text-[9px] uppercase tracking-[0.14em] text-dim">Concept</label>
+            <input
+              value={draftHeading}
+              onChange={(event) => setDraftHeading(event.target.value)}
+              className="w-full rounded-md border border-white/10 bg-black/25 px-2.5 py-1.5 text-[12.5px] text-fg outline-none focus:border-accent/50"
+            />
+          </div>
+
+          {draftSteps.map((step, index) => (
+            <div key={step.id} className="rounded-lg border border-white/8 bg-black/20 px-3 py-2.5">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[9.5px] text-dim">{index + 1}.</span>
+                <input
+                  value={step.label}
+                  placeholder="Phase…"
+                  aria-label={`Step ${index + 1} label`}
+                  onChange={(event) => patchStep(step.id, { label: event.target.value })}
+                  className="min-w-0 flex-1 rounded border border-white/10 bg-black/25 px-2 py-1 text-[12px] text-fg outline-none focus:border-accent/50"
+                />
+                <button
+                  onClick={() => removeStep(step.id)}
+                  aria-label={`Remove step ${index + 1}`}
+                  className="grid h-5 w-5 shrink-0 place-items-center rounded text-dim transition-colors hover:bg-white/[0.07] hover:text-[#ff8b80]"
+                >
+                  ×
+                </button>
+              </div>
+              <textarea
+                value={step.details}
+                rows={2}
+                placeholder="What this phase covers — one line per item (optional)"
+                aria-label={`Step ${index + 1} details`}
+                onChange={(event) => patchStep(step.id, { details: event.target.value })}
+                className="mt-1.5 w-full resize-y rounded border border-white/10 bg-black/25 px-2 py-1.5 text-[11px] leading-relaxed text-fg outline-none focus:border-accent/50"
+              />
+            </div>
+          ))}
+
+          <button
+            onClick={addStep}
+            className="w-full rounded-md border border-dashed border-white/15 py-1.5 text-[11.5px] text-mut transition-colors hover:border-accent/40 hover:text-fg"
+          >
+            + Add a step
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-2 border-t border-white/8 px-4 py-3">
+          <span className="text-[10px] text-dim">{savable ? "" : "Keep a heading and at least two steps."}</span>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="rounded-md px-2.5 py-1.5 text-[11.5px] text-dim transition-colors hover:text-fg">
+              Cancel
+            </button>
+            <button
+              onClick={() => savable && onSave(normalized)}
+              disabled={!savable}
+              className="rounded-md bg-accent px-3 py-1.5 text-[11.5px] font-medium text-white transition-colors hover:bg-accent-deep disabled:opacity-40"
+            >
+              Save plan
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
@@ -723,6 +990,26 @@ function CommitBox({
 /** Playback speeds offered when the intent declares the speed control. */
 const ANIMATION_SPEEDS = [0.5, 1, 2] as const;
 
+/** Manim-style ease curves for the moving point. "smooth" (the default) is
+ *  smoothstep — easing both ends is what reads as *motion* rather than a
+ *  timer ticker. */
+const MOTION_EASING: Record<"linear" | "smooth" | "enter" | "exit", (t: number) => number> = {
+  linear: (t) => t,
+  smooth: (t) => t * t * (3 - 2 * t),
+  enter: (t) => t * t,
+  exit: (t) => 1 - (1 - t) * (1 - t),
+};
+
+/** Total screen-space (viewBox-unit) length of a polyline, for dash-driven
+ *  write-on reveals. */
+function polylineLength(pts: readonly [number, number][]): number {
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) {
+    total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  }
+  return total;
+}
+
 /**
  * Animation as an instrument of inquiry rather than a video.
  *
@@ -841,35 +1128,137 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
   const frameIndex = Math.min(intent.frames.length - 1, Math.floor(progress * intent.frames.length));
   const frame = intent.frames[frameIndex];
 
-  const path = useMemo(() => {
+  // The motion scene: the sampled path, the agent's guide curve (the graph the
+  // motion happens over), and the coordinate frame itself. An animation about
+  // positions on a graph must SHOW the graph — a dot drifting over emptiness
+  // teaches motion, not the mathematics it moves through. With a zExpression
+  // the scene is 3D and renders in an isometric view over a floor grid.
+  const scene = useMemo(() => {
     const motion = intent.motion;
     if (!motion) return null;
     const [t0, t1] = motion.tDomain;
     const samples = 96;
-    const pts: [number, number][] = [];
-    for (let i = 0; i <= samples; i += 1) {
-      const t = t0 + ((t1 - t0) * i) / samples;
-      const x = evaluateReadout(motion.xExpression, { t });
-      const y = evaluateReadout(motion.yExpression, { t });
-      if (x === null || y === null) continue;
-      pts.push([x, y]);
-    }
-    if (pts.length < 2) return null;
-    const xs = pts.map(([x]) => x);
-    const ys = pts.map(([, y]) => y);
+    const is3d = typeof motion.zExpression === "string" && motion.zExpression.trim().length > 0;
+
+    const sample = (xExpr: string, yExpr: string, zExpr?: string): [number, number, number][] => {
+      const pts: [number, number, number][] = [];
+      for (let i = 0; i <= samples; i += 1) {
+        const t = t0 + ((t1 - t0) * i) / samples;
+        const x = evaluateReadout(xExpr, { t });
+        const y = evaluateReadout(yExpr, { t });
+        const z = zExpr ? evaluateReadout(zExpr, { t }) : 0;
+        if (x === null || y === null || z === null) continue;
+        pts.push([x, y, z]);
+      }
+      return pts;
+    };
+
+    const pathPts = sample(motion.xExpression, motion.yExpression, is3d ? motion.zExpression : undefined);
+    if (pathPts.length < 2) return null;
+    const guidePts = motion.guideXExpression && motion.guideYExpression
+      ? sample(motion.guideXExpression, motion.guideYExpression)
+      : [];
+    const world = [...pathPts, ...guidePts];
+
+    const xs = world.map((p) => p[0]);
+    const ys = world.map((p) => p[1]);
+    const zs = world.map((p) => p[2]);
     const xMin = Math.min(...xs), xMax = Math.max(...xs);
     const yMin = Math.min(...ys), yMax = Math.max(...ys);
-    const spanX = Math.max(1e-6, xMax - xMin);
-    const spanY = Math.max(1e-6, yMax - yMin);
-    const project = ([x, y]: [number, number]): [number, number] => [
-      6 + ((x - xMin) / spanX) * 208,
-      56 - ((y - yMin) / spanY) * 46,
+    const zMin = Math.min(...zs), zMax = Math.max(...zs);
+
+    if (!is3d) {
+      const W = 220, H = 126, padL = 24, padR = 8, padT = 6, padB = 13;
+      const spanX = Math.max(1e-6, xMax - xMin);
+      const spanY = Math.max(1e-6, yMax - yMin);
+      const project = ([x, y]: [number, number, number]): [number, number] => [
+        padL + ((x - xMin) / spanX) * (W - padL - padR),
+        H - padB - ((y - yMin) / spanY) * (H - padT - padB),
+      ];
+      const xTicks = generateAxisTicks(xMin, xMax, 4);
+      const yTicks = generateAxisTicks(yMin, yMax, 3);
+      const xAxisY = yMin <= 0 && yMax >= 0 ? project([0, 0, 0])[1] : null;
+      const yAxisX = xMin <= 0 && xMax >= 0 ? project([0, 0, 0])[0] : null;
+      return {
+        kind: "2d" as const,
+        W,
+        H,
+        pts: pathPts.map(project),
+        guide: guidePts.map(project),
+        xTicks: xTicks.map((value) => ({ value, x: project([value, 0, 0])[0] })),
+        yTicks: yTicks.map((value) => ({ value, y: project([0, value, 0])[1] })),
+        xAxisY,
+        yAxisX,
+      };
+    }
+
+    // Isometric projection: x runs down-right, y runs down-left, z rises. The
+    // floor plane (z = floor) is drawn as a gridded parallelogram so the path
+    // has somewhere to "stand"; everything normalizes into the box with margin.
+    const COS30 = Math.cos(Math.PI / 6);
+    const SQUASH = 0.55;
+    const zFloor = Math.min(0, zMin);
+    const zCeil = Math.max(zMax, zFloor + 1e-6);
+    const isoRaw = ([x, y, z]: [number, number, number]): [number, number] => [
+      (x - y) * COS30,
+      (x + y) * COS30 * SQUASH - z,
     ];
-    return { pts: pts.map(project), raw: pts, project };
+    const corners = [
+      isoRaw([xMin, yMin, zFloor]),
+      isoRaw([xMax, yMin, zFloor]),
+      isoRaw([xMax, yMax, zFloor]),
+      isoRaw([xMin, yMax, zFloor]),
+      isoRaw([xMin, yMin, zCeil]),
+      isoRaw([xMax, yMax, zCeil]),
+    ];
+    const sxs = corners.map((c) => c[0]);
+    const sys = corners.map((c) => c[1]);
+    const sMinX = Math.min(...sxs), sMaxX = Math.max(...sxs);
+    const sMinY = Math.min(...sys), sMaxY = Math.max(...sys);
+    const W = 220, H = 146, pad = 12;
+    const spanSX = Math.max(1e-6, sMaxX - sMinX);
+    const spanSY = Math.max(1e-6, sMaxY - sMinY);
+    const project = (p: [number, number, number]): [number, number] => {
+      const [sx, sy] = isoRaw(p);
+      return [pad + ((sx - sMinX) / spanSX) * (W - 2 * pad), pad + ((sy - sMinY) / spanSY) * (H - 2 * pad)];
+    };
+    // Floor grid: the parallelogram rim plus two interior lines per direction.
+    const floorFrame = [
+      [xMin, yMin], [xMax, yMin], [xMax, yMax], [xMin, yMax], [xMin, yMin],
+    ].map(([x, y]) => project([x, y, zFloor]));
+    const gridLines: [number, number][][] = [];
+    for (const f of [1 / 3, 2 / 3]) {
+      gridLines.push([project([xMin + (xMax - xMin) * f, yMin, zFloor]), project([xMin + (xMax - xMin) * f, yMax, zFloor])]);
+      gridLines.push([project([xMin, yMin + (yMax - yMin) * f, zFloor]), project([xMax, yMin + (yMax - yMin) * f, zFloor])]);
+    }
+    // Vertical posts at the near-left and apex corners give the z axis scale.
+    const zPosts = [
+      [project([xMin, yMin, zFloor]), project([xMin, yMin, zCeil])],
+      [project([xMax, yMax, zFloor]), project([xMax, yMax, zCeil])],
+    ];
+    return {
+      kind: "3d" as const,
+      W,
+      H,
+      pts: pathPts.map(project),
+      guide: guidePts.map((p) => project([p[0], p[1], zFloor] as [number, number, number])),
+      floorFrame,
+      gridLines,
+      zPosts,
+    };
   }, [intent.motion]);
 
-  const headIndex = path ? Math.min(path.pts.length - 1, Math.round(progress * (path.pts.length - 1))) : 0;
-  const head = path?.pts[headIndex];
+  // The playhead position is EASED time → eased distance: linear reads as a
+  // ticker, smooth reads as moving. Checkpoints stay on raw time, so easing
+  // never shifts when a halt lands.
+  const easedProgress = MOTION_EASING[intent.motion?.easing ?? "smooth"](Math.min(1, Math.max(0, progress)));
+  const headIndex = scene ? Math.min(scene.pts.length - 1, Math.round(easedProgress * (scene.pts.length - 1))) : 0;
+  const head = scene?.pts[headIndex];
+
+  // The guide graph writes itself on during the opening 18% of playback —
+  // Manim's Create — then lives as the solid reference the motion rides.
+  const guideWriteOn = intent.motion?.guideWriteOn !== false;
+  const guideReveal = Math.min(1, progress / 0.18);
 
   return (
     <div>
@@ -892,11 +1281,76 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
         </div>
       ) : null}
 
-      <div className="relative mb-2 h-[62px] overflow-hidden rounded" style={{ background: "rgba(0,0,0,0.18)" }}>
-        {path ? (
-          <svg viewBox="0 0 220 62" className="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+      <div
+        className="relative mb-2 overflow-hidden rounded"
+        style={{ background: "rgba(0,0,0,0.18)", height: scene ? scene.H : 62 }}
+        data-motion-scene={scene ? scene.kind : undefined}
+      >
+        {scene ? (
+          <svg viewBox={`0 0 ${scene.W} ${scene.H}`} className="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+            {scene.kind === "2d" ? (
+              <>
+                {/* coordinate frame: faint tick grid, slightly stronger axes */}
+                {scene.xTicks.map((tick) => (
+                  <g key={`x-${tick.value}`}>
+                    <line x1={tick.x} y1={0} x2={tick.x} y2={scene.H - 13} stroke={`${chalk}14`} strokeWidth={0.6} />
+                    <text x={tick.x} y={scene.H - 4} textAnchor="middle" fontSize={5.5} fill={chalk} opacity={0.5} fontFamily="monospace">
+                      {tick.value}
+                    </text>
+                  </g>
+                ))}
+                {scene.yTicks.map((tick) => (
+                  <g key={`y-${tick.value}`}>
+                    <line x1={24} y1={tick.y} x2={scene.W - 8} y2={tick.y} stroke={`${chalk}14`} strokeWidth={0.6} />
+                    <text x={21} y={tick.y + 2} textAnchor="end" fontSize={5.5} fill={chalk} opacity={0.5} fontFamily="monospace">
+                      {tick.value}
+                    </text>
+                  </g>
+                ))}
+                {scene.xAxisY !== null ? <line x1={24} y1={scene.xAxisY} x2={scene.W - 8} y2={scene.xAxisY} stroke={`${chalk}3d`} strokeWidth={0.9} /> : null}
+                {scene.yAxisX !== null ? <line x1={scene.yAxisX} y1={0} x2={scene.yAxisX} y2={scene.H - 13} stroke={`${chalk}3d`} strokeWidth={0.9} /> : null}
+              </>
+            ) : (
+              <>
+                {/* isometric floor grid + z posts: the 3D graph's frame */}
+                <polyline
+                  points={scene.floorFrame.map(([x, y]) => `${x},${y}`).join(" ")}
+                  fill="none"
+                  stroke={`${chalk}2e`}
+                  strokeWidth={0.9}
+                />
+                {scene.gridLines.map((line, i) => (
+                  <line key={i} x1={line[0][0]} y1={line[0][1]} x2={line[1][0]} y2={line[1][1]} stroke={`${chalk}16`} strokeWidth={0.6} />
+                ))}
+                {scene.zPosts.map((line, i) => (
+                  <line key={`z-${i}`} x1={line[0][0]} y1={line[0][1]} x2={line[1][0]} y2={line[1][1]} stroke={`${chalk}26`} strokeWidth={0.8} strokeDasharray="2 2.5" />
+                ))}
+              </>
+            )}
+            {/* The guide curve IS the graph the motion happens over — solid,
+                unmissable, behind the animated path. It writes itself on
+                during the opening stretch (Manim's Create), so the curve
+                *becomes* rather than just being there. */}
+            {scene.guide.length >= 2 ? (
+              (() => {
+                const length = polylineLength(scene.guide);
+                const writing = guideWriteOn && guideReveal < 1;
+                return (
+                  <polyline
+                    data-guide={guideWriteOn ? "write-on" : undefined}
+                    points={scene.guide.map(([x, y]) => `${x},${y}`).join(" ")}
+                    fill="none"
+                    stroke={`${chalk}99`}
+                    strokeWidth={1.6}
+                    strokeLinecap="round"
+                    strokeDasharray={writing ? length : undefined}
+                    strokeDashoffset={writing ? length * (1 - guideReveal) : undefined}
+                  />
+                );
+              })()
+            ) : null}
             <polyline
-              points={path.pts.map(([x, y]) => `${x},${y}`).join(" ")}
+              points={scene.pts.map(([x, y]) => `${x},${y}`).join(" ")}
               fill="none"
               stroke={`${chalk}44`}
               strokeWidth={1.4}
@@ -904,7 +1358,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
             />
             {intent.motion?.trace ? (
               <polyline
-                points={path.pts.slice(0, headIndex + 1).map(([x, y]) => `${x},${y}`).join(" ")}
+                points={scene.pts.slice(0, headIndex + 1).map(([x, y]) => `${x},${y}`).join(" ")}
                 fill="none"
                 stroke={accent}
                 strokeWidth={1.8}
@@ -1031,14 +1485,17 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
         <span className="font-mono text-[9px] opacity-45">{frameIndex + 1}/{intent.frames.length}</span>
       </div>
 
-      <div className="mt-2 min-h-[32px]">
-        <p className="m-0 text-[10.5px] opacity-80">{frame.caption}</p>
-        {frame.latex ? <div className="mt-1"><TexBlock tex={frame.latex} color={chalk} size={16} /></div> : null}
+      {/* Caption and its equation read as one beat. The padding guards the
+          display-math descenders so the linked-representation chips can no
+          longer collide with them. */}
+      <div className="mt-2 space-y-1.5 pb-1">
+        <p className="m-0 text-[10.5px] leading-relaxed opacity-80">{frame.caption}</p>
+        {frame.latex ? <TexBlock tex={frame.latex} color={chalk} size={16} /> : null}
       </div>
 
       {/* Representations held in sync, so the same change is read two ways. */}
       {intent.linkedRepresentations?.length ? (
-        <div className="mt-2 grid gap-1">
+        <div className="mt-3 grid gap-1.5">
           {intent.linkedRepresentations.map((linked) => (
             <div
               key={linked.id}
@@ -1122,10 +1579,19 @@ function CheckpointAnswer({
 }) {
   const [draft, setDraft] = useState("");
 
+  // Same anti-position-gaming shuffle as the question widget, seeded per
+  // checkpoint so each halt keeps a stable order of its own.
+  const authored = checkpoint.options ?? [];
+  const shownOptions = useMemo(
+    () => shuffleSeeded(authored, optionsSeedKey(checkpoint.id, authored)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [authored, checkpoint.id]
+  );
+
   if (checkpoint.options?.length) {
     return (
       <div className="grid gap-1.5">
-        {checkpoint.options.map((option) => (
+        {shownOptions.map((option) => (
           <button
             key={option.id}
             type="button"
@@ -1242,6 +1708,44 @@ function ComparisonBody({ intent, chalk, accent }: BodyProps & { intent: Extract
 
 /* ── 9 · Question · 17 · Retrieval Check ── */
 
+/**
+ * Fisher–Yates over a content-derived seed: one stable permutation per option
+ * set, identical across re-renders, restored sessions and reloads.
+ *
+ * The agent reliably writes the correct answer first (it drafts options in
+ * priority order), so an unshuffled multiple-choice widget legibly marks the
+ * answer as "A" every time — learners figure that out in one afternoon. The
+ * seed comes from the option ids themselves, so a re-sent intent with the same
+ * options keeps the same order and committed picks never visually migrate.
+ *
+ * Exported for unit testing.
+ */
+export function shuffleSeeded<T>(items: T[], seedKey: string): T[] {
+  if (items.length < 2) return items;
+  let seed = 2166136261 >>> 0; // FNV-1a offset basis
+  for (let i = 0; i < seedKey.length; i++) {
+    seed = Math.imul(seed ^ seedKey.charCodeAt(i), 16777619) >>> 0;
+  }
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    // xorshift: advance the deterministic stream.
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    seed >>>= 0;
+    const j = seed % (i + 1);
+    const tmp = out[i];
+    out[i] = out[j];
+    out[j] = tmp;
+  }
+  return out;
+}
+
+/** The stable permutation key for an option set: widget identity + option ids. */
+function optionsSeedKey(ownerId: string, options: readonly { id: string }[]): string {
+  return `${ownerId}|${options.map((option) => option.id).join("|")}`;
+}
+
 function AnswerableBody({
   intent,
   chalk,
@@ -1261,6 +1765,17 @@ function AnswerableBody({
 
   const chosen = intent.options?.find((option) => option.id === state.selectedOptionId);
 
+  // Display order is a seeded shuffle of the authored order — grading and
+  // persisted state still key on option id, only the letter positions move.
+  const authoredOptions = intent.options ?? [];
+  const shownOptions = useMemo(
+    () => shuffleSeeded(authoredOptions, optionsSeedKey(intent.id ?? intent.prompt, authoredOptions)),
+    // The seed is content-derived, so a rebuilt intent with the same options
+    // lands on the same permutation anyway; the array identity dep just debounces.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [authoredOptions, intent.id, intent.prompt]
+  );
+
   return (
     <div>
       {isRetrieval && "source" in intent && intent.source ? (
@@ -1272,7 +1787,7 @@ function AnswerableBody({
 
       {intent.format === "multiple_choice" ? (
         <div className="grid gap-1.5">
-          {(intent.options ?? []).map((option, index) => {
+          {shownOptions.map((option, index) => {
             const picked = state.selectedOptionId === option.id;
             const showAsCorrect = submitted && option.correct === true;
             const showAsWrong = submitted && picked && option.correct !== true;

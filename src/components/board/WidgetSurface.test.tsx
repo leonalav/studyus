@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { WidgetSurface } from "./WidgetSurface";
+import { shuffleSeeded, WidgetSurface } from "./WidgetSurface";
 import { WIDGET_KINDS, type WidgetIntent, type WidgetKind, type WidgetState } from "../../lib/widgets/types";
 import { validateWidgetIntent } from "../../lib/widgets/validate";
 
@@ -23,6 +23,22 @@ const EXEMPLARS: Record<WidgetKind, WidgetIntent> = {
       { id: "s1", label: "What a derivative measures", state: "done" },
       { id: "s2", label: "The difference quotient", state: "current" },
       { id: "s3", label: "Differentiating by rule", state: "upcoming" },
+    ],
+  },
+  plan: {
+    kind: "plan",
+    heading: "Convergence of series — from zero to mastery",
+    steps: [
+      {
+        id: "s1",
+        label: "Read the picture before the letters",
+        details: [
+          "Slice the area into strips and watch partial sums settle",
+          "Say in plain words what \"converges\" means before any symbols",
+        ],
+      },
+      { id: "s2", label: "The sum rule, built not handed over" },
+      { id: "s3", label: "Defend a convergence claim on your own" },
     ],
   },
   concept_card: {
@@ -436,5 +452,232 @@ describe("WidgetSurface — animation as prediction, not video", () => {
     expect(html).toContain("Difference quotient");
     expect(html).toContain("as h shrinks");
     expect(html).toContain("equation");
+  });
+
+  it("shuffles checkpoint options so position carries no signal", () => {
+    const withShuffledCheckpoint: WidgetIntent = {
+      ...animation,
+      checkpoints: [
+        {
+          id: "cp-area",
+          at: 0.5,
+          prompt: "Which estimate wins at thin strips?",
+          options: [
+            { id: "a", label: "the coarse-left rule", correct: true },
+            { id: "b", label: "the thin-strip one" },
+            { id: "c", label: "the single tall bar" },
+          ],
+        },
+      ],
+    };
+    // Authored correct-first; the playhead is parked at the checkpoint so its
+    // options render. The seeded permutation moves "a" off the top slot.
+    const html = live(withShuffledCheckpoint, { predictionLocked: true, animationProgress: 0.5 });
+    expect(html.indexOf("the thin-strip one")).toBeGreaterThan(-1);
+    expect(html.indexOf("the thin-strip one")).toBeLessThan(html.indexOf("the coarse-left rule"));
+  });
+
+  it("renders graph-bound motion on an actual coordinate plane, guide included", () => {
+    // The reported failure: an animation "on a graph" showed a lone dot over
+    // an empty strip — the graph itself never rendered. The scene must carry
+    // axes and the guide curve the motion belongs to.
+    const onGraph: WidgetIntent = {
+      ...animation,
+      motion: {
+        xExpression: "t",
+        yExpression: "sin(t)",
+        tDomain: [-3, 3],
+        guideXExpression: "t",
+        guideYExpression: "sin(t)",
+      },
+    };
+    const html = live(onGraph, { predictionLocked: true });
+    expect(html).toContain('data-motion-scene="2d"');
+    // Tick grid labels are the give-away that a coordinate plane rendered.
+    const tinyTicks = html.match(/font-size="5.5"/g) ?? [];
+    expect(tinyTicks.length).toBeGreaterThan(0);
+    // The guide curve renders solid; the live path stays dashed.
+    expect(html).toMatch(/<polyline[^>]*stroke-dasharray="3 5"/);
+    const polylines = html.match(/<polyline/g) ?? [];
+    expect(polylines.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("writes the guide on (Manim's Create) by default, and honours the opt-out", () => {
+    const withGuide: WidgetIntent = {
+      ...animation,
+      motion: { xExpression: "t", yExpression: "sin(t)", tDomain: [-3, 3], guideXExpression: "t", guideYExpression: "sin(t)" },
+    };
+    // Mid playback: the guide is still drawing — dash-offset partially open.
+    const mid = live(withGuide, { predictionLocked: true, animationProgress: 0.05 });
+    expect(mid).toContain('data-guide="write-on"');
+    expect(mid).toMatch(/stroke-dashoffset="[1-9]/);
+
+    // Fully played: the graph stays as a solid reference, no dash state left.
+    const done = live(withGuide, { predictionLocked: true, animationProgress: 1 });
+    expect(done).not.toContain("stroke-dashoffset");
+
+    // Explicitly opted out: the guide is simply present from frame one.
+    const plain = live(
+      { ...animation, motion: { xExpression: "t", yExpression: "sin(t)", tDomain: [-3, 3], guideXExpression: "t", guideYExpression: "sin(t)", guideWriteOn: false } },
+      { predictionLocked: true, animationProgress: 0.05 }
+    );
+    expect(plain).not.toContain('data-guide="write-on"');
+  });
+
+  it("eases the playhead by default; a constant-rate lesson opts out", () => {
+    const motion = { xExpression: "t", yExpression: "t * t", tDomain: [-3, 3] as [number, number] };
+    // The head dot is the only circle inside the motion scene's SVG; the shell
+    // header carries its own icon circles, so scope to the scene.
+    const at = (mhtml: string) => {
+      const sceneHtml = mhtml.slice(mhtml.indexOf("data-motion-scene"));
+      return Number(sceneHtml.match(/<circle cx="([\d.]+)"/)?.[1] ?? -1);
+    };
+    const linear = live({ ...animation, motion: { ...motion, easing: "linear" } }, { predictionLocked: true, animationProgress: 0.35 });
+    const smooth = live({ ...animation, motion: { ...motion, easing: "smooth" } }, { predictionLocked: true, animationProgress: 0.35 });
+    const defaulted = live({ ...animation, motion }, { predictionLocked: true, animationProgress: 0.35 });
+
+    const linearX = at(linear);
+    const smoothX = at(smooth);
+    expect(linearX).toBeGreaterThan(0);
+    // smooth(0.35) ≈ 0.30 — the eased head sits behind the constant-rate head.
+    expect(smoothX).toBeLessThan(linearX);
+    // and "smooth" IS the default, not an extra the agent must remember.
+    expect(at(defaulted)).toBe(smoothX);
+  });
+
+  it("renders 3D motion in an isometric view over a floor grid", () => {
+    const in3d: WidgetIntent = {
+      ...animation,
+      motion: {
+        xExpression: "cos(t)",
+        yExpression: "sin(t)",
+        zExpression: "t / 4",
+        tDomain: [0, 6.28],
+      },
+    };
+    const html = live(in3d, { predictionLocked: true });
+    expect(html).toContain('data-motion-scene="3d"');
+    expect(html).toMatch(/<line[^>]*stroke-dasharray="2 2.5"/);
+  });
+
+  it("ignores a non-string zExpression instead of breaking the scene", () => {
+    const drifted = {
+      ...animation,
+      motion: {
+        xExpression: "t",
+        yExpression: "t * t",
+        zExpression: 42,
+        tDomain: [-2, 2],
+      },
+    } as unknown as WidgetIntent;
+    const html = live(drifted, { predictionLocked: true });
+    expect(html).toContain('data-motion-scene="2d"');
+  });
+});
+
+/**
+ * The agent drafts options in priority order, parking the correct answer first
+ * every time; left alone that is a legible "it's always A" pattern. Display
+ * order is instead a seeded shuffle of the authored order — stable per option
+ * set, never a re-roll mid-session.
+ */
+describe("seeded option shuffle — position carries no signal", () => {
+  const shuffledQuestion: WidgetIntent = {
+    kind: "question",
+    prompt: "Which strip count gives the best area estimate?",
+    format: "multiple_choice",
+    options: [
+      { id: "a", label: "one too-wide slab", correct: true },
+      { id: "b", label: "several thin strips" },
+      { id: "c", label: "one tall triangle" },
+      { id: "d", label: "the interval endpoints only" },
+    ],
+  };
+
+  const liveQ = (intent: WidgetIntent, state?: WidgetState) =>
+    renderToStaticMarkup(
+      <WidgetSurface intent={intent} state={state} chalk="#e8e8ea" accent="#7dd3fc" onState={() => {}} />
+    );
+
+  const renderedOrder = (html: string) =>
+    [...html.matchAll(/>(one too-wide slab|several thin strips|one tall triangle|the interval endpoints only)</g)]
+      .map((m) => m[1]);
+
+  it("moves the authored first option off the A slot", () => {
+    // Authored correct-first; this fixture's seeded order moves it to D.
+    const order = renderedOrder(liveQ(shuffledQuestion));
+    expect(order).toEqual(["several thin strips", "the interval endpoints only", "one tall triangle", "one too-wide slab"]);
+    expect(order[0]).not.toBe("one too-wide slab");
+  });
+
+  it("keeps the same permutation across renders of the same content", () => {
+    const first = renderedOrder(liveQ(shuffledQuestion));
+    const second = renderedOrder(liveQ(shuffledQuestion, { selectedOptionId: "b", submitted: true }));
+    // Even a submitted state re-render must not visibly re-roll the board.
+    expect(second).toEqual(first);
+  });
+
+  it("shuffleSeeded is deterministic, lossless, and content-sensitive", () => {
+    const items = ["a", "b", "c", "d"];
+    const key = "p|a|b|c|d";
+    expect(shuffleSeeded(items, key)).toEqual(shuffleSeeded(items, key));
+    expect([...shuffleSeeded(items, key)].sort()).toEqual(items);
+    expect(shuffleSeeded(items, key)).not.toEqual(items);
+    expect(shuffleSeeded(items, "q|a|b|c|d")).not.toEqual(shuffleSeeded(items, key));
+    expect(shuffleSeeded(["only"], "k")).toEqual(["only"]);
+  });
+});
+
+/**
+ * The plan is the session-opening contract: proposed after intake, agreed or
+ * edited by the learner, and only then taught. The visible structure mirrors
+ * the reference card — heading, numbered phases with detail lines, the consent
+ * question, Edit / Start — in the board's widget chrome.
+ */
+describe("WidgetSurface — plan as an agreement gate, not a poster", () => {
+  const plan = EXEMPLARS.plan as Extract<WidgetIntent, { kind: "plan" }>;
+
+  const live = (intent: WidgetIntent, state?: WidgetState) =>
+    renderToStaticMarkup(
+      <WidgetSurface intent={intent} state={state} chalk="#e8e8ea" accent="#7dd3fc" onState={() => {}} />
+    );
+
+  it("renders phases and detail lines, then asks for agreement", () => {
+    const html = live(plan);
+    expect(html).toContain("Convergence of series — from zero to mastery");
+    expect(html).toContain("Read the picture before the letters");
+    expect(html).toContain("(1)");
+    expect(html).toContain("watch partial sums settle");
+    expect(html).toContain("Do you agree with this plan?");
+    expect(html).toContain("Start learning");
+    expect(html).toContain("Edit plan");
+    expect(html).not.toContain("Ready in a few minutes");
+  });
+
+  it("lets the agent reword the consent question, never the buttons", () => {
+    const html = live({ ...plan, agreementPrompt: "Shall we run it this way?" });
+    expect(html).toContain("Shall we run it this way?");
+    expect(html).toContain("Start learning");
+  });
+
+  it("shows the learner's edited draft over the proposal once edited", () => {
+    const html = live(plan, {
+      planDraft: {
+        heading: "Convergence — my route",
+        steps: [
+          { id: "e1", label: "Only the sum rule" },
+          { id: "e2", label: "Then a hard example" },
+        ],
+      },
+    });
+    expect(html).toContain("Only the sum rule");
+    expect(html).toContain("your version");
+    expect(html).not.toContain("Read the picture before the letters");
+  });
+
+  it("settles into a started state after the go signal", () => {
+    const html = live(plan, { submitted: true });
+    expect(html).toContain("Started");
+    expect(html).not.toContain(">Start learning<");
   });
 });

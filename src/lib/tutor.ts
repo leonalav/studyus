@@ -50,7 +50,14 @@ import {
   recordLearnerModelEntry,
 } from "./learnerModel";
 import { getEvidenceForSelectedNodes } from "./curriculum";
-import { buildOnboardingReminder, type OnboardingAnswers, type OnboardingQuestion } from "../data/tutor";
+import {
+  CREATE_FORMS_TOOL,
+  buildOnboardingReminder,
+  type OnboardingAnswers,
+  type OnboardingForm,
+  type OnboardingQuestion,
+  type OnboardingQuestionKind,
+} from "../data/tutor";
 import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
 import type { MathNode, FunctionNode, OperatorNode, SymbolNode } from "mathjs";
 import type { VisualizationIntent } from "./visualization/types";
@@ -85,10 +92,10 @@ import {
   type TutorToolPermissions,
 } from "./preferences";
 
-export const TUTOR_PROMPT_VERSION = "tutor_v7";
+export const TUTOR_PROMPT_VERSION = "tutor_v8";
 export const TUTOR_SCHEMA_VERSION = "tutor_turn_v4";
-export const ONBOARDING_PROMPT_VERSION = "tutor_onboarding_v1";
-export const ONBOARDING_SCHEMA_VERSION = "onboarding_questions_v1";
+export const ONBOARDING_PROMPT_VERSION = "tutor_onboarding_v2";
+export const ONBOARDING_SCHEMA_VERSION = "onboarding_create_forms_v1";
 export const MAX_HINT_LEVEL = 3;
 export const MAX_BOARD_OPS_PER_TURN = 12;
 export const MAX_THREAD_INITIAL_BLOCKS = 6;
@@ -2385,6 +2392,24 @@ function summarizeWidgetInteraction(state?: WidgetState): string {
    PUBLIC ENTRY POINT
    ───────────────────────────────────────────────────────────── */
 
+/**
+ * Which widget kinds this turn's catalog describes.
+ *
+ * Policy routes whitelist pedagogical moves — so a diagnostic route's catalog
+ * lists four kinds and the model simply never sees the rest. The designated
+ * session opening (greeting turn + onboarding reminder on record) is exempt:
+ * it is a product beat that must always be able to place the plan widget and
+ * the roadmap, whatever the route happens to warrant. `undefined` = full
+ * catalog. Exported for unit testing.
+ */
+export function resolveTurnWidgetPermit(
+  turnKind: "chat" | "greeting" | "widget" | undefined,
+  hasOnboarding: boolean,
+  policyPermitted: readonly WidgetKind[] | undefined
+): readonly WidgetKind[] | undefined {
+  return turnKind === "greeting" && hasOnboarding ? undefined : policyPermitted;
+}
+
 export interface TutorTurnRequest {
   sessionId: string;
   sessionTitle: string;
@@ -2398,6 +2423,11 @@ export interface TutorTurnRequest {
    *  pace, and remarks. Omitted for restored sessions (already ran). */
   onboarding?: OnboardingAnswers;
   learnerMessage: string;
+  /** Distinguishes the session-opening greeting turn. Only a greeting with
+   *  onboarding answers on record is the DESIGNATED session opening: the turn
+   *  that must place the plan widget (zero→mastery route built on the five
+   *  intake answers) and the roadmap before any teaching. */
+  turnKind?: "chat" | "greeting" | "widget";
   attachments?: {
     name: string;
     kind: string;
@@ -2561,6 +2591,13 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   const learnerId = req.learnerId ?? DEFAULT_LEARNER_ID;
   const skillId = resolveTurnSkillId(req);
   let policyBrief: PolicyBrief | undefined;
+  // The designated session opening is a product beat, not a policy route: the
+  // intake-produced reminder is the design input, and the opening turn must
+  // place the plan widget + roadmap whatever the route whitelists would allow.
+  // A route-scoped catalog never contains either — the greeting then quietly
+  // renders "roadmap only" because the model never saw the plan exists.
+  const isSessionOpening = req.turnKind === "greeting" && Boolean(req.onboarding);
+
   let openingBrief = "";
   try {
     policyBrief = await buildPolicyBrief({
@@ -2578,6 +2615,14 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     }
   } catch (error) {
     console.warn("[tutor] policy engine unavailable; continuing without it", error);
+  }
+
+  if (isSessionOpening) {
+    openingBrief = [
+      "SESSION OPENING — binding:",
+      "The intake answers in the development reminder are the design input for this session. Your board_ops open with the plan widget FIRST — the route from where the learner said they stand to mastery of this concept, each phase carrying the one or two lines of what it covers — then the roadmap for orientation. Place no teaching content: lesson work begins only when the learner agrees to the plan (their \"Start learning\" click is your signal). Your speech text is the greeting and nothing else.",
+      openingBrief,
+    ].filter(Boolean).join("\n\n");
   }
 
   const knowledgeNodes = await resolveTutorKnowledgeNodes(req.boundNodes ?? [], studio);
@@ -2637,7 +2682,11 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     masteryStage: policyBrief?.state.stage ?? masteryStage.stage,
     masteryStageEvidence: masteryStage.evidence,
     policyBrief: policyBrief?.prompt,
-    permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
+    permittedWidgetKinds: resolveTurnWidgetPermit(
+      req.turnKind,
+      Boolean(req.onboarding),
+      policyBrief?.move.permittedWidgetKinds
+    ),
     openingBrief,
     learnerSummary,
     curriculumScope,
@@ -2842,71 +2891,166 @@ export async function testTutorStudioPrompt(
    ───────────────────────────────────────────────────────────── */
 
 export interface GeneratedOnboarding {
-  /** Short opener the agent writes before the questions. */
-  intro: string;
-  questions: OnboardingQuestion[];
-  /** The counsellor's own invitation to answer, replacing what used to be a
-   *  fixed app-authored sign-off. Optional: an older cached payload has none,
-   *  and the UI simply shows nothing rather than substituting a canned line. */
-  closing?: string;
-  /** What the counsellor says the moment the learner replies, while their
-   *  materials are prepared. Must read correctly whether they answered
+  /** The counsellor's own chat note, posted as it prepares the form. Never
+   *  app-authored — a fixed sentence here read the same in every session. */
+  notification: string;
+  /** The `create_forms` tool payload: the card the learner opens and fills. */
+  form: OnboardingForm;
+  /** What the counsellor says the moment the form is submitted, while the
+   *  materials are prepared. Must read correctly whether the learner answered
    *  everything or skipped it all. */
   handoff?: string;
 }
 
-function validateOnboardingPayload(payload: unknown): ValidationResult<GeneratedOnboarding> {
+/**
+ * Validate the counsellor's response to the onboarding prompt: a chat
+ * `notification` plus exactly one `create_forms` tool call carrying the five
+ * intake questions. Exported so the contract is unit-testable without a model.
+ */
+export function validateCreateFormsPayload(payload: unknown): ValidationResult<GeneratedOnboarding> {
   const errors: string[] = [];
   const rec = asRecord(payload, "root", errors);
   if (!rec) return invalid(...errors);
 
-  const intro = asNonEmptyString(rec.intro, "root.intro", errors);
-  const rawQuestions = asArray(rec.questions, "root.questions", errors);
-  if (!intro || !rawQuestions) return invalid(...errors);
+  const notification = asNonEmptyString(rec.notification, "root.notification", errors);
 
-  if (rawQuestions.length < MIN_ONBOARDING_QUESTIONS || rawQuestions.length > MAX_ONBOARDING_QUESTIONS) {
-    errors.push(
-      `root.questions must contain between ${MIN_ONBOARDING_QUESTIONS} and ${MAX_ONBOARDING_QUESTIONS} questions (got ${rawQuestions.length})`
-    );
-    return invalid(...errors);
+  const toolCall = asRecord(rec.tool_call, "root.tool_call", errors);
+  let form: OnboardingForm | null = null;
+  if (toolCall) {
+    const name = asNonEmptyString(toolCall.name, "root.tool_call.name", errors);
+    if (name && name !== CREATE_FORMS_TOOL) {
+      errors.push(`root.tool_call.name must be "${CREATE_FORMS_TOOL}" (got "${name}")`);
+    }
+    const args = asRecord(toolCall.arguments, "root.tool_call.arguments", errors);
+    if (name && args) {
+      const rawQuestions = asArray(args.questions, "root.tool_call.arguments.questions", errors);
+      if (rawQuestions) {
+        if (rawQuestions.length < MIN_ONBOARDING_QUESTIONS || rawQuestions.length > MAX_ONBOARDING_QUESTIONS) {
+          errors.push(
+            `root.tool_call.arguments.questions must contain between ${MIN_ONBOARDING_QUESTIONS} and ${MAX_ONBOARDING_QUESTIONS} questions (got ${rawQuestions.length})`
+          );
+        }
+        const questions: OnboardingQuestion[] = [];
+        rawQuestions.forEach((entry, i) => {
+          const path = `root.tool_call.arguments.questions[${i}]`;
+          // Accept a bare string (a free-text question) or
+          // {question, kind, options}. Anything else is a schema error the
+          // repair loop reports back to the model.
+          if (typeof entry === "string") {
+            const text = entry.trim();
+            if (!text) errors.push(`${path} must be a non-empty question`);
+            else questions.push({ id: `q${i + 1}`, question: text, kind: "free" });
+            return;
+          }
+          const obj = asRecord(entry, path, errors);
+          if (!obj) return;
+          const text = asNonEmptyString(obj.question, `${path}.question`, errors);
+          if (!text) return;
+
+          // Options imply a choice question even when the kind field is
+          // missing; an explicit "free" kind with options is contradictory.
+          const rawOptions = obj.options;
+          const hasOptions = Array.isArray(rawOptions);
+          let kind: OnboardingQuestionKind | undefined = obj.kind as OnboardingQuestionKind | undefined;
+          if (kind !== undefined && kind !== "free" && kind !== "choice") {
+            errors.push(`${path}.kind must be "free" or "choice" (got "${String(obj.kind)}")`);
+            return;
+          }
+          if (kind === undefined) kind = hasOptions ? "choice" : "free";
+
+          let options: string[] | undefined;
+          if (kind === "choice") {
+            const list = asArray(rawOptions, `${path}.options`, errors);
+            if (!list) return;
+            options = [];
+            const seen = new Set<string>();
+            list.forEach((option, j) => {
+              const label = asNonEmptyString(option, `${path}.options[${j}]`, errors);
+              if (!label) return;
+              const trimmed = label.trim();
+              if (seen.has(trimmed.toLowerCase())) {
+                errors.push(`${path}.options[${j}] duplicates another option`);
+                return;
+              }
+              seen.add(trimmed.toLowerCase());
+              options!.push(trimmed);
+            });
+            if (options.length < 2 || options.length > 6) {
+              errors.push(`${path}.options must list 2–6 options (got ${options.length})`);
+            }
+          } else if (hasOptions) {
+            errors.push(`${path} is a free-text question, so it must not carry options`);
+          }
+          // onlyIf: a constraint against an earlier question's answer, so a
+          // probe that cannot apply (e.g. "which part feels shakiest?" asked of
+          // someone who has never met the concept at all) simply never shows.
+          let onlyIf: OnboardingQuestion["onlyIf"];
+          if (obj.onlyIf !== undefined) {
+            const gate = asRecord(obj.onlyIf, `${path}.onlyIf`, errors);
+            if (gate) {
+              const gateId = asNonEmptyString(gate.questionId, `${path}.onlyIf.questionId`, errors);
+              const rawAnyOf = asArray(gate.anyOf, `${path}.onlyIf.anyOf`, errors);
+              const gateIndex = gateId && /^q(\d+)$/.test(gateId) ? Number(gateId.slice(1)) - 1 : -1;
+              const target = gateIndex >= 0 && gateIndex < i ? questions[gateIndex] : undefined;
+              if (!gateId || !target) {
+                errors.push(`${path}.onlyIf.questionId must reference an earlier question (got "${String(gateId)}")`);
+              } else if (target.kind !== "choice" || !target.options?.length) {
+                errors.push(`${path}.onlyIf can only gate on a choice question's selected option`);
+              } else if (rawAnyOf) {
+                const labels: string[] = [];
+                rawAnyOf.forEach((entry, j) => {
+                  const label = asNonEmptyString(entry, `${path}.onlyIf.anyOf[${j}]`, errors);
+                  if (label) labels.push(label.trim());
+                });
+                if (labels.length === 0) {
+                  errors.push(`${path}.onlyIf.anyOf needs at least one option label`);
+                } else {
+                  const optionSet = new Set(target.options.map((option) => option.toLowerCase()));
+                  const stray = labels.filter((label) => !optionSet.has(label.toLowerCase()));
+                  if (stray.length > 0) {
+                    errors.push(`${path}.onlyIf.anyOf must name options of ${gateId} (stray: ${stray.join(", ")})`);
+                  } else {
+                    // Store the labels as the earlier question spells them, so a
+                    // casing drift can't make a constraint unmatchable.
+                    onlyIf = {
+                      questionId: gateId,
+                      anyOf: labels.map((label) => target.options!.find((option) => option.toLowerCase() === label.toLowerCase()) ?? label),
+                    };
+                  }
+                }
+              }
+            }
+          }
+
+          questions.push({ id: `q${i + 1}`, question: text.trim(), kind, options, onlyIf });
+        });
+        const title = typeof args.title === "string" && args.title.trim() ? args.title.trim() : undefined;
+        const invitation = typeof args.invitation === "string" && args.invitation.trim() ? args.invitation.trim() : undefined;
+        form = { title, invitation, questions };
+      }
+    }
   }
 
-  const questions: OnboardingQuestion[] = [];
-  rawQuestions.forEach((entry, i) => {
-    const path = `root.questions[${i}]`;
-    // Accept a bare string or {question}. Anything else is a schema error the
-    // repair loop reports back to the model.
-    if (typeof entry === "string") {
-      const text = entry.trim();
-      if (!text) errors.push(`${path} must be a non-empty question`);
-      else questions.push({ id: `q${i + 1}`, question: text });
-      return;
-    }
-    const obj = asRecord(entry, path, errors);
-    if (!obj) return;
-    const text = asNonEmptyString(obj.question, `${path}.question`, errors);
-    if (text) questions.push({ id: `q${i + 1}`, question: text.trim() });
-  });
-
-  // closing/handoff are optional so a model that omits them degrades to silence
-  // rather than failing the whole interview — but when present they must be
-  // real sentences, not empty strings that would render as a blank line.
-  const closing = typeof rec.closing === "string" && rec.closing.trim() ? rec.closing.trim() : undefined;
+  // handoff is optional so a model that omits it degrades to silence rather
+  // than failing the whole intake — but when present it must be a real
+  // sentence, not an empty string that would render as a blank line.
   const handoff = typeof rec.handoff === "string" && rec.handoff.trim() ? rec.handoff.trim() : undefined;
 
-  if (errors.length > 0) return invalid(...errors);
-  return { ok: true, value: { intro, questions, closing, handoff } };
+  if (errors.length > 0 || !notification || !form) return invalid(...errors);
+  return { ok: true, value: { notification: notification.trim(), form, handoff } };
 }
 
 /**
- * Ask the tutor agent to write this session's onboarding interview.
+ * Ask the tutor agent to prepare this session's onboarding intake.
  *
- * The questions are generated per session against the concept the learner
- * picked and, when the curriculum node has been transcribed, the real evidence
- * excerpts for it — so the interview probes that specific material rather than
- * reading from a fixed script. Throws `AgentRuntimeError` when the tutor role is
- * unbound or the model cannot produce a valid interview; the caller surfaces
- * that instead of substituting canned questions.
+ * The agent answers with its own chat `notification` and a `create_forms` tool
+ * call whose five questions the chat renders as a fill-in form card — written
+ * per session against the concept the learner picked and, when the curriculum
+ * node has been transcribed, the real evidence excerpts for it — so the intake
+ * probes that specific material rather than reading from a fixed script.
+ * Throws `AgentRuntimeError` when the tutor role is unbound or the model
+ * cannot produce a valid call; the caller surfaces that instead of
+ * substituting canned questions.
  */
 export async function generateOnboardingQuestions(req: {
   concept: string;
@@ -2936,19 +3080,27 @@ export async function generateOnboardingQuestions(req: {
   const system =
     `You are the learner's study counsellor. Before a study session begins you sit down with them and find out who you are ` +
     `about to teach — their footing on this concept, what they expect to find hard, and how they want to work — so the tutor ` +
-    `can calibrate to this person rather than teaching a generic lesson.\n\n` +
+    `can build the syllabus that fits this person rather than teaching a generic lesson.\n\n` +
+    `You conduct the intake by calling your \`${CREATE_FORMS_TOOL}\` tool: it renders a fill-in form card ` +
+    `inside the chat, so the learner answers by opening the form and typing into fields or picking options ` +
+    `instead of writing numbered lines of reply.\n\n` +
     `Rules:\n` +
     `- Ask AT MOST ${MAX_ONBOARDING_QUESTIONS} questions, and no fewer than ${MIN_ONBOARDING_QUESTIONS}. Ask fewer when fewer will do; do not pad to reach the maximum.\n` +
     `- Probe what actually matters for teaching this material: current grasp, which sub-parts they expect to struggle with, prior background the concept depends on, pace/deadline pressure, and how they want to be taught.\n` +
     `- Ask about the learner, never quiz them on the content — this is calibration, not assessment.\n` +
-    `- Each question must be answerable in one short line, since the learner replies with one line per question.\n` +
-    `- Be specific to the concept. Do not emit generic filler that would fit any subject.\n` +
+    `- Pick the answer format that fits each question: kind "choice" when two to six options genuinely cover the space (each a short phrase, ordered sensibly), kind "free" when the honest answer is a line of the learner's own words. A good intake mixes both.\n` +
+    `- Respect constraints: a follow-up probe must make sense to the particular learner reading it. When a question only applies given a certain earlier answer — e.g. "which part feels shakiest?" means nothing to someone who just said they have never met the concept at all — gate it with onlyIf on that earlier choice question and the option labels under which it applies, rather than asking it unconditionally.\n` +
+    `- Free-text questions must be answerable in one short line.\n` +
+    `- Be specific to the concept. Do not emit generic filler that would fit any subject, and do not use the same option list twice.\n` +
     `- Do not number the questions; numbering is added by the app.\n` +
-    `- Write as a counsellor talking to a person, not a form being filled in.\n\n` +
-    `Return JSON only: {"intro": string, "questions": [{"question": string}, ...], "closing": string, "handoff": string}.\n` +
-    `- "intro": one or two sentences in your own voice, welcoming this learner to THIS concept and saying why you are asking.\n` +
-    `- "closing": one sentence inviting them to answer, and making clear they may skip any or all of the questions. Your words, not a fixed formula.\n` +
-    `- "handoff": one sentence you will say the moment they reply, while their materials are being prepared. It must work whether they answered every question or skipped them all. Do not promise anything specific about what the board will contain.\n` +
+    `- Write as a counsellor preparing a form for a person, not a clerk printing paperwork.\n\n` +
+    `Return JSON only:\n` +
+    `{"notification": string, "tool_call": {"name": "${CREATE_FORMS_TOOL}", "arguments": {"title": string, "invitation": string, "questions": [{"question": string, "kind": "free" | "choice", "options"?: string[], "onlyIf"?: {"questionId": string, "anyOf": string[]}}, ...]}}, "handoff": string}.\n` +
+    `- "notification": one or two sentences in your own voice, posted in the chat as you run — welcome this learner to THIS concept and tell them you are putting your ${MAX_ONBOARDING_QUESTIONS} intake questions into a small form they can open right in the chat, so it takes a minute and they can skip anything they like. Your words, never a fixed formula.\n` +
+    `- "title": two to six words naming this intake, specific to the concept.\n` +
+    `- "invitation": one sentence shown inside the form, inviting them to answer and making clear they may skip any or all of the questions.\n` +
+    `- "onlyIf": ids are positional — the first question is q1, the second q2, and a gate may only reference an earlier one.\n` +
+    `- "handoff": one sentence you will say the moment they submit the form, while their materials are being prepared. It must work whether they answered every question or skipped them all. Do not promise anything specific about what the board will contain.\n` +
     `No prose outside the JSON, no code fences.`;
 
   const user =
@@ -2964,7 +3116,7 @@ export async function generateOnboardingQuestions(req: {
     schemaVersion: ONBOARDING_SCHEMA_VERSION,
     temperature: 0.6,
     signal: req.signal,
-    validate: validateOnboardingPayload,
+    validate: validateCreateFormsPayload,
   });
 
   return result.value;

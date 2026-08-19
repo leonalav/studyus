@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildTutorUserPrompt } from "./tutor";
+import { buildTutorUserPrompt, resolveTurnWidgetPermit } from "./tutor";
 import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
 import type { Domain } from "../data/boards";
 
@@ -245,5 +245,32 @@ describe("widget cluster groups reach the model", () => {
 
   it("tells the agent to answer a completed set in one reply", () => {
     expect(formatMasteryDirective()).toMatch(/respond to the SET in one reply/i);
+  });
+});
+
+describe("session opening — the plan widget is always placeable", () => {
+  it("greeting turns with onboarding bypass the route's widget permit list", () => {
+    // The reported failure: the post-intake greeting was routed like any
+    // policy move, the route's catalog whitelisted four pedagogical kinds, and
+    // the plan was never placed — the model literally never saw it exists.
+    expect(resolveTurnWidgetPermit("greeting", true, ["question"])).toBeUndefined();
+    // Only that specific turn is exempt: everything else keeps the route permit.
+    expect(resolveTurnWidgetPermit("greeting", false, ["question"])).toEqual(["question"]);
+    expect(resolveTurnWidgetPermit("chat", true, ["question"])).toEqual(["question"]);
+    expect(resolveTurnWidgetPermit("widget", true, ["question"])).toEqual(["question"]);
+    expect(resolveTurnWidgetPermit(undefined, true, ["question"])).toEqual(["question"]);
+  });
+
+  it("the full catalog names the plan widget and its agreement gate", () => {
+    // An unfiltered greeting-turn catalog must describe plan + roadmap.
+    const catalog = formatWidgetCatalog();
+    expect(catalog).toMatch(/- Plan \[plan\]/);
+    expect(catalog).toMatch(/- Roadmap \[roadmap\]/);
+    expect(catalog).toMatch(/agreementPrompt/);
+    expect(catalog).toMatch(/Start learning/);
+    // While a route-scoped catalog still hides them, as the policy intends.
+    const scoped = formatWidgetCatalog(["question"]);
+    expect(scoped).not.toMatch(/\[plan\]/);
+    expect(scoped).not.toMatch(/\[roadmap\]/);
   });
 });

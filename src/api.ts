@@ -215,8 +215,9 @@ export async function askTutorTurn(req: TutorTurnRequest) {
   return backendAskTutorTurn(req);
 }
 
-/** Generate this session's onboarding interview for a concept (AI-written, not a
- *  fixed script). Grounds on transcribed curriculum evidence when available. */
+/** Generate this session's onboarding intake for a concept (the counsellor's
+ *  notification plus its `create_forms` tool call — AI-written, not a fixed
+ *  script). Grounds on transcribed curriculum evidence when available. */
 export async function generateOnboardingQuestions(req: {
   concept: string;
   boundNodes?: string[];

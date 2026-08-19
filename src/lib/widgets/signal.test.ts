@@ -269,4 +269,39 @@ describe("exploration widgets signal only when the agent asked for a response", 
     expect(text).toContain("It approaches the tangent");
     expect(text).not.toMatch(/wrong|incorrect|✗/i);
   });
+
+  it("plan agreement carries the route and the obligation to teach to it", () => {
+    const intent: WidgetIntent = {
+      kind: "plan",
+      heading: "Convergence of series",
+      steps: [
+        { id: "s1", label: "Pictures before letters", details: ["strips settling to a value"] },
+        { id: "s2", label: "Defend a claim" },
+      ],
+    };
+    // Silent until the learner clicks Start learning.
+    expect(shouldSignalTutor(intent, undefined, { submitted: false })).toBe(false);
+    expect(shouldSignalTutor(intent, undefined, { submitted: true })).toBe(true);
+    expect(shouldSignalTutor(intent, { submitted: true }, { submitted: true })).toBe(false);
+
+    const message = buildWidgetSignalMessage(intent, { submitted: true }, "encounter");
+    expect(message).toContain("I agree with the plan");
+    expect(message).toContain("1. Pictures before letters");
+    expect(message).toContain("2. Defend a claim");
+    expect(message).toMatch(/go-ahead/);
+
+    // An edit is part of the contract, not the tutor's private proposal.
+    const edited = buildWidgetSignalMessage(
+      intent,
+      { submitted: true, planDraft: { heading: "Convergence of series", steps: [{ id: "e1", label: "Only the sum rule" }, { id: "e2", label: "A hard example" }] } },
+      "encounter"
+    );
+    expect(edited).toContain("I edited the proposed plan");
+    expect(edited).toContain("1. Only the sum rule");
+    expect(edited).not.toContain("2. Defend a claim");
+
+    const display = buildWidgetSignalDisplayText(intent, { submitted: true });
+    expect(display).toContain("Agreed to the plan");
+    expect(display).toContain("Convergence of series");
+  });
 });
