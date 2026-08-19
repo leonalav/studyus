@@ -18,8 +18,8 @@ import {
 } from "lucide-react";
 import {
   CREATE_FORMS_TOOL,
-  pairOnboardingReply,
   renderOnboardingReply,
+  visibleOnboardingQuestions,
   type Intent,
   type OnboardingAnswers,
   type OnboardingForm,
@@ -164,9 +164,14 @@ export function SessionCard({
 
   useEffect(() => () => dictationRef.current?.stop(), []);
 
-  // Input is locked while the tutor drafts questions, while the preparation
-  // pass runs, and whenever the tutor is typing — no second submit can slip in.
-  const busy = typing || onboardingStage === "generating" || onboardingStage === "preparing";
+  // Input is locked while the tutor drafts the form, while the form awaits
+  // answers, while the preparation pass runs, and whenever the tutor is typing
+  // — until the intake is answered, the form card is the only way forward.
+  const busy =
+    typing ||
+    onboardingStage === "generating" ||
+    onboardingStage === "asking" ||
+    onboardingStage === "preparing";
 
   // A concept picked from the Curriculum tab carries stable source/node ids.
   // Hydrate the same picker state used by an in-card selection so onboarding,
@@ -252,7 +257,11 @@ export function SessionCard({
     setNotes([]);
     setMessages([]);
     // A restart also tears down the intake artifact: open sheet, card state,
-    // and any draft belong to the abandoned session start.
+    // any draft, AND the stage itself belong to the abandoned session start.
+    // With the input locked while onboarding asks, leaving `asking` behind
+    // would strand a chat with no form to answer and no way to type.
+    setOnboardingStage("idle");
+    setPendingOnboarding(null);
     setIntakeForm(null);
     setFormOpen(false);
     setFormDraft({});
@@ -270,28 +279,8 @@ export function SessionCard({
       : undefined;
     const displayText = command ? text.replace(commandMatch![0], "").trim() || `@${command.token}` : text;
 
-    // Form-first intake: while we're waiting on the create_forms artifact, a
-    // typed chat submit is still accepted as the answer (one line per
-    // question) for learners who'd rather write than click. The numbered reply
-    // is paired back onto the generated questions and paired answers drive the
-    // same preparation pass as a form submission.
-    if (onboardingStage === "asking" && pendingOnboarding) {
-      setMessages((m) => [...m, { id: ++idRef.current, role: "user", text: displayText }]);
-      setInput("");
-      setCommandOpen(false);
-      setFormOpen(false);
-      const answers = pairOnboardingReply(
-        pendingOnboarding.concept,
-        pendingOnboarding.form.questions,
-        displayText
-      );
-      setSubmittedAnswers(
-        Object.fromEntries(pendingOnboarding.form.questions.map((q, i) => [q.id, answers.answers[i]?.answer ?? ""]))
-      );
-      void runPreparation(pendingOnboarding, answers);
-      return;
-    }
-
+    // The chat stays locked while the intake form is unanswered (see `busy`):
+    // the form is the only answer path, so no typed-reply branch lives here.
     setMessages((m) => [...m, { id: ++idRef.current, role: "user", text: displayText }]);
     setInput("");
     setCommandOpen(false);
@@ -306,14 +295,19 @@ export function SessionCard({
   }
 
   /** A submitted form: echo the answers as the learner's chat reply, keep them
-   *  on the card for review, and hand off to the same preparation pass. */
+   *  on the card for review, and hand off to the same preparation pass.
+   *  Questions hidden by a failed gate at submit time never applied, so they
+   *  go down as skipped rather than carrying a stale draft. */
   function submitIntakeForm() {
     if (!pendingOnboarding || !intakeForm) return;
+    const resolvable = new Set(
+      visibleOnboardingQuestions(intakeForm.questions, formDraft).map((q) => q.id)
+    );
     const answers: OnboardingAnswers = {
       concept: pendingOnboarding.concept,
       answers: intakeForm.questions.map((q) => ({
         question: q.question,
-        answer: (formDraft[q.id] ?? "").trim(),
+        answer: resolvable.has(q.id) ? (formDraft[q.id] ?? "").trim() : "",
       })),
     };
     setSubmittedAnswers({ ...formDraft });
@@ -342,10 +336,9 @@ export function SessionCard({
         concept,
         boundNodes,
       });
-      // The counsellor writes the note AND the form's title/invitation itself.
-      // The app contributes only the tool-call card chrome and, shortly after
-      // the note lands, the one automatic open that makes "I'm preparing a
-      // form" and the form arriving feel like a single move.
+      // The counsellor writes the note AND the form's title/invitation itself;
+      // the app contributes only the card chrome. The sheet opens when the
+      // learner clicks the card — never on a timer.
       setPendingOnboarding({ concept, boundNodes, prompt, form, handoff });
       setIntakeForm(form);
       setFormDraft({});
@@ -357,7 +350,6 @@ export function SessionCard({
         { id: ++idRef.current, role: "tutor", text: notification },
         { id: ++idRef.current, role: "tutor", text: "", toolCall: CREATE_FORMS_TOOL },
       ]);
-      timersRef.current.push(window.setTimeout(() => setFormOpen(true), 600));
     } catch (error) {
       // No canned fallback questions — if the interviewer can't run, tell the
       // learner why and take them straight into the session.
@@ -677,7 +669,7 @@ export function SessionCard({
             {onboardingStage === "generating"
               ? "Onboarding · preparing your form"
               : onboardingStage === "asking"
-                ? "Onboarding · answer in the form"
+                ? "Onboarding · open the form above to continue"
                 : onboardingStage === "preparing"
                   ? "Preparing your session… This will take 2-3 minutes."
                   : started
@@ -708,13 +700,13 @@ export function SessionCard({
             }}
             placeholder={
               onboardingStage === "generating"
-                ? "Studyus is preparing your onboarding questions…"
-                : onboardingStage === "preparing"
-                  ? "Studyus is reading your curriculum and setting up the chalkboard…"
-                  : busy
-                    ? "Studyus is drafting..."
-                    : onboardingStage === "asking"
-                      ? "Use the form card above — or answer here, one line per question, and press Enter"
+                ? "Studyus is preparing your intake form…"
+                : onboardingStage === "asking"
+                  ? "The form above comes first — open it to answer a few quick questions"
+                  : onboardingStage === "preparing"
+                    ? "Studyus is reading your curriculum and setting up the chalkboard…"
+                    : busy
+                      ? "Studyus is drafting..."
                       : "Tell Studyus your needs and other things, it will prepare you the environment..."
             }
             rows={5}

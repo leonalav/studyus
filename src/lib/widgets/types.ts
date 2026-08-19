@@ -231,10 +231,16 @@ export interface AnimationMotion {
   /** Bounded expressions in `t`. */
   xExpression: string;
   yExpression: string;
+  /** When set, the motion lives on a 3D graph: x and y run across the floor
+   *  plane, z rises vertically, and the surface renders in an isometric view. */
+  zExpression?: string;
   tDomain: [number, number];
   /** Leave a fading trace of the path. */
   trace?: boolean;
-  /** Optional static guide curve, also in `t`. */
+  /** Optional static guide curve, also in `t` — the graph the motion happens
+   *  over. It renders as a solid line with the coordinate frame behind it, so
+   *  never send graph-bound motion without it. (In 3D the guide lies on the
+   *  floor plane.) */
   guideXExpression?: string;
   guideYExpression?: string;
 }

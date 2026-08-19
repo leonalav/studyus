@@ -321,6 +321,9 @@ function validateAnimation(intent: Record<string, unknown>): ValidationResult {
     if (!safeExpression(motion.xExpression) || !safeExpression(motion.yExpression)) {
       return fail("Animation motion needs bounded xExpression and yExpression in t");
     }
+    if (motion.zExpression !== undefined && motion.zExpression !== null && !safeExpression(motion.zExpression)) {
+      return fail("Animation motion zExpression must be a bounded expression in t");
+    }
     if (!optionalSafeExpression(motion.guideXExpression) || !optionalSafeExpression(motion.guideYExpression)) {
       return fail("Animation guide expressions must be bounded expressions in t");
     }

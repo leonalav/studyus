@@ -15,6 +15,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { renderMath } from "../../lib/latex/render";
+import { generateAxisTicks } from "./Visuals";
 import { gradeAnswerableWidget } from "../../lib/widgets/validate";
 import { WIDGET_LABEL, type WidgetIntent, type WidgetState, type WidgetKind, type WidgetRespondSpec } from "../../lib/widgets/types";
 import { assessMastery, MASTERY_DIMENSION_LABEL, MASTERY_THRESHOLD } from "../../lib/mastery";
@@ -367,6 +368,14 @@ function normalizeIntent(intent: WidgetIntent): { intent: WidgetIntent } | { rea
         typeof m.xExpression === "string" &&
         typeof m.yExpression === "string";
       if (!ok) patch.motion = undefined;
+      else if (
+        // A stray non-string z from a truncated write would otherwise silently
+        // promote the scene to a broken 3D view.
+        (m as { zExpression?: unknown }).zExpression !== undefined &&
+        typeof (m as { zExpression?: unknown }).zExpression !== "string"
+      ) {
+        patch.motion = { ...(m as Record<string, unknown>), zExpression: undefined };
+      }
     }
   }
 
@@ -841,35 +850,128 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
   const frameIndex = Math.min(intent.frames.length - 1, Math.floor(progress * intent.frames.length));
   const frame = intent.frames[frameIndex];
 
-  const path = useMemo(() => {
+  // The motion scene: the sampled path, the agent's guide curve (the graph the
+  // motion happens over), and the coordinate frame itself. An animation about
+  // positions on a graph must SHOW the graph — a dot drifting over emptiness
+  // teaches motion, not the mathematics it moves through. With a zExpression
+  // the scene is 3D and renders in an isometric view over a floor grid.
+  const scene = useMemo(() => {
     const motion = intent.motion;
     if (!motion) return null;
     const [t0, t1] = motion.tDomain;
     const samples = 96;
-    const pts: [number, number][] = [];
-    for (let i = 0; i <= samples; i += 1) {
-      const t = t0 + ((t1 - t0) * i) / samples;
-      const x = evaluateReadout(motion.xExpression, { t });
-      const y = evaluateReadout(motion.yExpression, { t });
-      if (x === null || y === null) continue;
-      pts.push([x, y]);
-    }
-    if (pts.length < 2) return null;
-    const xs = pts.map(([x]) => x);
-    const ys = pts.map(([, y]) => y);
+    const is3d = typeof motion.zExpression === "string" && motion.zExpression.trim().length > 0;
+
+    const sample = (xExpr: string, yExpr: string, zExpr?: string): [number, number, number][] => {
+      const pts: [number, number, number][] = [];
+      for (let i = 0; i <= samples; i += 1) {
+        const t = t0 + ((t1 - t0) * i) / samples;
+        const x = evaluateReadout(xExpr, { t });
+        const y = evaluateReadout(yExpr, { t });
+        const z = zExpr ? evaluateReadout(zExpr, { t }) : 0;
+        if (x === null || y === null || z === null) continue;
+        pts.push([x, y, z]);
+      }
+      return pts;
+    };
+
+    const pathPts = sample(motion.xExpression, motion.yExpression, is3d ? motion.zExpression : undefined);
+    if (pathPts.length < 2) return null;
+    const guidePts = motion.guideXExpression && motion.guideYExpression
+      ? sample(motion.guideXExpression, motion.guideYExpression)
+      : [];
+    const world = [...pathPts, ...guidePts];
+
+    const xs = world.map((p) => p[0]);
+    const ys = world.map((p) => p[1]);
+    const zs = world.map((p) => p[2]);
     const xMin = Math.min(...xs), xMax = Math.max(...xs);
     const yMin = Math.min(...ys), yMax = Math.max(...ys);
-    const spanX = Math.max(1e-6, xMax - xMin);
-    const spanY = Math.max(1e-6, yMax - yMin);
-    const project = ([x, y]: [number, number]): [number, number] => [
-      6 + ((x - xMin) / spanX) * 208,
-      56 - ((y - yMin) / spanY) * 46,
+    const zMin = Math.min(...zs), zMax = Math.max(...zs);
+
+    if (!is3d) {
+      const W = 220, H = 126, padL = 24, padR = 8, padT = 6, padB = 13;
+      const spanX = Math.max(1e-6, xMax - xMin);
+      const spanY = Math.max(1e-6, yMax - yMin);
+      const project = ([x, y]: [number, number, number]): [number, number] => [
+        padL + ((x - xMin) / spanX) * (W - padL - padR),
+        H - padB - ((y - yMin) / spanY) * (H - padT - padB),
+      ];
+      const xTicks = generateAxisTicks(xMin, xMax, 4);
+      const yTicks = generateAxisTicks(yMin, yMax, 3);
+      const xAxisY = yMin <= 0 && yMax >= 0 ? project([0, 0, 0])[1] : null;
+      const yAxisX = xMin <= 0 && xMax >= 0 ? project([0, 0, 0])[0] : null;
+      return {
+        kind: "2d" as const,
+        W,
+        H,
+        pts: pathPts.map(project),
+        guide: guidePts.map(project),
+        xTicks: xTicks.map((value) => ({ value, x: project([value, 0, 0])[0] })),
+        yTicks: yTicks.map((value) => ({ value, y: project([0, value, 0])[1] })),
+        xAxisY,
+        yAxisX,
+      };
+    }
+
+    // Isometric projection: x runs down-right, y runs down-left, z rises. The
+    // floor plane (z = floor) is drawn as a gridded parallelogram so the path
+    // has somewhere to "stand"; everything normalizes into the box with margin.
+    const COS30 = Math.cos(Math.PI / 6);
+    const SQUASH = 0.55;
+    const zFloor = Math.min(0, zMin);
+    const zCeil = Math.max(zMax, zFloor + 1e-6);
+    const isoRaw = ([x, y, z]: [number, number, number]): [number, number] => [
+      (x - y) * COS30,
+      (x + y) * COS30 * SQUASH - z,
     ];
-    return { pts: pts.map(project), raw: pts, project };
+    const corners = [
+      isoRaw([xMin, yMin, zFloor]),
+      isoRaw([xMax, yMin, zFloor]),
+      isoRaw([xMax, yMax, zFloor]),
+      isoRaw([xMin, yMax, zFloor]),
+      isoRaw([xMin, yMin, zCeil]),
+      isoRaw([xMax, yMax, zCeil]),
+    ];
+    const sxs = corners.map((c) => c[0]);
+    const sys = corners.map((c) => c[1]);
+    const sMinX = Math.min(...sxs), sMaxX = Math.max(...sxs);
+    const sMinY = Math.min(...sys), sMaxY = Math.max(...sys);
+    const W = 220, H = 146, pad = 12;
+    const spanSX = Math.max(1e-6, sMaxX - sMinX);
+    const spanSY = Math.max(1e-6, sMaxY - sMinY);
+    const project = (p: [number, number, number]): [number, number] => {
+      const [sx, sy] = isoRaw(p);
+      return [pad + ((sx - sMinX) / spanSX) * (W - 2 * pad), pad + ((sy - sMinY) / spanSY) * (H - 2 * pad)];
+    };
+    // Floor grid: the parallelogram rim plus two interior lines per direction.
+    const floorFrame = [
+      [xMin, yMin], [xMax, yMin], [xMax, yMax], [xMin, yMax], [xMin, yMin],
+    ].map(([x, y]) => project([x, y, zFloor]));
+    const gridLines: [number, number][][] = [];
+    for (const f of [1 / 3, 2 / 3]) {
+      gridLines.push([project([xMin + (xMax - xMin) * f, yMin, zFloor]), project([xMin + (xMax - xMin) * f, yMax, zFloor])]);
+      gridLines.push([project([xMin, yMin + (yMax - yMin) * f, zFloor]), project([xMax, yMin + (yMax - yMin) * f, zFloor])]);
+    }
+    // Vertical posts at the near-left and apex corners give the z axis scale.
+    const zPosts = [
+      [project([xMin, yMin, zFloor]), project([xMin, yMin, zCeil])],
+      [project([xMax, yMax, zFloor]), project([xMax, yMax, zCeil])],
+    ];
+    return {
+      kind: "3d" as const,
+      W,
+      H,
+      pts: pathPts.map(project),
+      guide: guidePts.map((p) => project([p[0], p[1], zFloor] as [number, number, number])),
+      floorFrame,
+      gridLines,
+      zPosts,
+    };
   }, [intent.motion]);
 
-  const headIndex = path ? Math.min(path.pts.length - 1, Math.round(progress * (path.pts.length - 1))) : 0;
-  const head = path?.pts[headIndex];
+  const headIndex = scene ? Math.min(scene.pts.length - 1, Math.round(progress * (scene.pts.length - 1))) : 0;
+  const head = scene?.pts[headIndex];
 
   return (
     <div>
@@ -892,11 +994,65 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
         </div>
       ) : null}
 
-      <div className="relative mb-2 h-[62px] overflow-hidden rounded" style={{ background: "rgba(0,0,0,0.18)" }}>
-        {path ? (
-          <svg viewBox="0 0 220 62" className="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+      <div
+        className="relative mb-2 overflow-hidden rounded"
+        style={{ background: "rgba(0,0,0,0.18)", height: scene ? scene.H : 62 }}
+        data-motion-scene={scene ? scene.kind : undefined}
+      >
+        {scene ? (
+          <svg viewBox={`0 0 ${scene.W} ${scene.H}`} className="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+            {scene.kind === "2d" ? (
+              <>
+                {/* coordinate frame: faint tick grid, slightly stronger axes */}
+                {scene.xTicks.map((tick) => (
+                  <g key={`x-${tick.value}`}>
+                    <line x1={tick.x} y1={0} x2={tick.x} y2={scene.H - 13} stroke={`${chalk}14`} strokeWidth={0.6} />
+                    <text x={tick.x} y={scene.H - 4} textAnchor="middle" fontSize={5.5} fill={chalk} opacity={0.5} fontFamily="monospace">
+                      {tick.value}
+                    </text>
+                  </g>
+                ))}
+                {scene.yTicks.map((tick) => (
+                  <g key={`y-${tick.value}`}>
+                    <line x1={24} y1={tick.y} x2={scene.W - 8} y2={tick.y} stroke={`${chalk}14`} strokeWidth={0.6} />
+                    <text x={21} y={tick.y + 2} textAnchor="end" fontSize={5.5} fill={chalk} opacity={0.5} fontFamily="monospace">
+                      {tick.value}
+                    </text>
+                  </g>
+                ))}
+                {scene.xAxisY !== null ? <line x1={24} y1={scene.xAxisY} x2={scene.W - 8} y2={scene.xAxisY} stroke={`${chalk}3d`} strokeWidth={0.9} /> : null}
+                {scene.yAxisX !== null ? <line x1={scene.yAxisX} y1={0} x2={scene.yAxisX} y2={scene.H - 13} stroke={`${chalk}3d`} strokeWidth={0.9} /> : null}
+              </>
+            ) : (
+              <>
+                {/* isometric floor grid + z posts: the 3D graph's frame */}
+                <polyline
+                  points={scene.floorFrame.map(([x, y]) => `${x},${y}`).join(" ")}
+                  fill="none"
+                  stroke={`${chalk}2e`}
+                  strokeWidth={0.9}
+                />
+                {scene.gridLines.map((line, i) => (
+                  <line key={i} x1={line[0][0]} y1={line[0][1]} x2={line[1][0]} y2={line[1][1]} stroke={`${chalk}16`} strokeWidth={0.6} />
+                ))}
+                {scene.zPosts.map((line, i) => (
+                  <line key={`z-${i}`} x1={line[0][0]} y1={line[0][1]} x2={line[1][0]} y2={line[1][1]} stroke={`${chalk}26`} strokeWidth={0.8} strokeDasharray="2 2.5" />
+                ))}
+              </>
+            )}
+            {/* The guide curve IS the graph the motion happens over — solid,
+                unmissable, behind the animated path. */}
+            {scene.guide.length >= 2 ? (
+              <polyline
+                points={scene.guide.map(([x, y]) => `${x},${y}`).join(" ")}
+                fill="none"
+                stroke={`${chalk}99`}
+                strokeWidth={1.6}
+                strokeLinecap="round"
+              />
+            ) : null}
             <polyline
-              points={path.pts.map(([x, y]) => `${x},${y}`).join(" ")}
+              points={scene.pts.map(([x, y]) => `${x},${y}`).join(" ")}
               fill="none"
               stroke={`${chalk}44`}
               strokeWidth={1.4}
@@ -904,7 +1060,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
             />
             {intent.motion?.trace ? (
               <polyline
-                points={path.pts.slice(0, headIndex + 1).map(([x, y]) => `${x},${y}`).join(" ")}
+                points={scene.pts.slice(0, headIndex + 1).map(([x, y]) => `${x},${y}`).join(" ")}
                 fill="none"
                 stroke={accent}
                 strokeWidth={1.8}
@@ -1031,14 +1187,17 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
         <span className="font-mono text-[9px] opacity-45">{frameIndex + 1}/{intent.frames.length}</span>
       </div>
 
-      <div className="mt-2 min-h-[32px]">
-        <p className="m-0 text-[10.5px] opacity-80">{frame.caption}</p>
-        {frame.latex ? <div className="mt-1"><TexBlock tex={frame.latex} color={chalk} size={16} /></div> : null}
+      {/* Caption and its equation read as one beat. The padding guards the
+          display-math descenders so the linked-representation chips can no
+          longer collide with them. */}
+      <div className="mt-2 space-y-1.5 pb-1">
+        <p className="m-0 text-[10.5px] leading-relaxed opacity-80">{frame.caption}</p>
+        {frame.latex ? <TexBlock tex={frame.latex} color={chalk} size={16} /> : null}
       </div>
 
       {/* Representations held in sync, so the same change is read two ways. */}
       {intent.linkedRepresentations?.length ? (
-        <div className="mt-2 grid gap-1">
+        <div className="mt-3 grid gap-1.5">
           {intent.linkedRepresentations.map((linked) => (
             <div
               key={linked.id}

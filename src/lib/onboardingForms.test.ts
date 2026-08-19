@@ -37,6 +37,49 @@ function validPayload() {
   };
 }
 
+describe("validateCreateFormsPayload — onlyIf constraints", () => {
+  const gatePayload = () => {
+    const payload = validPayload() as any;
+    payload.tool_call.arguments.questions[1].onlyIf = { questionId: "q1", anyOf: ["The definitions"] };
+    payload.tool_call.arguments.questions[0].kind = "choice";
+    payload.tool_call.arguments.questions[0].options = ["The definitions", "The algebra", "New to this"];
+    return payload;
+  };
+
+  it("accepts a gate on an earlier choice question and normalizes option casing", () => {
+    const payload = gatePayload();
+    payload.tool_call.arguments.questions[1].onlyIf.anyOf = ["the definitions"];
+    const result = validateCreateFormsPayload(payload);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.form.questions[1].onlyIf).toEqual({ questionId: "q1", anyOf: ["The definitions"] });
+    }
+  });
+
+  it("rejects a gate on a question that does not come earlier", () => {
+    const payload = gatePayload();
+    payload.tool_call.arguments.questions[1].onlyIf = { questionId: "q4", anyOf: ["None"] };
+    const result = validateCreateFormsPayload(payload);
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a gate on a free-text question — there is no option list to match", () => {
+    const payload = validPayload() as any;
+    payload.tool_call.arguments.questions[1].onlyIf = { questionId: "q1", anyOf: ["anything"] };
+    const result = validateCreateFormsPayload(payload);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(" ")).toMatch(/choice/i);
+  });
+
+  it("rejects gate labels that are not options of the target question", () => {
+    const payload = validPayload() as any;
+    payload.tool_call.arguments.questions[3].onlyIf = { questionId: "q2", anyOf: ["Not a real option"] };
+    const result = validateCreateFormsPayload(payload);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(" ")).toContain("q2");
+  });
+});
+
 describe("validateCreateFormsPayload — the counsellor's create_forms call", () => {
   it("accepts a well-formed call and normalizes it", () => {
     const result = validateCreateFormsPayload(validPayload());

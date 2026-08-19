@@ -2939,7 +2939,48 @@ export function validateCreateFormsPayload(payload: unknown): ValidationResult<G
           } else if (hasOptions) {
             errors.push(`${path} is a free-text question, so it must not carry options`);
           }
-          questions.push({ id: `q${i + 1}`, question: text.trim(), kind, options });
+          // onlyIf: a constraint against an earlier question's answer, so a
+          // probe that cannot apply (e.g. "which part feels shakiest?" asked of
+          // someone who has never met the concept at all) simply never shows.
+          let onlyIf: OnboardingQuestion["onlyIf"];
+          if (obj.onlyIf !== undefined) {
+            const gate = asRecord(obj.onlyIf, `${path}.onlyIf`, errors);
+            if (gate) {
+              const gateId = asNonEmptyString(gate.questionId, `${path}.onlyIf.questionId`, errors);
+              const rawAnyOf = asArray(gate.anyOf, `${path}.onlyIf.anyOf`, errors);
+              const gateIndex = gateId && /^q(\d+)$/.test(gateId) ? Number(gateId.slice(1)) - 1 : -1;
+              const target = gateIndex >= 0 && gateIndex < i ? questions[gateIndex] : undefined;
+              if (!gateId || !target) {
+                errors.push(`${path}.onlyIf.questionId must reference an earlier question (got "${String(gateId)}")`);
+              } else if (target.kind !== "choice" || !target.options?.length) {
+                errors.push(`${path}.onlyIf can only gate on a choice question's selected option`);
+              } else if (rawAnyOf) {
+                const labels: string[] = [];
+                rawAnyOf.forEach((entry, j) => {
+                  const label = asNonEmptyString(entry, `${path}.onlyIf.anyOf[${j}]`, errors);
+                  if (label) labels.push(label.trim());
+                });
+                if (labels.length === 0) {
+                  errors.push(`${path}.onlyIf.anyOf needs at least one option label`);
+                } else {
+                  const optionSet = new Set(target.options.map((option) => option.toLowerCase()));
+                  const stray = labels.filter((label) => !optionSet.has(label.toLowerCase()));
+                  if (stray.length > 0) {
+                    errors.push(`${path}.onlyIf.anyOf must name options of ${gateId} (stray: ${stray.join(", ")})`);
+                  } else {
+                    // Store the labels as the earlier question spells them, so a
+                    // casing drift can't make a constraint unmatchable.
+                    onlyIf = {
+                      questionId: gateId,
+                      anyOf: labels.map((label) => target.options!.find((option) => option.toLowerCase() === label.toLowerCase()) ?? label),
+                    };
+                  }
+                }
+              }
+            }
+          }
+
+          questions.push({ id: `q${i + 1}`, question: text.trim(), kind, options, onlyIf });
         });
         const title = typeof args.title === "string" && args.title.trim() ? args.title.trim() : undefined;
         const invitation = typeof args.invitation === "string" && args.invitation.trim() ? args.invitation.trim() : undefined;
@@ -2997,25 +3038,27 @@ export async function generateOnboardingQuestions(req: {
   const system =
     `You are the learner's study counsellor. Before a study session begins you sit down with them and find out who you are ` +
     `about to teach — their footing on this concept, what they expect to find hard, and how they want to work — so the tutor ` +
-    `can build the syllabus that fits this person rather than teaching a generic lesson.\\n\\n` +
+    `can build the syllabus that fits this person rather than teaching a generic lesson.\n\n` +
     `You conduct the intake by calling your \`${CREATE_FORMS_TOOL}\` tool: it renders a fill-in form card ` +
     `inside the chat, so the learner answers by opening the form and typing into fields or picking options ` +
-    `instead of writing numbered lines of reply.\\n\\n` +
-    `Rules:\\n` +
-    `- Ask AT MOST ${MAX_ONBOARDING_QUESTIONS} questions, and no fewer than ${MIN_ONBOARDING_QUESTIONS}. Ask fewer when fewer will do; do not pad to reach the maximum.\\n` +
-    `- Probe what actually matters for teaching this material: current grasp, which sub-parts they expect to struggle with, prior background the concept depends on, pace/deadline pressure, and how they want to be taught.\\n` +
-    `- Ask about the learner, never quiz them on the content — this is calibration, not assessment.\\n` +
-    `- Pick the answer format that fits each question: kind "choice" when two to six options genuinely cover the space (each a short phrase, ordered sensibly), kind "free" when the honest answer is a line of the learner's own words. A good intake mixes both.\\n` +
-    `- Free-text questions must be answerable in one short line.\\n` +
-    `- Be specific to the concept. Do not emit generic filler that would fit any subject, and do not use the same option list twice.\\n` +
-    `- Do not number the questions; numbering is added by the app.\\n` +
-    `- Write as a counsellor preparing a form for a person, not a clerk printing paperwork.\\n\\n` +
-    `Return JSON only:\\n` +
-    `{"notification": string, "tool_call": {"name": "${CREATE_FORMS_TOOL}", "arguments": {"title": string, "invitation": string, "questions": [{"question": string, "kind": "free" | "choice", "options"?: string[]}, ...]}}, "handoff": string}.\\n` +
-    `- "notification": one or two sentences in your own voice, posted in the chat as you run — welcome this learner to THIS concept and tell them you are putting your ${MAX_ONBOARDING_QUESTIONS} intake questions into a small form they can open right in the chat, so it takes a minute and they can skip anything they like. Your words, never a fixed formula.\\n` +
-    `- "title": two to six words naming this intake, specific to the concept.\\n` +
-    `- "invitation": one sentence shown inside the form, inviting them to answer and making clear they may skip any or all of the questions.\\n` +
-    `- "handoff": one sentence you will say the moment they submit the form, while their materials are being prepared. It must work whether they answered every question or skipped them all. Do not promise anything specific about what the board will contain.\\n` +
+    `instead of writing numbered lines of reply.\n\n` +
+    `Rules:\n` +
+    `- Ask AT MOST ${MAX_ONBOARDING_QUESTIONS} questions, and no fewer than ${MIN_ONBOARDING_QUESTIONS}. Ask fewer when fewer will do; do not pad to reach the maximum.\n` +
+    `- Probe what actually matters for teaching this material: current grasp, which sub-parts they expect to struggle with, prior background the concept depends on, pace/deadline pressure, and how they want to be taught.\n` +
+    `- Ask about the learner, never quiz them on the content — this is calibration, not assessment.\n` +
+    `- Pick the answer format that fits each question: kind "choice" when two to six options genuinely cover the space (each a short phrase, ordered sensibly), kind "free" when the honest answer is a line of the learner's own words. A good intake mixes both.\n` +
+    `- Respect constraints: a follow-up probe must make sense to the particular learner reading it. When a question only applies given a certain earlier answer — e.g. "which part feels shakiest?" means nothing to someone who just said they have never met the concept at all — gate it with onlyIf on that earlier choice question and the option labels under which it applies, rather than asking it unconditionally.\n` +
+    `- Free-text questions must be answerable in one short line.\n` +
+    `- Be specific to the concept. Do not emit generic filler that would fit any subject, and do not use the same option list twice.\n` +
+    `- Do not number the questions; numbering is added by the app.\n` +
+    `- Write as a counsellor preparing a form for a person, not a clerk printing paperwork.\n\n` +
+    `Return JSON only:\n` +
+    `{"notification": string, "tool_call": {"name": "${CREATE_FORMS_TOOL}", "arguments": {"title": string, "invitation": string, "questions": [{"question": string, "kind": "free" | "choice", "options"?: string[], "onlyIf"?: {"questionId": string, "anyOf": string[]}}, ...]}}, "handoff": string}.\n` +
+    `- "notification": one or two sentences in your own voice, posted in the chat as you run — welcome this learner to THIS concept and tell them you are putting your ${MAX_ONBOARDING_QUESTIONS} intake questions into a small form they can open right in the chat, so it takes a minute and they can skip anything they like. Your words, never a fixed formula.\n` +
+    `- "title": two to six words naming this intake, specific to the concept.\n` +
+    `- "invitation": one sentence shown inside the form, inviting them to answer and making clear they may skip any or all of the questions.\n` +
+    `- "onlyIf": ids are positional — the first question is q1, the second q2, and a gate may only reference an earlier one.\n` +
+    `- "handoff": one sentence you will say the moment they submit the form, while their materials are being prepared. It must work whether they answered every question or skipped them all. Do not promise anything specific about what the board will contain.\n` +
     `No prose outside the JSON, no code fences.`;
 
   const user =

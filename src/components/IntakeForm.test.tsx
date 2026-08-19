@@ -31,14 +31,31 @@ const FORM: OnboardingForm = {
 
 const render = (node: ReactNode) => renderToStaticMarkup(createElement(() => node as any));
 
-describe("FormCallCard — the create_forms tool-call pill in the chat", () => {
-  it("names the tool and the agent-written title, and offers the open action", () => {
+describe("FormCallCard — the form actions card in the chat", () => {
+  it("carries the agent-written title and the open action", () => {
     const html = render(createElement(FormCallCard, { form: FORM, submitted: false, onOpen: () => {} }));
-    expect(html).toContain('data-tool-call="create_forms"');
-    expect(html).toContain("create_forms");
     expect(html).toContain("Before we start: limits");
     expect(html).toContain("5 questions");
     expect(html).toContain("Open form");
+  });
+
+  it("never leaks the tool-call name to the learner", () => {
+    const card = render(createElement(FormCallCard, { form: FORM, submitted: false, onOpen: () => {} }));
+    const sheet = render(
+      createElement(IntakeFormSheet, {
+        form: FORM,
+        open: true,
+        draft: {},
+        readOnly: false,
+        onChange: () => {},
+        onSubmit: () => {},
+        onClose: () => {},
+      })
+    );
+    expect(card).not.toContain("create_forms");
+    expect(card).not.toContain("tool_call");
+    expect(sheet).not.toContain("create_forms");
+    expect(sheet).not.toContain("tool_call");
   });
 
   it("flips to a review action once answers are submitted", () => {
@@ -99,5 +116,22 @@ describe("IntakeFormSheet — the floating portrait form", () => {
   it("renders nothing while closed", () => {
     const html = sheet({ open: false });
     expect(html).toBe("");
+  });
+
+  it("hides gated questions until their constraint answer matches", () => {
+    const gated: OnboardingForm = {
+      title: "T",
+      invitation: "i",
+      questions: [
+        { id: "q1", question: "Have you met this before?", kind: "choice", options: ["Brand new", "A little"] },
+        { id: "q2", question: "Which part feels shakiest?", kind: "free", onlyIf: { questionId: "q1", anyOf: ["A little"] } },
+      ],
+    };
+    const hidden = sheet({ form: gated, draft: {} });
+    expect(hidden).not.toContain("shakiest");
+    const stillHidden = sheet({ form: gated, draft: { q1: "Brand new" } });
+    expect(stillHidden).not.toContain("shakiest");
+    const shown = sheet({ form: gated, draft: { q1: "A little" } });
+    expect(shown).toContain("shakiest");
   });
 });

@@ -37,10 +37,10 @@ export function shape(_intent: Intent, _subject: Subject): string {
  *
  * The interview reaches the learner through the agent's `create_forms` tool
  * call: instead of a numbered chat message, the counsellor posts its own short
- * note and a form card appears in the chat; the form opens as a floating sheet
- * with a mix of free-text and multiple-choice questions. A learner who instead
- * types the answers into the chat input still works — `pairOnboardingReply`
- * covers that path.
+ * note and a form card appears in the chat; the learner opens the card to
+ * answer in a floating sheet with a mix of free-text, multiple-choice and
+ * conditionally-gated questions. The chat input is locked while the form is
+ * unanswered — the form IS the only answer path.
  *
  * This module owns only the *shape* of the interview and how the answers are
  * folded back into the tutor's system prompt.
@@ -63,6 +63,31 @@ export interface OnboardingQuestion {
   kind?: OnboardingQuestionKind;
   /** Two to six options when kind is "choice"; absent on "free" questions. */
   options?: string[];
+  /** Ask this question only when an earlier question landed on one of these
+   *  answers. Constraints keep the intake honest: probing which part feels
+   *  shakiest is meaningless for a learner who has never met the concept at
+   *  all, so such a probe is gated on the footing question's other options.
+   *  Hidden questions submit as skipped. */
+  onlyIf?: { questionId: string; anyOf: string[] };
+}
+
+/**
+ * The questions visible under a partial draft: a gated question appears once
+ * its earlier choice question's selected option matches `anyOf`
+ * (case-insensitive). Questions gated on an unanswered question stay hidden —
+ * the intake must not presume an answer it does not have.
+ */
+export function visibleOnboardingQuestions(
+  questions: OnboardingQuestion[],
+  answers: Record<string, string>
+): OnboardingQuestion[] {
+  return questions.filter((q) => {
+    const gate = q.onlyIf;
+    if (!gate) return true;
+    const picked = (answers[gate.questionId] ?? "").trim().toLowerCase();
+    if (!picked) return false;
+    return gate.anyOf.some((option) => option.trim().toLowerCase() === picked);
+  });
 }
 
 /** The artifact produced by the agent's `create_forms` tool call. */
@@ -99,31 +124,6 @@ export function renderOnboardingReply(answers: OnboardingAnswers): string {
 }
 
 /**
- * Pair a free-text reply back onto the generated questions. One line per
- * question, in order; numeric prefixes ("1.") are stripped. Missing or
- * skip-style lines become empty answers, which the reminder reports as
- * "not given" rather than inventing a value.
- */
-export function pairOnboardingReply(
-  concept: string,
-  questions: OnboardingQuestion[],
-  reply: string
-): OnboardingAnswers {
-  const lines = reply
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^\s*\d+[.)]\s*/, "").trim())
-    .filter((line) => line.length > 0);
-  const isSkip = (s: string) => /^(skip|n\/a|na|none|-)$/i.test(s);
-  return {
-    concept,
-    answers: questions.map((q, i) => {
-      const raw = lines[i] ?? "";
-      return { question: q.question, answer: isSkip(raw) ? "" : raw };
-    }),
-  };
-}
-
-/**
  * Compose the answers into a consistent system reminder appended to the tutor
  * agent's system prompt for the whole session, so the agent tutors to the
  * learner's stated situation across every turn rather than forgetting it after
@@ -137,5 +137,6 @@ export function buildOnboardingReminder(answers: OnboardingAnswers): string {
     `LEARNER ONBOARDING for "${answers.concept}" (consistent reminder for this session):`,
     ...lines,
     "Tutor to these answers for the duration of the session.",
+    "If these answers say the learner is new to the concept — or they were all skipped — slow right down: introduce one idea at a time, define every technical term in plain language before you use it (never open a sentence on jargon the learner has not defined first), and check understanding before stacking vocabulary on vocabulary.",
   ].join("\n");
 }

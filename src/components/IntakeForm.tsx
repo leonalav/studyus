@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { Check, CheckCheck, ClipboardCheck, ClipboardList, X } from "lucide-react";
 import {
-  CREATE_FORMS_TOOL,
+  visibleOnboardingQuestions,
   type OnboardingForm,
   type OnboardingQuestion,
 } from "../data/tutor";
@@ -14,10 +14,10 @@ export type IntakeDraft = Record<string, string>;
 /* ────────────────────────── create_forms card ────────────────────────── */
 
 /**
- * The tool-call pill the counsellor leaves in the chat when it runs
- * `create_forms`: a compact actions card that names the tool, carries the
- * agent-written title, and opens the form. The agent's own notification text
- * is a separate chat message — this card never invents prose for it.
+ * The actions card the counsellor leaves in the chat alongside its own
+ * notification message: a compact pill that carries the agent-written title
+ * and opens the form. Tool-call names never reach the reader — the card is
+ * just "a form from your tutor".
  */
 export function FormCallCard({
   form,
@@ -29,23 +29,15 @@ export function FormCallCard({
   onOpen: () => void;
 }) {
   return (
-    <div
-      data-tool-call={CREATE_FORMS_TOOL}
-      className="anim-msg flex items-center gap-3 rounded-lg border border-white/10 bg-raise/70 px-3 py-2.5"
-    >
+    <div className="anim-msg flex items-center gap-3 rounded-lg border border-white/10 bg-raise/70 px-3 py-2.5">
       <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-accent/15 text-accent">
         {submitted ? <ClipboardCheck size={15} /> : <ClipboardList size={15} />}
       </span>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="font-mono text-[9.5px] uppercase tracking-[0.14em] text-dim">
-            {CREATE_FORMS_TOOL}
-          </span>
-          <span className="rounded-full bg-white/[0.07] px-1.5 py-px font-mono text-[9px] text-mut">
-            {form.questions.length} questions
-          </span>
-        </div>
-        <div className="truncate text-[12.5px] font-medium text-fg">
+        <span className="rounded-full bg-white/[0.07] px-1.5 py-px font-mono text-[9px] text-mut">
+          {form.questions.length} questions
+        </span>
+        <div className="truncate pt-0.5 text-[12.5px] font-medium text-fg">
           {form.title ?? "Intake form"}
         </div>
       </div>
@@ -66,13 +58,15 @@ export function FormCallCard({
 /* ─────────────────────────── the form sheet ─────────────────────────── */
 
 /**
- * The `create_forms` artifact when opened: a floating portrait sheet (longer
- * than it is wide) suspended over a dimmed backdrop. Free questions take a
- * line of the learner's own words; choice questions take one option. Anything
- * left empty is a skipped question, surfaced to the tutor as "not given".
+ * The form artifact when opened: a floating portrait sheet (longer than it is
+ * wide) suspended over a dimmed backdrop. Free questions take a line of the
+ * learner's own words; choice questions take one option. Anything left empty
+ * is a skipped question, surfaced to the tutor as "not given".
  *
  * The title and invitation are the agent's own words from its tool call; the
- * app renders them verbatim and adds only chrome (numbering, buttons).
+ * app renders them verbatim and adds only chrome (numbering, buttons). The
+ * tool's name stays inside the wire format — the learner sees a form, not
+ * plumbing.
  */
 export function IntakeFormSheet({
   form,
@@ -107,8 +101,11 @@ export function IntakeFormSheet({
 
   if (!open) return null;
 
-  const total = form.questions.length;
-  const answered = form.questions.filter((q) => (draft[q.id] ?? "").trim()).length;
+  // Gated questions appear only once their constraint answer matches; hidden
+  // ones remain answerable "skipped" and the count tracks what is on screen.
+  const visible = visibleOnboardingQuestions(form.questions, draft);
+  const total = visible.length;
+  const answered = visible.filter((q) => (draft[q.id] ?? "").trim()).length;
 
   return createPortal(
     <div
@@ -131,9 +128,6 @@ export function IntakeFormSheet({
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <ClipboardList size={12} className="shrink-0 text-accent" />
-                <span className="font-mono text-[9.5px] uppercase tracking-[0.14em] text-dim">
-                  {CREATE_FORMS_TOOL}
-                </span>
                 <span className="rounded-full bg-white/[0.07] px-1.5 py-px font-mono text-[9px] text-mut">
                   {answered}/{total}
                 </span>
@@ -155,9 +149,9 @@ export function IntakeFormSheet({
           )}
         </div>
 
-        {/* questions */}
+        {/* questions — gated ones join once their constraint answer lands */}
         <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
-          {form.questions.map((q, index) => (
+          {visible.map((q, index) => (
             <QuestionBlock
               key={q.id}
               index={index}

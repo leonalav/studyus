@@ -437,4 +437,58 @@ describe("WidgetSurface — animation as prediction, not video", () => {
     expect(html).toContain("as h shrinks");
     expect(html).toContain("equation");
   });
+
+  it("renders graph-bound motion on an actual coordinate plane, guide included", () => {
+    // The reported failure: an animation "on a graph" showed a lone dot over
+    // an empty strip — the graph itself never rendered. The scene must carry
+    // axes and the guide curve the motion belongs to.
+    const onGraph: WidgetIntent = {
+      ...animation,
+      motion: {
+        xExpression: "t",
+        yExpression: "sin(t)",
+        tDomain: [-3, 3],
+        guideXExpression: "t",
+        guideYExpression: "sin(t)",
+      },
+    };
+    const html = live(onGraph, { predictionLocked: true });
+    expect(html).toContain('data-motion-scene="2d"');
+    // Tick grid labels are the give-away that a coordinate plane rendered.
+    const tinyTicks = html.match(/font-size="5.5"/g) ?? [];
+    expect(tinyTicks.length).toBeGreaterThan(0);
+    // The guide curve renders solid; the live path stays dashed.
+    expect(html).toMatch(/<polyline[^>]*stroke-dasharray="3 5"/);
+    const polylines = html.match(/<polyline/g) ?? [];
+    expect(polylines.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders 3D motion in an isometric view over a floor grid", () => {
+    const in3d: WidgetIntent = {
+      ...animation,
+      motion: {
+        xExpression: "cos(t)",
+        yExpression: "sin(t)",
+        zExpression: "t / 4",
+        tDomain: [0, 6.28],
+      },
+    };
+    const html = live(in3d, { predictionLocked: true });
+    expect(html).toContain('data-motion-scene="3d"');
+    expect(html).toMatch(/<line[^>]*stroke-dasharray="2 2.5"/);
+  });
+
+  it("ignores a non-string zExpression instead of breaking the scene", () => {
+    const drifted = {
+      ...animation,
+      motion: {
+        xExpression: "t",
+        yExpression: "t * t",
+        zExpression: 42,
+        tDomain: [-2, 2],
+      },
+    } as unknown as WidgetIntent;
+    const html = live(drifted, { predictionLocked: true });
+    expect(html).toContain('data-motion-scene="2d"');
+  });
 });
