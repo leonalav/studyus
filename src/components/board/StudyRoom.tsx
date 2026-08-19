@@ -897,17 +897,22 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   handleSendRef.current = handleSend;
 
   // A fresh chalkboard opens with a tutor greeting and the first lesson turn;
-  // restored sessions keep their existing transcript untouched.
+  // restored sessions keep their existing transcript untouched. When the
+  // learner just completed the intake form, the first turn leads with the
+  // syllabus fitted to their submitted answers rather than a generic opener.
   useEffect(() => {
     if (initialSession || greetedRef.current || greetAttempt > 2) return;
     greetedRef.current = true;
+    const hasIntakeAnswers = (onboarding?.answers ?? []).some((answer) => answer.answer.trim());
     void handleSend(
-      "Open the lesson with a brief welcome, then place the first teaching step or orientation on the chalkboard. Keep the chat response to a short greeting.",
+      hasIntakeAnswers
+        ? "The learner just submitted your intake form — their answers are in the session reminder. Open the lesson by building the syllabus that fits them: a roadmap sized to their stated footing, gaps and deadline, then the first teaching step. Keep the chat response to a short greeting that reflects what they told you."
+        : "Open the lesson with a brief welcome, then place the first teaching step or orientation on the chalkboard. Keep the chat response to a short greeting.",
       undefined,
       false,
       { kind: "greeting" }
     );
-  }, [handleSend, initialSession, greetAttempt]);
+  }, [handleSend, initialSession, greetAttempt, onboarding]);
 
   /* markdown recording + export */
   const buildDoc = useCallback(() => {

@@ -35,9 +35,22 @@ export function shape(_intent: Intent, _subject: Subject): string {
  * written fresh for the specific concept (and its transcribed curriculum
  * evidence), so nothing here is a fixed question list.
  *
+ * The interview reaches the learner through the agent's `create_forms` tool
+ * call: instead of a numbered chat message, the counsellor posts its own short
+ * note and a form card appears in the chat; the form opens as a floating sheet
+ * with a mix of free-text and multiple-choice questions. A learner who instead
+ * types the answers into the chat input still works — `pairOnboardingReply`
+ * covers that path.
+ *
  * This module owns only the *shape* of the interview and how the answers are
  * folded back into the tutor's system prompt.
  */
+
+/** The one tool the onboarding flow exposes to the counsellor agent. */
+export const CREATE_FORMS_TOOL = "create_forms";
+
+/** Answer format the counsellor picks per question in its create_forms call. */
+export type OnboardingQuestionKind = "free" | "choice";
 
 /** One question the tutor agent generated for this session's concept. */
 export interface OnboardingQuestion {
@@ -45,6 +58,20 @@ export interface OnboardingQuestion {
   id: string;
   /** The question text as the learner sees it. */
   question: string;
+  /** Free-text line or multiple choice. Missing on pre-form payloads — those
+   *  interviews were always answered in writing, so absence means "free". */
+  kind?: OnboardingQuestionKind;
+  /** Two to six options when kind is "choice"; absent on "free" questions. */
+  options?: string[];
+}
+
+/** The artifact produced by the agent's `create_forms` tool call. */
+export interface OnboardingForm {
+  /** Short agent-written title for the chat card and the form sheet header. */
+  title?: string;
+  /** The agent's own invitation sentence, shown inside the form. */
+  invitation?: string;
+  questions: OnboardingQuestion[];
 }
 
 /** One answered question. `answer` is empty when the learner skipped it. */
@@ -60,20 +87,15 @@ export interface OnboardingAnswers {
 }
 
 /**
- * Render a generated interview as the chat message the learner reads. The
- * numbering is added here (not asked of the model) so the learner can reply
- * "one answer per line" and we can pair replies back positionally.
+ * Render the learner's form submission as their chat reply, so the transcript
+ * stays readable and the copy flow keeps working. Only the numbering and the
+ * "(skipped)" marker come from the app — the words themselves are the
+ * learner's.
  */
-export function renderOnboardingQuestions(
-  intro: string,
-  questions: OnboardingQuestion[]
-): string {
-  // Only the numbering is added by the app. The intro and the closing line are
-  // the counsellor's own words: a fixed "you have N agents bound" note and a
-  // fixed sign-off made every session open identically regardless of who the
-  // learner is or what they are about to study.
-  const numbered = questions.map((q, i) => `${i + 1}. ${q.question}`).join("\n");
-  return `${intro}\n\n${numbered}`;
+export function renderOnboardingReply(answers: OnboardingAnswers): string {
+  return answers.answers
+    .map((entry, i) => `${i + 1}. ${entry.answer || "(skipped)"}`)
+    .join("\n");
 }
 
 /**
