@@ -747,6 +747,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           board,
           boundNodes: resolvedBoundNodes,
           onboarding: onboarding ?? undefined,
+          turnKind,
           learnerMessage: text,
           attachments: attachments.map((a) => ({
             name: a.name,
@@ -906,7 +907,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     const hasIntakeAnswers = (onboarding?.answers ?? []).some((answer) => answer.answer.trim());
     void handleSend(
       hasIntakeAnswers
-        ? "The learner just submitted your intake form — their answers are in the session reminder. Before any teaching, designate the route: place the roadmap for the concept AND a plan widget — a zero-to-mastery route built directly on all five of their intake answers, so the phases start where they actually stand — and stop there. Teaching begins only when they agree to that plan (their \"Start learning\" is your go signal), and if they edit it first, the edited route is binding. Keep the chat message to a short greeting that reflects what they told you."
+        ? "The learner just submitted your intake form — their answers are in the session reminder. Before any teaching, designate the route: place the plan widget FIRST — a zero-to-mastery route built directly on all five of their intake answers, so the phases start where they actually stand — then the roadmap of where the lesson goes, and stop there. The learner must see how they will be taught before anything is taught. Teaching begins only when they agree to that plan (their \"Start learning\" is your go signal), and if they edit it first, the edited route is binding. Keep the chat message to a short greeting that reflects what they told you."
         : "Open the lesson with a brief welcome, then place the first teaching step or orientation on the chalkboard. Keep the chat response to a short greeting.",
       undefined,
       false,

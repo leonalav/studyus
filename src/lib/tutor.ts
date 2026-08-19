@@ -2392,6 +2392,24 @@ function summarizeWidgetInteraction(state?: WidgetState): string {
    PUBLIC ENTRY POINT
    ───────────────────────────────────────────────────────────── */
 
+/**
+ * Which widget kinds this turn's catalog describes.
+ *
+ * Policy routes whitelist pedagogical moves — so a diagnostic route's catalog
+ * lists four kinds and the model simply never sees the rest. The designated
+ * session opening (greeting turn + onboarding reminder on record) is exempt:
+ * it is a product beat that must always be able to place the plan widget and
+ * the roadmap, whatever the route happens to warrant. `undefined` = full
+ * catalog. Exported for unit testing.
+ */
+export function resolveTurnWidgetPermit(
+  turnKind: "chat" | "greeting" | "widget" | undefined,
+  hasOnboarding: boolean,
+  policyPermitted: readonly WidgetKind[] | undefined
+): readonly WidgetKind[] | undefined {
+  return turnKind === "greeting" && hasOnboarding ? undefined : policyPermitted;
+}
+
 export interface TutorTurnRequest {
   sessionId: string;
   sessionTitle: string;
@@ -2405,6 +2423,11 @@ export interface TutorTurnRequest {
    *  pace, and remarks. Omitted for restored sessions (already ran). */
   onboarding?: OnboardingAnswers;
   learnerMessage: string;
+  /** Distinguishes the session-opening greeting turn. Only a greeting with
+   *  onboarding answers on record is the DESIGNATED session opening: the turn
+   *  that must place the plan widget (zero→mastery route built on the five
+   *  intake answers) and the roadmap before any teaching. */
+  turnKind?: "chat" | "greeting" | "widget";
   attachments?: {
     name: string;
     kind: string;
@@ -2568,6 +2591,13 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   const learnerId = req.learnerId ?? DEFAULT_LEARNER_ID;
   const skillId = resolveTurnSkillId(req);
   let policyBrief: PolicyBrief | undefined;
+  // The designated session opening is a product beat, not a policy route: the
+  // intake-produced reminder is the design input, and the opening turn must
+  // place the plan widget + roadmap whatever the route whitelists would allow.
+  // A route-scoped catalog never contains either — the greeting then quietly
+  // renders "roadmap only" because the model never saw the plan exists.
+  const isSessionOpening = req.turnKind === "greeting" && Boolean(req.onboarding);
+
   let openingBrief = "";
   try {
     policyBrief = await buildPolicyBrief({
@@ -2585,6 +2615,14 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     }
   } catch (error) {
     console.warn("[tutor] policy engine unavailable; continuing without it", error);
+  }
+
+  if (isSessionOpening) {
+    openingBrief = [
+      "SESSION OPENING — binding:",
+      "The intake answers in the development reminder are the design input for this session. Your board_ops open with the plan widget FIRST — the route from where the learner said they stand to mastery of this concept, each phase carrying the one or two lines of what it covers — then the roadmap for orientation. Place no teaching content: lesson work begins only when the learner agrees to the plan (their \"Start learning\" click is your signal). Your speech text is the greeting and nothing else.",
+      openingBrief,
+    ].filter(Boolean).join("\n\n");
   }
 
   const knowledgeNodes = await resolveTutorKnowledgeNodes(req.boundNodes ?? [], studio);
@@ -2644,7 +2682,11 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     masteryStage: policyBrief?.state.stage ?? masteryStage.stage,
     masteryStageEvidence: masteryStage.evidence,
     policyBrief: policyBrief?.prompt,
-    permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
+    permittedWidgetKinds: resolveTurnWidgetPermit(
+      req.turnKind,
+      Boolean(req.onboarding),
+      policyBrief?.move.permittedWidgetKinds
+    ),
     openingBrief,
     learnerSummary,
     curriculumScope,
