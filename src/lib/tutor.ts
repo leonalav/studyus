@@ -92,7 +92,7 @@ import {
   type TutorToolPermissions,
 } from "./preferences";
 
-export const TUTOR_PROMPT_VERSION = "tutor_v7";
+export const TUTOR_PROMPT_VERSION = "tutor_v8";
 export const TUTOR_SCHEMA_VERSION = "tutor_turn_v4";
 export const ONBOARDING_PROMPT_VERSION = "tutor_onboarding_v2";
 export const ONBOARDING_SCHEMA_VERSION = "onboarding_create_forms_v1";

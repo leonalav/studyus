@@ -170,6 +170,7 @@ export function validateWidgetIntent(intent: unknown): ValidationResult {
 
   switch (kind as WidgetKind) {
     case "roadmap": return validateRoadmap(intent);
+    case "plan": return validatePlan(intent);
     case "concept_card": return validateConceptCard(intent);
     case "slider": return validateSlider(intent);
     case "animation": return validateAnimation(intent);
@@ -202,7 +203,6 @@ function validateRoadmap(intent: Record<string, unknown>): ValidationResult {
   if (!steps) return fail(`Roadmap needs 1–${MAX_ROADMAP_STEPS} steps`);
   const ids = uniqueIds(steps, "roadmap.steps");
   if (!ids.valid) return ids;
-
   let currentCount = 0;
   for (const step of steps as Record<string, unknown>[]) {
     if (!text(step.label, MAX_SHORT_TEXT_LENGTH)) return fail("Each roadmap step needs a label");
@@ -215,6 +215,27 @@ function validateRoadmap(intent: Record<string, unknown>): ValidationResult {
     }
   }
   if (currentCount > 1) return fail("A roadmap may mark at most one step as current");
+  return ok;
+}
+
+/** Plan bounds: a plan with one phase is a sentence, not a route; past eight
+ *  phases it stops being something a learner can agree to at a glance. */
+const MAX_PLAN_STEPS = 8;
+const MAX_PLAN_STEP_DETAILS = 4;
+
+function validatePlan(intent: Record<string, unknown>): ValidationResult {
+  if (!text(intent.heading, MAX_SHORT_TEXT_LENGTH)) return fail("Plan needs a heading — what is being mastered");
+  const steps = requiredList(intent.steps, MAX_PLAN_STEPS);
+  if (!steps || steps.length < 2) return fail(`Plan needs 2–${MAX_PLAN_STEPS} steps`);
+  const ids = uniqueIds(steps, "plan.steps");
+  if (!ids.valid) return ids;
+  for (const step of steps as Record<string, unknown>[]) {
+    if (!text(step.label, MAX_SHORT_TEXT_LENGTH)) return fail("Each plan step needs a label");
+    if (step.details !== undefined && step.details !== null && !stringList(step.details, MAX_PLAN_STEP_DETAILS, MAX_TEXT_LENGTH)) {
+      return fail(`Plan step details are 1–${MAX_PLAN_STEP_DETAILS} short lines each`);
+    }
+  }
+  if (!optionalText(intent.agreementPrompt, MAX_SHORT_TEXT_LENGTH)) return fail("Plan agreementPrompt is too long");
   return ok;
 }
 

@@ -10,7 +10,7 @@
  * Three of the twenty widgets in the original board specification (Graph,
  * Point/Geometry, Equation) are NOT defined here: they already exist as
  * first-class visualization intents (`function`, `geometry`, `equation`) and
- * must keep going through `visualize`. The remaining seventeen live here.
+ * must keep going through `visualize`. The remaining eighteen live here.
  *
  * Design rules for every widget in this file:
  *  - Every learner-visible string is agent-supplied. No hardcoded lesson text.
@@ -24,6 +24,7 @@
 
 export type WidgetIntent =
   | RoadmapWidget
+  | PlanWidget
   | ConceptCardWidget
   | SliderWidget
   | AnimationWidget
@@ -43,10 +44,11 @@ export type WidgetIntent =
 
 export type WidgetKind = WidgetIntent["kind"];
 
-/** Every widget kind, in the canonical board order (widget numbers 1–20 with
+/** Every widget kind, in the canonical board order (widget numbers 1–21 with
  *  the three built-in visualization widgets 3/4/5 omitted). */
 export const WIDGET_KINDS = [
   "roadmap",
+  "plan",
   "concept_card",
   "slider",
   "animation",
@@ -68,6 +70,7 @@ export const WIDGET_KINDS = [
 /** Board-spec widget numbers, preserved so product/design references line up. */
 export const WIDGET_BOARD_NUMBER: Record<WidgetKind, number> = {
   roadmap: 1,
+  plan: 21,
   concept_card: 2,
   slider: 6,
   animation: 7,
@@ -88,6 +91,7 @@ export const WIDGET_BOARD_NUMBER: Record<WidgetKind, number> = {
 
 export const WIDGET_LABEL: Record<WidgetKind, string> = {
   roadmap: "Roadmap",
+  plan: "Plan",
   concept_card: "Concept Card",
   slider: "Slider",
   animation: "Animation",
@@ -170,6 +174,41 @@ export interface RoadmapWidget extends WidgetBase {
   /** Lesson/section heading, e.g. "8.1 Derivatives". */
   heading?: string;
   steps: RoadmapStep[];
+}
+
+/* ── 21 · Plan — the agreed route from zero to mastery ── */
+
+export interface PlanStep {
+  id: string;
+  /** Phase headline, e.g. "Read the picture before the letters". */
+  label: string;
+  /** One to three short numbered detail lines spelling out what the phase
+   *  covers — the (1)(2)(3) sub-bullets under a phase. */
+  details?: string[];
+}
+
+/**
+ * The course-of-study the tutor proposes and the learner signs off BEFORE
+ * teaching begins.
+ *
+ * A plan is not content; it is a commitment device. The learner reads the
+ * proposed route — built from their intake answers — and either agrees
+ * ("Start learning", the go signal the tutor waits on) or edits the steps
+ * into the course they actually came for. A session that teaches over an
+ * unagreed plan is the tutor talking to itself.
+ *
+ * The tutor writes the intent; the learner's edited version lives in
+ * `WidgetState.planDraft` and wins on render whenever present.
+ */
+export interface PlanWidget extends WidgetBase {
+  kind: "plan";
+  /** What is being mastered, e.g. "Convergence of series" — the card title. */
+  heading: string;
+  steps: PlanStep[];
+  /** The consent question under the steps. Defaults to "Do you agree with
+   *  this plan?" — override when the session needs a more specific ask, and
+   *  only then. */
+  agreementPrompt?: string;
 }
 
 /* ── 2 · Concept Card — the durable definition ── */
@@ -615,6 +654,7 @@ export interface MasteryEvidence {
  * which is exactly why it exists.
  */
 export const ACTIONABLE_WIDGET_KINDS = [
+  "plan",
   "question",
   "retrieval_check",
   "challenge",
@@ -717,6 +757,11 @@ export interface WidgetState {
   reconcileText?: string;
   /** animation: the unaided reconstruction written after reconciliation. */
   reconstructText?: string;
+  /** plan: `submitted` marks the learner's "Start learning" click. A learner-
+   *  edited route lives here (set only when the learner actually changed
+   *  something) and takes display precedence over the agent-authored `steps`;
+   *  the tutor receives it on the agreement signal. */
+  planDraft?: { heading: string; steps: PlanStep[] };
   /** hint: highest hint level the learner has opened. */
   hintLevelOpened?: number;
   /** Learner's own confidence in this answer, 0–100.

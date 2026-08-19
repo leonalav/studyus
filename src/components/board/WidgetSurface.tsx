@@ -14,6 +14,7 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { renderMath } from "../../lib/latex/render";
 import { generateAxisTicks } from "./Visuals";
 import { gradeAnswerableWidget } from "../../lib/widgets/validate";
@@ -53,6 +54,7 @@ export interface WidgetSurfaceProps {
 
 const MARKS: Record<WidgetKind, string> = {
   roadmap: "M4 18c0-3 4-3 4-6s-4-3-4-6M20 6c0 3-4 3-4 6s4 3 4 6",
+  plan: "M7 5.5h9M7 12h9M7 18.5h5M4 5.2l.9.9L6.5 4.5M4 11.7l.9.9 1.6-1.6M4 18.2l.9.9 1.6-1.6",
   concept_card: "M6 4h9l4 4v12H6zM14 4v5h5M9 13h6M9 16h4",
   slider: "M3 12h18",
   animation: "M4 16c4-9 12-9 16 0",
@@ -80,6 +82,7 @@ const EXTRA_MARK_SHAPES: Partial<Record<WidgetKind, React.ReactElement>> = {
 
 const DEFAULT_TAGS: Record<WidgetKind, string> = {
   roadmap: "Path",
+  plan: "Your say",
   concept_card: "Idea",
   slider: "Manipulate",
   animation: "Over time",
@@ -270,10 +273,11 @@ interface BodyProps {
  * the renderer unchecked. Those bodies used to throw on the missing field and —
  * before error boundaries existed — blank the entire application. Naming the
  * requirement here keeps the check in one auditable place instead of scattering
- * optional chaining through seventeen components.
+ * optional chaining through eighteen components.
  */
 const REQUIRED_LIST: Partial<Record<WidgetIntent["kind"], string>> = {
   roadmap: "steps",
+  plan: "steps",
   animation: "frames",
   comparison: "columns",
   hint: "steps",
@@ -306,7 +310,7 @@ function usableEntries(value: unknown): Record<string, unknown>[] {
  * Placement validates intents, but three paths reach the renderer unchecked: a
  * board restored from a saved session, a payload truncated mid-write, and a
  * widget authored by an older build. Rather than scatter optional chaining
- * across seventeen components, normalize once here so each body keeps its
+ * across eighteen components, normalize once here so each body keeps its
  * straightforward, readable shape.
  *
  * Returns the repaired intent, or a reason string when nothing renderable is
@@ -419,6 +423,7 @@ function renderBody(rawIntent: WidgetIntent, props: BodyProps) {
 
   switch (intent.kind) {
     case "roadmap": return <RoadmapBody intent={intent} {...props} />;
+    case "plan": return <PlanBody intent={intent} {...props} />;
     case "concept_card": return <ConceptCardBody intent={intent} {...props} />;
     case "slider": return <SliderBody intent={intent} {...props} />;
     case "animation": return <AnimationBody intent={intent} {...props} />;
@@ -540,6 +545,259 @@ function RoadmapBody({ intent, chalk, accent }: BodyProps & { intent: Extract<Wi
         })}
       </ol>
     </div>
+  );
+}
+
+/* ── 21 · Plan — the agreed route from zero to mastery ── */
+
+function PlanBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & { intent: Extract<WidgetIntent, { kind: "plan" }> }) {
+  const [editing, setEditing] = useState(false);
+  const agreed = state.submitted === true;
+
+  // The learner's edited route wins whenever present — what renders (and what
+  // the tutor is told about on agreement) is THEIR version of the plan.
+  const heading = state.planDraft?.heading ?? intent.heading;
+  const steps = state.planDraft?.steps ?? intent.steps;
+
+  const start = () => emit({ submitted: true });
+
+  return (
+    <div>
+      <div className="mb-2 flex items-baseline justify-between gap-2">
+        <div className="text-[13px] font-semibold leading-snug opacity-90">{heading}</div>
+        {state.planDraft ? (
+          <span
+            className="flex-none rounded-full px-1.5 py-px font-mono text-[8px] uppercase tracking-wide"
+            style={{ background: `${accent}1f`, color: accent }}
+            title="You edited this plan"
+          >
+            your version
+          </span>
+        ) : null}
+      </div>
+
+      <ol className="m-0 list-none space-y-0.5 p-0">
+        {steps.map((step, index) => (
+          <li key={step.id} className="grid grid-cols-[20px_1fr] gap-2.5">
+            <span className="relative flex flex-col items-center">
+              <span
+                className="grid h-[18px] w-[18px] flex-none place-items-center rounded-md border font-mono text-[9px]"
+                style={{ borderColor: `${accent}4d`, color: accent, background: "rgba(255,255,255,0.04)" }}
+              >
+                {index + 1}
+              </span>
+              {index < steps.length - 1 ? <span className="mt-0.5 w-px flex-1" style={{ background: `${chalk}1f` }} /> : null}
+            </span>
+            <div className="min-w-0 pb-2.5">
+              <div className="text-[11.5px] font-medium leading-snug opacity-90">{step.label}</div>
+              {step.details?.length ? (
+                <ol className="m-0 mt-1 list-none space-y-0.5 p-0">
+                  {step.details.map((detail, i) => (
+                    <li key={i} className="text-[10px] leading-snug opacity-65">
+                      <span className="mr-1 font-mono opacity-70">({i + 1})</span>
+                      {detail}
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      {/* Consent, not a time estimate: nothing is taught until the learner
+          signs the route off — or rewrites it. */}
+      <div className="mt-1 border-t pt-2.5" style={{ borderColor: `${chalk}18` }}>
+        <p className="m-0 mb-2 text-[10.5px] opacity-85">{intent.agreementPrompt ?? "Do you agree with this plan?"}</p>
+        {agreed ? (
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[9.5px] opacity-55">Agreed — the session is on this plan.</span>
+            <span
+              className="rounded-full px-2 py-[3px] font-mono text-[9px]"
+              style={{ background: "rgba(134,239,172,0.12)", color: "#86efac" }}
+            >
+              ✓ Started
+            </span>
+          </div>
+        ) : (
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={() => setEditing(true)}
+              className="rounded-md px-2.5 py-1.5 text-[11px] opacity-80 transition-colors hover:bg-white/10 disabled:opacity-40"
+            >
+              Edit plan
+            </button>
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={start}
+              className="rounded-md px-3 py-1.5 text-[11px] font-medium text-white transition-colors disabled:opacity-40"
+              style={{ background: "#33479e" }}
+            >
+              Start learning
+            </button>
+          </div>
+        )}
+      </div>
+
+      {editing ? (
+        <PlanEditSheet
+          heading={heading}
+          steps={steps}
+          onClose={() => setEditing(false)}
+          onSave={(next) => {
+            setEditing(false);
+            // A save that changed nothing is not an edit — leaving no draft
+            // means the card keeps presenting the agent's proposal as itself.
+            const unchanged =
+              next.heading === intent.heading &&
+              JSON.stringify(next.steps) ===
+                JSON.stringify(intent.steps.map((s) => ({ id: s.id, label: s.label, ...(s.details?.length ? { details: s.details } : {}) })));
+            if (!unchanged) emit({ planDraft: next });
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** The floating editor behind "Edit plan": every line is free text, steps add
+ *  and remove freely, and a save that empties the route is refused — a plan
+ *  with one step is a sentence, with zero it's a shrug. */
+function PlanEditSheet({
+  heading,
+  steps,
+  onSave,
+  onClose,
+}: {
+  heading: string;
+  steps: { id: string; label: string; details?: string[] }[];
+  onSave: (next: { heading: string; steps: { id: string; label: string; details?: string[] }[] }) => void;
+  onClose: () => void;
+}) {
+  const [draftHeading, setDraftHeading] = useState(heading);
+  const [draftSteps, setDraftSteps] = useState<{ id: string; label: string; details: string }[]>(
+    steps.map((step) => ({ id: step.id, label: step.label, details: (step.details ?? []).join("\n") }))
+  );
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const patchStep = (id: string, patch: Partial<{ label: string; details: string }>) =>
+    setDraftSteps((current) => current.map((step) => (step.id === id ? { ...step, ...patch } : step)));
+  const removeStep = (id: string) => setDraftSteps((current) => current.filter((step) => step.id !== id));
+  const addStep = () =>
+    setDraftSteps((current) => [...current, { id: `edit-${Date.now()}`, label: "", details: "" }]);
+
+  const normalized = {
+    heading: draftHeading.trim(),
+    steps: draftSteps
+      .map((step, index) => ({
+        id: step.id || `s${index + 1}`,
+        label: step.label.trim(),
+        details: step.details.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+      }))
+      .filter((step) => step.label),
+  };
+  const savable = normalized.heading.length > 0 && normalized.steps.length >= 2;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit plan"
+        className="anim-msg flex min-h-[420px] w-[min(380px,94vw)] max-h-[86vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
+      >
+        <div className="flex items-center justify-between border-b border-white/8 px-4 py-3">
+          <h2 className="m-0 text-[14px] font-medium text-fg">Edit plan</h2>
+          <button
+            onClick={onClose}
+            aria-label="Close editor"
+            className="grid h-6 w-6 place-items-center rounded-md text-dim transition-colors hover:bg-white/[0.07] hover:text-fg"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+          <div>
+            <label className="mb-1 block font-mono text-[9px] uppercase tracking-[0.14em] text-dim">Concept</label>
+            <input
+              value={draftHeading}
+              onChange={(event) => setDraftHeading(event.target.value)}
+              className="w-full rounded-md border border-white/10 bg-black/25 px-2.5 py-1.5 text-[12.5px] text-fg outline-none focus:border-accent/50"
+            />
+          </div>
+
+          {draftSteps.map((step, index) => (
+            <div key={step.id} className="rounded-lg border border-white/8 bg-black/20 px-3 py-2.5">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[9.5px] text-dim">{index + 1}.</span>
+                <input
+                  value={step.label}
+                  placeholder="Phase…"
+                  aria-label={`Step ${index + 1} label`}
+                  onChange={(event) => patchStep(step.id, { label: event.target.value })}
+                  className="min-w-0 flex-1 rounded border border-white/10 bg-black/25 px-2 py-1 text-[12px] text-fg outline-none focus:border-accent/50"
+                />
+                <button
+                  onClick={() => removeStep(step.id)}
+                  aria-label={`Remove step ${index + 1}`}
+                  className="grid h-5 w-5 shrink-0 place-items-center rounded text-dim transition-colors hover:bg-white/[0.07] hover:text-[#ff8b80]"
+                >
+                  ×
+                </button>
+              </div>
+              <textarea
+                value={step.details}
+                rows={2}
+                placeholder="What this phase covers — one line per item (optional)"
+                aria-label={`Step ${index + 1} details`}
+                onChange={(event) => patchStep(step.id, { details: event.target.value })}
+                className="mt-1.5 w-full resize-y rounded border border-white/10 bg-black/25 px-2 py-1.5 text-[11px] leading-relaxed text-fg outline-none focus:border-accent/50"
+              />
+            </div>
+          ))}
+
+          <button
+            onClick={addStep}
+            className="w-full rounded-md border border-dashed border-white/15 py-1.5 text-[11.5px] text-mut transition-colors hover:border-accent/40 hover:text-fg"
+          >
+            + Add a step
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-2 border-t border-white/8 px-4 py-3">
+          <span className="text-[10px] text-dim">{savable ? "" : "Keep a heading and at least two steps."}</span>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="rounded-md px-2.5 py-1.5 text-[11.5px] text-dim transition-colors hover:text-fg">
+              Cancel
+            </button>
+            <button
+              onClick={() => savable && onSave(normalized)}
+              disabled={!savable}
+              className="rounded-md bg-accent px-3 py-1.5 text-[11.5px] font-medium text-white transition-colors hover:bg-accent-deep disabled:opacity-40"
+            >
+              Save plan
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 

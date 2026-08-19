@@ -25,6 +25,22 @@ const EXEMPLARS: Record<WidgetKind, WidgetIntent> = {
       { id: "s3", label: "Differentiating by rule", state: "upcoming" },
     ],
   },
+  plan: {
+    kind: "plan",
+    heading: "Convergence of series — from zero to mastery",
+    steps: [
+      {
+        id: "s1",
+        label: "Read the picture before the letters",
+        details: [
+          "Slice the area into strips and watch partial sums settle",
+          "Say in plain words what \"converges\" means before any symbols",
+        ],
+      },
+      { id: "s2", label: "The sum rule, built not handed over" },
+      { id: "s3", label: "Defend a convergence claim on your own" },
+    ],
+  },
   concept_card: {
     kind: "concept_card",
     term: "Derivative",
@@ -566,5 +582,59 @@ describe("seeded option shuffle — position carries no signal", () => {
     expect(shuffleSeeded(items, key)).not.toEqual(items);
     expect(shuffleSeeded(items, "q|a|b|c|d")).not.toEqual(shuffleSeeded(items, key));
     expect(shuffleSeeded(["only"], "k")).toEqual(["only"]);
+  });
+});
+
+/**
+ * The plan is the session-opening contract: proposed after intake, agreed or
+ * edited by the learner, and only then taught. The visible structure mirrors
+ * the reference card — heading, numbered phases with detail lines, the consent
+ * question, Edit / Start — in the board's widget chrome.
+ */
+describe("WidgetSurface — plan as an agreement gate, not a poster", () => {
+  const plan = EXEMPLARS.plan as Extract<WidgetIntent, { kind: "plan" }>;
+
+  const live = (intent: WidgetIntent, state?: WidgetState) =>
+    renderToStaticMarkup(
+      <WidgetSurface intent={intent} state={state} chalk="#e8e8ea" accent="#7dd3fc" onState={() => {}} />
+    );
+
+  it("renders phases and detail lines, then asks for agreement", () => {
+    const html = live(plan);
+    expect(html).toContain("Convergence of series — from zero to mastery");
+    expect(html).toContain("Read the picture before the letters");
+    expect(html).toContain("(1)");
+    expect(html).toContain("watch partial sums settle");
+    expect(html).toContain("Do you agree with this plan?");
+    expect(html).toContain("Start learning");
+    expect(html).toContain("Edit plan");
+    expect(html).not.toContain("Ready in a few minutes");
+  });
+
+  it("lets the agent reword the consent question, never the buttons", () => {
+    const html = live({ ...plan, agreementPrompt: "Shall we run it this way?" });
+    expect(html).toContain("Shall we run it this way?");
+    expect(html).toContain("Start learning");
+  });
+
+  it("shows the learner's edited draft over the proposal once edited", () => {
+    const html = live(plan, {
+      planDraft: {
+        heading: "Convergence — my route",
+        steps: [
+          { id: "e1", label: "Only the sum rule" },
+          { id: "e2", label: "Then a hard example" },
+        ],
+      },
+    });
+    expect(html).toContain("Only the sum rule");
+    expect(html).toContain("your version");
+    expect(html).not.toContain("Read the picture before the letters");
+  });
+
+  it("settles into a started state after the go signal", () => {
+    const html = live(plan, { submitted: true });
+    expect(html).toContain("Started");
+    expect(html).not.toContain(">Start learning<");
   });
 });

@@ -1,6 +1,6 @@
 # Study widgets and the Guide to Mastery
 
-The chalkboard's 17 study widgets are the tutor agent's **teaching vocabulary**,
+The chalkboard's 18 study widgets are the tutor agent's **teaching vocabulary**,
 not a toolbox of features. Each one is a specific pedagogical move, and the
 agent is expected to place the widget that *is* the move it is making.
 
@@ -38,11 +38,12 @@ never drift into duplicating each other.
 
 ---
 
-## The 17 widgets
+## The 18 widgets
 
 | # | Kind | The move it makes |
 | --- | --- | --- |
 | 1 | `roadmap` | Show where the lesson goes; mark the current step |
+| 21 | `plan` | The agreed route from zero to mastery — the learner consents or edits before teaching starts |
 | 2 | `concept_card` | The durable definition, given *after* the encounter |
 | 6 | `slider` | Move one parameter and watch what changes |
 | 7 | `animation` | Show a process over time, after a prediction |

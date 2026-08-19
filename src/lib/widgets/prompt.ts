@@ -26,6 +26,8 @@ import { MASTERY_STAGE_SPECS, MASTERY_STAGES, stagesForWidget } from "../mastery
 const WIDGET_FIELD_SPEC: Record<WidgetKind, string> = {
   roadmap:
     `{ "kind":"roadmap", "heading"?: string, "steps": [ { "id": string, "label": string, "detail"?: string, "state"?: "done"|"current"|"upcoming" } ] } — 1–16 steps, at most one "current".`,
+  plan:
+    `{ "kind":"plan", "heading": string, "steps": [ { "id": string, "label": string, "details"?: string[] } ], "agreementPrompt"?: string } — the agreed route from zero to mastery: 2–8 phases, each with 1–4 short "details" lines; the learner agrees ("Start learning") or edits the steps first, and only then does teaching begin.`,
   concept_card:
     `{ "kind":"concept_card", "term": string, "pronunciation"?: string, "classification"?: string, "definition": string, "definitionLatex"?: string, "facets"?: string[] }`,
   slider:
@@ -62,6 +64,8 @@ const WIDGET_FIELD_SPEC: Record<WidgetKind, string> = {
 
 /** What each widget is for, and the failure it prevents. */
 const WIDGET_TEACHING_RULE: Record<WidgetKind, string> = {
+  plan:
+    `The commitment device that opens a session once the intake is on the record: write the route from where the learner SAID they are — never a generic syllabus — to mastery of the concept, phase by phase, so a learner who knows nothing sees the foothills and a fluent one skips them. Steps name outcomes ("read a position graph", "defend a convergence claim"), not topic headings. The plan is a contract: do not place teaching content alongside it — the learner's "Start learning" (or their edit + agreement) is your signal to begin at phase one, and any later revision is negotiated, never silent.`,
   roadmap:
     `Open a concept by showing where the lesson goes and mark the current step. Never use it as a progress bar the learner clicks through. A roadmap is orientation, NOT teaching: it must never be the only thing you place in a turn. Place it together with the widget that opens step 1 — otherwise the learner has been shown a plan and given nothing to do.`,
   concept_card:
@@ -126,7 +130,7 @@ const GROUP_SPEC_DOC =
  * permits for this turn.
  *
  * The full catalog is roughly 5,900 tokens and was previously sent on every
- * single turn: 43% of the whole request, describing seventeen widgets when the
+ * single turn: 43% of the whole request, describing eighteen widgets when the
  * policy had already decided the turn could only legitimately use two or three
  * of them. That is not just cost, it is noise — the model was choosing from a
  * menu the engine had already ruled out, which is exactly the "LLM decides what

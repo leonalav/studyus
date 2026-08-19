@@ -16,14 +16,16 @@ import { formatWidgetCatalog, formatMasteryDirective } from "./prompt";
  */
 
 describe("widget protocol — coverage", () => {
-  it("defines exactly the 17 widgets, with Graph/Geometry/Equation left to visualize", () => {
-    expect(WIDGET_KINDS).toHaveLength(17);
+  it("defines exactly the 18 widgets, with Graph/Geometry/Equation left to visualize", () => {
+    expect(WIDGET_KINDS).toHaveLength(18);
     // 3 (Graph), 4 (Point/Geometry) and 5 (Equation) stay visualization intents.
     const numbers = WIDGET_KINDS.map((kind) => WIDGET_BOARD_NUMBER[kind]);
     expect(numbers).not.toContain(3);
     expect(numbers).not.toContain(4);
     expect(numbers).not.toContain(5);
-    expect(new Set(numbers).size).toBe(17);
+    expect(new Set(numbers).size).toBe(18);
+    // #21 is the plan — the session-opening agreement gate.
+    expect(WIDGET_BOARD_NUMBER.plan).toBe(21);
   });
 
   it("gives every widget a label and a catalog entry the agent can act on", () => {
