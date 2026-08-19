@@ -13,8 +13,10 @@
   /* Study widgets are instruments, not handwriting. The board's chalk font is
      deliberately cursive, which is fine for prose a tutor "writes" but hurts
      the dense, scannable content widgets carry: options, tables, verdicts,
-     numbers. Widgets opt out of the chalk font and use this instead. */
-  --font-widget: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+     numbers. Widgets follow the active UI face (Helvetica Now by default);
+     only the faces that make bad instrument panels (mono, serif, dyslexic)
+     pin their own. */
+  --font-widget: var(--font-display);
 
   --color-ink: #191919;
   --color-panel: #202020;
@@ -70,10 +72,12 @@ html[data-font="inter"] {
 html[data-font="serif"] {
   --font-display: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
   --font-display-medium: var(--font-display);
+  --font-widget: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
 }
 html[data-font="mono"] {
   --font-display: "Space Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
   --font-display-medium: var(--font-display);
+  --font-widget: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
 }
 html[data-font="dyslexic"] {
   --font-display: OpenDyslexic, Atkinson Hyperlegible, Verdana, system-ui, sans-serif;

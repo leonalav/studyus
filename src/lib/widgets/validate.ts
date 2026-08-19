@@ -345,6 +345,11 @@ function validateAnimation(intent: Record<string, unknown>): ValidationResult {
     if (motion.zExpression !== undefined && motion.zExpression !== null && !safeExpression(motion.zExpression)) {
       return fail("Animation motion zExpression must be a bounded expression in t");
     }
+    if (motion.easing !== undefined && motion.easing !== null &&
+        !["linear", "smooth", "enter", "exit"].includes(String(motion.easing))) {
+      return fail("Animation motion easing must be linear, smooth, enter or exit");
+    }
+    if (!optionalBoolean(motion.guideWriteOn)) return fail("Animation motion guideWriteOn must be a boolean");
     if (!optionalSafeExpression(motion.guideXExpression) || !optionalSafeExpression(motion.guideYExpression)) {
       return fail("Animation guide expressions must be bounded expressions in t");
     }

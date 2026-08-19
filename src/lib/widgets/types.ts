@@ -266,6 +266,10 @@ export interface AnimationFrame {
 
 /** Optional parametric motion drawn on the animation stage, e.g. a secant line
  *  rotating into a tangent as its second point approaches the first. */
+/** Easing profiles for motion, Manim-style. "smooth" (the default) eases both
+ *  ends, "linear" is constant speed, "enter" starts slow, "exit" lands slow. */
+export type AnimationEasing = "linear" | "smooth" | "enter" | "exit";
+
 export interface AnimationMotion {
   /** Bounded expressions in `t`. */
   xExpression: string;
@@ -276,6 +280,13 @@ export interface AnimationMotion {
   tDomain: [number, number];
   /** Leave a fading trace of the path. */
   trace?: boolean;
+  /** How the moving point travels: default "smooth" (Manim's default easing).
+   *  Constant-speed "linear" only when the rate itself is the lesson. */
+  easing?: AnimationEasing;
+  /** The guide graph draws itself on across the opening stretch of playback —
+   *  Manim's signature Create/Write move — so the curve *becomes* rather than
+   *  just exists. Default on whenever a guide exists. */
+  guideWriteOn?: boolean;
   /** Optional static guide curve, also in `t` — the graph the motion happens
    *  over. It renders as a solid line with the coordinate frame behind it, so
    *  never send graph-bound motion without it. (In 3D the guide lies on the

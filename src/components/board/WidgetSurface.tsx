@@ -990,6 +990,26 @@ function CommitBox({
 /** Playback speeds offered when the intent declares the speed control. */
 const ANIMATION_SPEEDS = [0.5, 1, 2] as const;
 
+/** Manim-style ease curves for the moving point. "smooth" (the default) is
+ *  smoothstep — easing both ends is what reads as *motion* rather than a
+ *  timer ticker. */
+const MOTION_EASING: Record<"linear" | "smooth" | "enter" | "exit", (t: number) => number> = {
+  linear: (t) => t,
+  smooth: (t) => t * t * (3 - 2 * t),
+  enter: (t) => t * t,
+  exit: (t) => 1 - (1 - t) * (1 - t),
+};
+
+/** Total screen-space (viewBox-unit) length of a polyline, for dash-driven
+ *  write-on reveals. */
+function polylineLength(pts: readonly [number, number][]): number {
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) {
+    total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  }
+  return total;
+}
+
 /**
  * Animation as an instrument of inquiry rather than a video.
  *
@@ -1228,8 +1248,17 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
     };
   }, [intent.motion]);
 
-  const headIndex = scene ? Math.min(scene.pts.length - 1, Math.round(progress * (scene.pts.length - 1))) : 0;
+  // The playhead position is EASED time → eased distance: linear reads as a
+  // ticker, smooth reads as moving. Checkpoints stay on raw time, so easing
+  // never shifts when a halt lands.
+  const easedProgress = MOTION_EASING[intent.motion?.easing ?? "smooth"](Math.min(1, Math.max(0, progress)));
+  const headIndex = scene ? Math.min(scene.pts.length - 1, Math.round(easedProgress * (scene.pts.length - 1))) : 0;
   const head = scene?.pts[headIndex];
+
+  // The guide graph writes itself on during the opening 18% of playback —
+  // Manim's Create — then lives as the solid reference the motion rides.
+  const guideWriteOn = intent.motion?.guideWriteOn !== false;
+  const guideReveal = Math.min(1, progress / 0.18);
 
   return (
     <div>
@@ -1299,15 +1328,26 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
               </>
             )}
             {/* The guide curve IS the graph the motion happens over — solid,
-                unmissable, behind the animated path. */}
+                unmissable, behind the animated path. It writes itself on
+                during the opening stretch (Manim's Create), so the curve
+                *becomes* rather than just being there. */}
             {scene.guide.length >= 2 ? (
-              <polyline
-                points={scene.guide.map(([x, y]) => `${x},${y}`).join(" ")}
-                fill="none"
-                stroke={`${chalk}99`}
-                strokeWidth={1.6}
-                strokeLinecap="round"
-              />
+              (() => {
+                const length = polylineLength(scene.guide);
+                const writing = guideWriteOn && guideReveal < 1;
+                return (
+                  <polyline
+                    data-guide={guideWriteOn ? "write-on" : undefined}
+                    points={scene.guide.map(([x, y]) => `${x},${y}`).join(" ")}
+                    fill="none"
+                    stroke={`${chalk}99`}
+                    strokeWidth={1.6}
+                    strokeLinecap="round"
+                    strokeDasharray={writing ? length : undefined}
+                    strokeDashoffset={writing ? length * (1 - guideReveal) : undefined}
+                  />
+                );
+              })()
             ) : null}
             <polyline
               points={scene.pts.map(([x, y]) => `${x},${y}`).join(" ")}

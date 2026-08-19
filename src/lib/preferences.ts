@@ -1,5 +1,8 @@
 import { ensureStudyusModels } from "./studyusModels";
-export const PREFERENCES_STORAGE_KEY = "studyus.preferences.v1";
+export const PREFERENCES_STORAGE_KEY = "studyus.preferences.v2";
+/** The v1 bucket. Read once on upgrade (the only semantic change being the
+ *  default UI font), then retired. */
+const LEGACY_PREFERENCES_STORAGE_KEY = "studyus.preferences.v1";
 export const PREFERENCES_CHANGED_EVENT = "studyus:preferences-changed";
 
 export type ThemePreference = "system" | "dark" | "light";
@@ -737,7 +740,26 @@ export function loadPreferences(): StudyusPreferences {
   if (typeof window === "undefined") return sanitizePreferences(DEFAULT_PREFERENCES);
   try {
     const raw = window.localStorage.getItem(PREFERENCES_STORAGE_KEY);
-    return raw ? sanitizePreferences(JSON.parse(raw)) : sanitizePreferences(DEFAULT_PREFERENCES);
+    if (raw) return sanitizePreferences(JSON.parse(raw));
+
+    // One-time upgrade off v1. The semantic change between the buckets is the
+    // default UI font: v1 defaulted appearance to Space Grotesk, and a stored
+    // value of "grotesk" there almost always means "the app chose it for me",
+    // not "I picked it" — so the migration upgrades it to Helvetica Now. A
+    // learner who genuinely selects Space Grotesk in Settings afterwards is
+    // re-saved under v2 and keeps it.
+    const legacyRaw = window.localStorage.getItem(LEGACY_PREFERENCES_STORAGE_KEY);
+    if (!legacyRaw) return sanitizePreferences(DEFAULT_PREFERENCES);
+    const legacy = JSON.parse(legacyRaw) as { appearance?: { font?: string } };
+    if (legacy?.appearance?.font === "grotesk") legacy.appearance.font = "helvetica";
+    const migrated = sanitizePreferences(legacy);
+    try {
+      window.localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(migrated));
+      window.localStorage.removeItem(LEGACY_PREFERENCES_STORAGE_KEY);
+    } catch {
+      // Storage blocked: the migrated values still apply for this page.
+    }
+    return migrated;
   } catch {
     return sanitizePreferences(DEFAULT_PREFERENCES);
   }

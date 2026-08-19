@@ -502,6 +502,49 @@ describe("WidgetSurface — animation as prediction, not video", () => {
     expect(polylines.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("writes the guide on (Manim's Create) by default, and honours the opt-out", () => {
+    const withGuide: WidgetIntent = {
+      ...animation,
+      motion: { xExpression: "t", yExpression: "sin(t)", tDomain: [-3, 3], guideXExpression: "t", guideYExpression: "sin(t)" },
+    };
+    // Mid playback: the guide is still drawing — dash-offset partially open.
+    const mid = live(withGuide, { predictionLocked: true, animationProgress: 0.05 });
+    expect(mid).toContain('data-guide="write-on"');
+    expect(mid).toMatch(/stroke-dashoffset="[1-9]/);
+
+    // Fully played: the graph stays as a solid reference, no dash state left.
+    const done = live(withGuide, { predictionLocked: true, animationProgress: 1 });
+    expect(done).not.toContain("stroke-dashoffset");
+
+    // Explicitly opted out: the guide is simply present from frame one.
+    const plain = live(
+      { ...animation, motion: { xExpression: "t", yExpression: "sin(t)", tDomain: [-3, 3], guideXExpression: "t", guideYExpression: "sin(t)", guideWriteOn: false } },
+      { predictionLocked: true, animationProgress: 0.05 }
+    );
+    expect(plain).not.toContain('data-guide="write-on"');
+  });
+
+  it("eases the playhead by default; a constant-rate lesson opts out", () => {
+    const motion = { xExpression: "t", yExpression: "t * t", tDomain: [-3, 3] as [number, number] };
+    // The head dot is the only circle inside the motion scene's SVG; the shell
+    // header carries its own icon circles, so scope to the scene.
+    const at = (mhtml: string) => {
+      const sceneHtml = mhtml.slice(mhtml.indexOf("data-motion-scene"));
+      return Number(sceneHtml.match(/<circle cx="([\d.]+)"/)?.[1] ?? -1);
+    };
+    const linear = live({ ...animation, motion: { ...motion, easing: "linear" } }, { predictionLocked: true, animationProgress: 0.35 });
+    const smooth = live({ ...animation, motion: { ...motion, easing: "smooth" } }, { predictionLocked: true, animationProgress: 0.35 });
+    const defaulted = live({ ...animation, motion }, { predictionLocked: true, animationProgress: 0.35 });
+
+    const linearX = at(linear);
+    const smoothX = at(smooth);
+    expect(linearX).toBeGreaterThan(0);
+    // smooth(0.35) ≈ 0.30 — the eased head sits behind the constant-rate head.
+    expect(smoothX).toBeLessThan(linearX);
+    // and "smooth" IS the default, not an extra the agent must remember.
+    expect(at(defaulted)).toBe(smoothX);
+  });
+
   it("renders 3D motion in an isometric view over a floor grid", () => {
     const in3d: WidgetIntent = {
       ...animation,
