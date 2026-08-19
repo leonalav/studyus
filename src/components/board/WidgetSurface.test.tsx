@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { WidgetSurface } from "./WidgetSurface";
+import { shuffleSeeded, WidgetSurface } from "./WidgetSurface";
 import { WIDGET_KINDS, type WidgetIntent, type WidgetKind, type WidgetState } from "../../lib/widgets/types";
 import { validateWidgetIntent } from "../../lib/widgets/validate";
 
@@ -438,6 +438,29 @@ describe("WidgetSurface — animation as prediction, not video", () => {
     expect(html).toContain("equation");
   });
 
+  it("shuffles checkpoint options so position carries no signal", () => {
+    const withShuffledCheckpoint: WidgetIntent = {
+      ...animation,
+      checkpoints: [
+        {
+          id: "cp-area",
+          at: 0.5,
+          prompt: "Which estimate wins at thin strips?",
+          options: [
+            { id: "a", label: "the coarse-left rule", correct: true },
+            { id: "b", label: "the thin-strip one" },
+            { id: "c", label: "the single tall bar" },
+          ],
+        },
+      ],
+    };
+    // Authored correct-first; the playhead is parked at the checkpoint so its
+    // options render. The seeded permutation moves "a" off the top slot.
+    const html = live(withShuffledCheckpoint, { predictionLocked: true, animationProgress: 0.5 });
+    expect(html.indexOf("the thin-strip one")).toBeGreaterThan(-1);
+    expect(html.indexOf("the thin-strip one")).toBeLessThan(html.indexOf("the coarse-left rule"));
+  });
+
   it("renders graph-bound motion on an actual coordinate plane, guide included", () => {
     // The reported failure: an animation "on a graph" showed a lone dot over
     // an empty strip — the graph itself never rendered. The scene must carry
@@ -490,5 +513,58 @@ describe("WidgetSurface — animation as prediction, not video", () => {
     } as unknown as WidgetIntent;
     const html = live(drifted, { predictionLocked: true });
     expect(html).toContain('data-motion-scene="2d"');
+  });
+});
+
+/**
+ * The agent drafts options in priority order, parking the correct answer first
+ * every time; left alone that is a legible "it's always A" pattern. Display
+ * order is instead a seeded shuffle of the authored order — stable per option
+ * set, never a re-roll mid-session.
+ */
+describe("seeded option shuffle — position carries no signal", () => {
+  const shuffledQuestion: WidgetIntent = {
+    kind: "question",
+    prompt: "Which strip count gives the best area estimate?",
+    format: "multiple_choice",
+    options: [
+      { id: "a", label: "one too-wide slab", correct: true },
+      { id: "b", label: "several thin strips" },
+      { id: "c", label: "one tall triangle" },
+      { id: "d", label: "the interval endpoints only" },
+    ],
+  };
+
+  const liveQ = (intent: WidgetIntent, state?: WidgetState) =>
+    renderToStaticMarkup(
+      <WidgetSurface intent={intent} state={state} chalk="#e8e8ea" accent="#7dd3fc" onState={() => {}} />
+    );
+
+  const renderedOrder = (html: string) =>
+    [...html.matchAll(/>(one too-wide slab|several thin strips|one tall triangle|the interval endpoints only)</g)]
+      .map((m) => m[1]);
+
+  it("moves the authored first option off the A slot", () => {
+    // Authored correct-first; this fixture's seeded order moves it to D.
+    const order = renderedOrder(liveQ(shuffledQuestion));
+    expect(order).toEqual(["several thin strips", "the interval endpoints only", "one tall triangle", "one too-wide slab"]);
+    expect(order[0]).not.toBe("one too-wide slab");
+  });
+
+  it("keeps the same permutation across renders of the same content", () => {
+    const first = renderedOrder(liveQ(shuffledQuestion));
+    const second = renderedOrder(liveQ(shuffledQuestion, { selectedOptionId: "b", submitted: true }));
+    // Even a submitted state re-render must not visibly re-roll the board.
+    expect(second).toEqual(first);
+  });
+
+  it("shuffleSeeded is deterministic, lossless, and content-sensitive", () => {
+    const items = ["a", "b", "c", "d"];
+    const key = "p|a|b|c|d";
+    expect(shuffleSeeded(items, key)).toEqual(shuffleSeeded(items, key));
+    expect([...shuffleSeeded(items, key)].sort()).toEqual(items);
+    expect(shuffleSeeded(items, key)).not.toEqual(items);
+    expect(shuffleSeeded(items, "q|a|b|c|d")).not.toEqual(shuffleSeeded(items, key));
+    expect(shuffleSeeded(["only"], "k")).toEqual(["only"]);
   });
 });

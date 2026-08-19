@@ -1281,10 +1281,19 @@ function CheckpointAnswer({
 }) {
   const [draft, setDraft] = useState("");
 
+  // Same anti-position-gaming shuffle as the question widget, seeded per
+  // checkpoint so each halt keeps a stable order of its own.
+  const authored = checkpoint.options ?? [];
+  const shownOptions = useMemo(
+    () => shuffleSeeded(authored, optionsSeedKey(checkpoint.id, authored)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [authored, checkpoint.id]
+  );
+
   if (checkpoint.options?.length) {
     return (
       <div className="grid gap-1.5">
-        {checkpoint.options.map((option) => (
+        {shownOptions.map((option) => (
           <button
             key={option.id}
             type="button"
@@ -1401,6 +1410,44 @@ function ComparisonBody({ intent, chalk, accent }: BodyProps & { intent: Extract
 
 /* ── 9 · Question · 17 · Retrieval Check ── */
 
+/**
+ * Fisher–Yates over a content-derived seed: one stable permutation per option
+ * set, identical across re-renders, restored sessions and reloads.
+ *
+ * The agent reliably writes the correct answer first (it drafts options in
+ * priority order), so an unshuffled multiple-choice widget legibly marks the
+ * answer as "A" every time — learners figure that out in one afternoon. The
+ * seed comes from the option ids themselves, so a re-sent intent with the same
+ * options keeps the same order and committed picks never visually migrate.
+ *
+ * Exported for unit testing.
+ */
+export function shuffleSeeded<T>(items: T[], seedKey: string): T[] {
+  if (items.length < 2) return items;
+  let seed = 2166136261 >>> 0; // FNV-1a offset basis
+  for (let i = 0; i < seedKey.length; i++) {
+    seed = Math.imul(seed ^ seedKey.charCodeAt(i), 16777619) >>> 0;
+  }
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    // xorshift: advance the deterministic stream.
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    seed >>>= 0;
+    const j = seed % (i + 1);
+    const tmp = out[i];
+    out[i] = out[j];
+    out[j] = tmp;
+  }
+  return out;
+}
+
+/** The stable permutation key for an option set: widget identity + option ids. */
+function optionsSeedKey(ownerId: string, options: readonly { id: string }[]): string {
+  return `${ownerId}|${options.map((option) => option.id).join("|")}`;
+}
+
 function AnswerableBody({
   intent,
   chalk,
@@ -1420,6 +1467,17 @@ function AnswerableBody({
 
   const chosen = intent.options?.find((option) => option.id === state.selectedOptionId);
 
+  // Display order is a seeded shuffle of the authored order — grading and
+  // persisted state still key on option id, only the letter positions move.
+  const authoredOptions = intent.options ?? [];
+  const shownOptions = useMemo(
+    () => shuffleSeeded(authoredOptions, optionsSeedKey(intent.id ?? intent.prompt, authoredOptions)),
+    // The seed is content-derived, so a rebuilt intent with the same options
+    // lands on the same permutation anyway; the array identity dep just debounces.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [authoredOptions, intent.id, intent.prompt]
+  );
+
   return (
     <div>
       {isRetrieval && "source" in intent && intent.source ? (
@@ -1431,7 +1489,7 @@ function AnswerableBody({
 
       {intent.format === "multiple_choice" ? (
         <div className="grid gap-1.5">
-          {(intent.options ?? []).map((option, index) => {
+          {shownOptions.map((option, index) => {
             const picked = state.selectedOptionId === option.id;
             const showAsCorrect = submitted && option.correct === true;
             const showAsWrong = submitted && picked && option.correct !== true;

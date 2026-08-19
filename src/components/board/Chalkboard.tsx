@@ -756,7 +756,11 @@ const BlockView = memo(function BlockView({
           className="max-w-[420px] rounded-lg border-2 border-dashed px-4 py-2.5"
           style={{ borderColor: `${accent}88`, fontSize: 18 * scale }}
         >
-          <ChalkStrong>{block.text}</ChalkStrong>
+          {/* The dashed box is already the highlight — the TEXT stays chalk and
+              only its own **strong** parts go amber. Amber is the bold stand-in
+              for the handwriting fonts (they have no bold cut); painting a
+              whole explanation amber devalued it into pure noise. */}
+          {renderTextWithStrong(block.text)}
         </div>
       );
     case "row":
