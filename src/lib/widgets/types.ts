@@ -346,10 +346,188 @@ export interface AnimationLinkedRepresentation {
   tracks: string;
 }
 
+/* ── 7a · Animation scene — the motion stage, generalized ── */
+
+/**
+ * A value that is either a fixed number or a bounded expression in the
+ * animation playhead `t ∈ [0, 1]`. Expressions use the same bounded arithmetic
+ * evaluator as slider readouts and motion paths, so the agent never writes
+ * statements, closures, or property access — only an expression the validator
+ * can gate and the renderer can evaluate deterministically.
+ */
+export type SceneScalar = number | string;
+
+/** A point in scene (data) coordinates, each axis fixed or bound to `t`. */
+export interface ScenePointSpec {
+  x: SceneScalar;
+  y: SceneScalar;
+}
+
+/** Line style for a scene element. */
+export type SceneLineStyle = "solid" | "dashed" | "dotted";
+
+/** The small color vocabulary a scene element may claim. The renderer maps each
+ *  to the chalkboard palette; the agent never names a hex value or a CSS color.
+ *  `chalk` and `accent` resolve to the widget's own ink and accent, so a scene
+ *  stays coherent with the board it sits on. */
+export type SceneAccent =
+  | "chalk"
+  | "accent"
+  | "amber"
+  | "cyan"
+  | "violet"
+  | "ember"
+  | "green"
+  | "red";
+
+/** A sampled curve — the graph the action happens over, or the action itself.
+ *  `xExpression`/`yExpression` are parametric in `u` over `uDomain` (default
+ *  [0, 1]), so a plain graph is `xExpression: "u"` and a unit circle is
+ *  `xExpression: "cos(u)", yExpression: "sin(u)"`. */
+export interface SceneCurve {
+  kind: "curve";
+  id: string;
+  xExpression: string;
+  yExpression: string;
+  uDomain?: [number, number];
+  style?: SceneLineStyle;
+  /** Write on across the opening stretch of playback (Manim's Create), so the
+   *  curve *becomes* rather than just being there. */
+  writeOn?: boolean;
+  accent?: SceneAccent;
+}
+
+/** A moving point. Expressions are in the playhead `t`; the point's path is
+ *  drawn in scene coordinates through the fixed frame. `trace` leaves the path
+ *  already travelled, so a moving point can carry its own history. */
+export interface ScenePoint {
+  kind: "point";
+  id: string;
+  xExpression: string;
+  yExpression: string;
+  /** Short plain-text label (Unicode fine) rendered beside the point. */
+  label?: string;
+  trace?: boolean;
+  accent?: SceneAccent;
+}
+
+/** A straight segment — a secant, a rise/run step, or a dashed guide line. */
+export interface SceneSegment {
+  kind: "segment";
+  id: string;
+  from: ScenePointSpec;
+  to: ScenePointSpec;
+  style?: SceneLineStyle;
+  accent?: SceneAccent;
+}
+
+/** The Riemann workhorse: a partition of an interval into `count` rectangles
+ *  whose heights sample `yExpression` (an expression in the data `x`). `count`
+ *  is typically an expression in `t`, which is what makes N animate as the
+ *  partition refines. */
+export interface SceneRects {
+  kind: "rects";
+  id: string;
+  /** Number of rectangles — usually an expression in `t`, e.g. "round(2 + 10*t)". */
+  count: SceneScalar;
+  x0: SceneScalar;
+  x1: SceneScalar;
+  /** The function being approximated, in the data coordinate `x`. */
+  yExpression: string;
+  /** Baseline each rectangle rises from. Defaults to 0. */
+  baseline?: SceneScalar;
+  /** Where in each subinterval the height is sampled. Defaults to "left". */
+  heightRule?: "left" | "right" | "midpoint";
+  fill?: SceneAccent;
+  stroke?: SceneAccent;
+}
+
+/** A shaded region between a top and bottom curve (default bottom = 0) over an
+ *  interval — the "area under / between curves" picture that rectangles
+ *  approximate. */
+export interface SceneRegion {
+  kind: "region";
+  id: string;
+  x0: SceneScalar;
+  x1: SceneScalar;
+  /** Top boundary, in the data coordinate `x`. */
+  topExpression: string;
+  /** Bottom boundary, in `x`. Defaults to 0. */
+  bottomExpression?: string;
+  fill?: SceneAccent;
+}
+
+/** A dimension or rate arrow with an optional label — the arrow that says "dx"
+ *  under a partition, or "rate" beside a moving quantity. */
+export interface SceneArrow {
+  kind: "arrow";
+  id: string;
+  from: ScenePointSpec;
+  to: ScenePointSpec;
+  /** Plain-text label (supports `{expr}` interpolation in `t`). */
+  label?: string;
+  accent?: SceneAccent;
+}
+
+/** A corner or point annotation. `text` supports `{expr}` interpolation, so a
+ *  label can read out a live value — "n = {round(2 + 10*t)}". */
+export interface SceneLabel {
+  kind: "label";
+  id: string;
+  at: ScenePointSpec;
+  text?: string;
+  anchor?: "start" | "middle" | "end";
+  /** Pixel offset in scene space, for nudging a label off a curve or corner. */
+  offset?: { x: number; y: number };
+  accent?: SceneAccent;
+}
+
+export type AnimationSceneElement =
+  | SceneCurve
+  | ScenePoint
+  | SceneSegment
+  | SceneRects
+  | SceneRegion
+  | SceneArrow
+  | SceneLabel;
+
+/**
+ * The animation stage as a *composition* rather than a preset.
+ *
+ * `motion` expresses exactly one thing — a point moving along x(t), y(t) — and
+ * no amount of schema tweaking gets a Riemann sum, a unit circle, or a
+ * secant-to-tangent construction out of it. The scene answers that gap with the
+ * same rule the rest of the protocol already obeys: the agent composes
+ * semantic, time-bound *primitives* (curve, point, segment, rects, region,
+ * arrow, label), a validator gates each one, and the renderer owns every pixel.
+ * Nothing here is named after a lesson; "rects + curve + arrow + label" is how
+ * the agent *says* Riemann sum, exactly as "point + guide curve" was how it
+ * said tangent before.
+ *
+ * The scene declares its own fixed frame (`xDomain`/`yDomain`), so the axes
+ * stay put while N animates — an auto-fitted frame would re-zoom on every
+ * refinement and destroy the very stability the picture is meant to show.
+ */
+export interface AnimationScene {
+  xDomain: [number, number];
+  yDomain: [number, number];
+  /** Axis labels, rendered at the frame ends. */
+  xLabel?: string;
+  yLabel?: string;
+  /** Light gridlines behind the scene. Defaults to on. */
+  showGrid?: boolean;
+  /** Draw order is preserved: elements are painted first to last. */
+  elements: AnimationSceneElement[];
+}
+
 export interface AnimationWidget extends WidgetBase {
   kind: "animation";
   frames: AnimationFrame[];
   motion?: AnimationMotion;
+  /** The composed scene stage. Mutually exclusive with `motion`: a scene
+   *  subsumes motion's point-and-guide, so an animation declares one or the
+   *  other, never both. */
+  scene?: AnimationScene;
   /** Total run time across all frames. */
   durationMs?: number;
   loop?: boolean;

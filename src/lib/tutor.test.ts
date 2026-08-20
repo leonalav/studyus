@@ -37,6 +37,7 @@ import {
   type TutorTurn,
   enforceLearnerAgency,
   turnLeavesLearnerSomethingToDo,
+  enforceVisualExplanation,
 } from "./tutor";
 import { DEFAULT_TUTOR } from "./preferences";
 import { bindModelRole, defaultCapabilities } from "./llm";
@@ -1130,5 +1131,99 @@ describe("the learner is never passive", () => {
     // A greeting or clarification has no board ops and owes no task.
     const speechOnly = turn([], "Yes, that link is in Threads.");
     expect(enforceLearnerAgency(speechOnly)).toBe(speechOnly);
+  });
+});
+
+/**
+ * The counterweight to the never-passive rule: the stage vocabulary names a
+ * *picture* (function/geometry/equation), and a board that only ever asks
+ * questions about a spatial idea is an unfinished explanation. Enforced at
+ * runtime the same way the agency rule is — but speech-only, never fabricating
+ * a figure the agent did not author.
+ */
+describe("show, don't just tell — the missing-figure backstop", () => {
+  const question = {
+    op: "place_widget" as const,
+    intent: {
+      kind: "question" as const,
+      format: "multiple_choice" as const,
+      prompt: "Why do the slices over- or under-shoot?",
+      options: [
+        { id: "a", label: "They follow the curve's corners", correct: true },
+        { id: "b", label: "They ignore the curve" },
+      ],
+    },
+  };
+  const graph = {
+    op: "visualize" as const,
+    intent: {
+      type: "function" as const,
+      title: "y = x^2",
+      displayMode: "graph" as const,
+      domainX: [-2, 2] as [number, number],
+      expressions: [{ id: "f", expression: "x^2", label: "f(x)" }],
+    },
+  };
+  const latex = { op: "write_latex" as const, tex: "\\sum_{i=1}^{n} f(x_i)\\Delta x", caption: "Riemann sum" };
+
+  const turn = (boardOps: unknown[], speech = "Here's a check.") =>
+    ({ speech, boardOps, evidenceRefs: [] }) as unknown as Parameters<typeof enforceVisualExplanation>[0];
+  const board = (blocks: unknown[]) =>
+    ({ id: "b1", title: "t", subtitle: "", domain: "math", blocks }) as unknown as Parameters<typeof enforceVisualExplanation>[2];
+
+  it("nudges a question-only turn in a stage whose vocabulary is a picture", () => {
+    const fixed = enforceVisualExplanation(turn([question]), "encounter");
+    expect(fixed.speech).toMatch(/clearer seen than read|graph, diagram or equation/i);
+  });
+
+  it("never fabricates a figure — the board ops are untouched", () => {
+    const fixed = enforceVisualExplanation(turn([question]), "encounter");
+    expect(fixed.boardOps).toHaveLength(1);
+    expect(fixed.boardOps[0]).toEqual(question);
+  });
+
+  it("leaves a compliant turn with a figure untouched", () => {
+    const compliant = turn([graph, question]);
+    expect(enforceVisualExplanation(compliant, "encounter")).toBe(compliant);
+  });
+
+  it("stays silent once any figure already exists on the board", () => {
+    const withFigure = board([{ id: "v1", kind: "visualization", intent: graph.intent }]);
+    const fixed = enforceVisualExplanation(turn([question]), "encounter", withFigure);
+    expect(fixed.speech).toBe("Here's a check.");
+  });
+
+  it("an equation only satisfies a stage whose vocabulary is 'equation'", () => {
+    // Understand asks for the *equation* — a Σ is enough there.
+    const satisfied = turn([latex, question]);
+    expect(enforceVisualExplanation(satisfied, "understand")).toBe(satisfied);
+    // Encounter asks for a *picture* — a lone Σ is not one, so the nudge stays.
+    const nudged = enforceVisualExplanation(turn([latex, question]), "encounter");
+    expect(nudged.speech).toMatch(/graph, diagram or equation/i);
+  });
+
+  it("does not nag stages with no visual vocabulary", () => {
+    for (const stage of ["construct", "master"] as const) {
+      const fixed = enforceVisualExplanation(turn([question]), stage);
+      expect(fixed.speech).toBe("Here's a check.");
+    }
+  });
+
+  it("does not nag housekeeping-only turns, even in a visual stage", () => {
+    const tidy = turn([{ op: "revise_text", targetIndex: 0, find: "a", replace: "b" }]);
+    expect(enforceVisualExplanation(tidy, "encounter").speech).toBe("Here's a check.");
+  });
+
+  it("does not nag the session-opening plan/roadmap beat", () => {
+    const opening = turn([
+      { op: "place_widget", intent: { kind: "plan", heading: "Limits", steps: [{ id: "s1", label: "Meet the idea" }, { id: "s2", label: "Defend it" }] } },
+      { op: "place_widget", intent: { kind: "roadmap", heading: "Today", steps: [{ id: "r1", label: "Start", state: "current" }] } },
+    ]);
+    expect(enforceVisualExplanation(opening, "encounter").speech).toBe("Here's a check.");
+  });
+
+  it("leaves speech-only turns alone", () => {
+    const speechOnly = turn([], "That link is in Threads.");
+    expect(enforceVisualExplanation(speechOnly, "encounter")).toBe(speechOnly);
   });
 });

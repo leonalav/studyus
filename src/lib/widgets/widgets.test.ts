@@ -501,6 +501,125 @@ describe("animation validation — the contract that stops it becoming video", (
   });
 });
 
+/**
+ * The scene stage is the one place the animation stops being a single moving
+ * point and becomes a figure the agent *composes*. The contract under test is
+ * the same one the rest of the protocol obeys: primitives, not presets — a
+ * "Riemann sum" is rects + curve + arrow + labels, never a name — and each
+ * primitive's numeric fields are fixed numbers or bounded expressions, so the
+ * validator can still assert something concrete about a scene it has never
+ * been shown before.
+ */
+describe("animation scene — a figure composed, not a preset", () => {
+  const frames = [{ id: "f1", caption: "Slices refine toward the area" }];
+
+  const riemannScene = (): {
+    xDomain: number[];
+    yDomain: number[];
+    xLabel: string;
+    yLabel: string;
+    elements: Record<string, unknown>[];
+  } => ({
+    xDomain: [0, 1],
+    yDomain: [-0.3, 1.2],
+    xLabel: "x",
+    yLabel: "f(x)",
+    elements: [
+      { kind: "curve", id: "f", xExpression: "u", yExpression: "u^2", uDomain: [0, 1], accent: "cyan" },
+      {
+        kind: "rects", id: "r", count: "round(2 + 10*t)", x0: 0, x1: 1,
+        yExpression: "x^2", heightRule: "left", fill: "amber", stroke: "ember",
+      },
+      { kind: "arrow", id: "dx", from: { x: 0.4, y: -0.16 }, to: { x: 0.6, y: -0.16 }, label: "Δx" },
+      { kind: "label", id: "n", at: { x: 0.95, y: 1.05 }, text: "n = {round(2 + 10*t)}", anchor: "end" },
+      { kind: "label", id: "a", at: { x: 0, y: -0.06 }, text: "a" },
+      { kind: "label", id: "b", at: { x: 1, y: -0.06 }, text: "b" },
+    ],
+  });
+
+  const withScene = (extra: Record<string, unknown>) =>
+    validateWidgetIntent({ kind: "animation", frames, scene: riemannScene(), ...extra });
+
+  it("accepts the full Riemann composition — primitives, no preset name anywhere", () => {
+    expect(withScene({}).valid).toBe(true);
+  });
+
+  it("rejects a scene that carries both scene and motion", () => {
+    // A scene subsumes motion's point-and-guide; carrying both invites the
+    // agent to express one fact two ways and the renderer to choose between them.
+    const result = validateWidgetIntent({
+      kind: "animation",
+      frames,
+      motion: { xExpression: "t", yExpression: "t^2", tDomain: [0, 1] },
+      scene: riemannScene(),
+    });
+    expect(result.valid).toBe(false);
+    expect(result).toMatchObject({ reason: expect.stringMatching(/both motion and scene/i) });
+  });
+
+  it("rejects a scene with no elements — a frame alone is not a figure", () => {
+    const result = withScene({ scene: { xDomain: [0, 1], yDomain: [0, 1], elements: [] } });
+    expect(result.valid).toBe(false);
+    expect(result).toMatchObject({ reason: expect.stringMatching(/elements/i) });
+  });
+
+  it("rejects an inverted frame", () => {
+    const result = withScene({ scene: { xDomain: [1, 0], yDomain: [0, 1], elements: [{ kind: "label", id: "l", at: { x: 0, y: 0 }, text: "a" }] } });
+    expect(result.valid).toBe(false);
+    expect(result).toMatchObject({ reason: expect.stringMatching(/xDomain/i) });
+  });
+
+  it("rejects duplicate element ids, which would collide as React keys", () => {
+    const scene = riemannScene();
+    scene.elements[1] = { ...scene.elements[1], id: "f" };
+    const result = withScene({ scene });
+    expect(result.valid).toBe(false);
+    expect(result).toMatchObject({ reason: expect.stringMatching(/id/i) });
+  });
+
+  it("rejects an unknown element kind and unknown accent", () => {
+    const scene = riemannScene();
+    scene.elements.push({ kind: "sparkle", id: "s" } as never);
+    expect(withScene({ scene }).valid).toBe(false);
+
+    const badAccent = riemannScene();
+    badAccent.elements[0] = { ...badAccent.elements[0], accent: "magenta" };
+    expect(withScene({ scene: badAccent }).valid).toBe(false);
+  });
+
+  it("rejects rects without a function to approximate", () => {
+    const scene = riemannScene();
+    delete (scene.elements[1] as Record<string, unknown>).yExpression;
+    const result = withScene({ scene });
+    expect(result.valid).toBe(false);
+    expect(result).toMatchObject({ reason: expect.stringMatching(/yExpression/i) });
+  });
+
+  it("rejects a rect count that is neither a number nor an expression", () => {
+    const scene = riemannScene();
+    (scene.elements[1] as Record<string, unknown>).count = { value: 4 };
+    expect(withScene({ scene }).valid).toBe(false);
+  });
+
+  it("rejects a rect height rule that is not left/right/midpoint", () => {
+    const scene = riemannScene();
+    (scene.elements[1] as Record<string, unknown>).heightRule = "diagonal";
+    const result = withScene({ scene });
+    expect(result.valid).toBe(false);
+    expect(result).toMatchObject({ reason: expect.stringMatching(/heightRule/i) });
+  });
+
+  it("accepts expressions bound to the playhead, which is what makes N animate", () => {
+    // The count expression is the whole trick: a fixed number would give a
+    // still histogram, an expression in t gives the refinement the learner
+    // watches.
+    expect(withScene({}).valid).toBe(true);
+    const scene = riemannScene();
+    (scene.elements[1] as Record<string, unknown>).count = 8;
+    expect(withScene({ scene }).valid).toBe(true);
+  });
+});
+
 describe("animation learner state — semantic answers, not playback traces", () => {
   it("keeps checkpoint answers keyed by checkpoint", () => {
     const state = sanitizeWidgetState({

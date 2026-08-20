@@ -17,8 +17,20 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { renderMath } from "../../lib/latex/render";
 import { generateAxisTicks } from "./Visuals";
-import { gradeAnswerableWidget } from "../../lib/widgets/validate";
-import { WIDGET_LABEL, type WidgetIntent, type WidgetState, type WidgetKind, type WidgetRespondSpec } from "../../lib/widgets/types";
+import { gradeAnswerableWidget, MAX_RECTS } from "../../lib/widgets/validate";
+import {
+  WIDGET_LABEL,
+  type WidgetIntent,
+  type WidgetState,
+  type WidgetKind,
+  type WidgetRespondSpec,
+  type AnimationScene,
+  type AnimationSceneElement,
+  type SceneScalar,
+  type SceneAccent,
+  type SceneLineStyle,
+  type ScenePointSpec,
+} from "../../lib/widgets/types";
 import { assessMastery, MASTERY_DIMENSION_LABEL, MASTERY_THRESHOLD } from "../../lib/mastery";
 import { MASTERY_EVIDENCE_DIMENSIONS } from "../../lib/widgets/types";
 import { ErrorBoundary } from "../ErrorBoundary";
@@ -381,6 +393,24 @@ function normalizeIntent(intent: WidgetIntent): { intent: WidgetIntent } | { rea
         patch.motion = { ...(m as Record<string, unknown>), zExpression: undefined };
       }
     }
+
+    // A composed scene with no frame or no readable elements has nothing to
+    // draw; drop it so the body falls back to the progress dot rather than
+    // throwing on the first element access. Ragged element lists are repaired,
+    // not rejected — nine good primitives out of ten are still worth teaching
+    // with, exactly like every other list field.
+    const scene = (intent as unknown as { scene?: unknown }).scene;
+    if (scene !== undefined) {
+      const s = scene as { xDomain?: unknown; yDomain?: unknown; elements?: unknown } | null;
+      const domainOk = (d: unknown) =>
+        Array.isArray(d) && d.length >= 2 && d.slice(0, 2).every((n) => typeof n === "number" && Number.isFinite(n));
+      const usable = s && Array.isArray(s.elements) ? usableEntries(s.elements) : [];
+      if (s === null || typeof s !== "object" || !domainOk(s.xDomain) || !domainOk(s.yDomain) || usable.length === 0) {
+        patch.scene = undefined;
+      } else if (s && Array.isArray(s.elements) && usable.length !== s.elements.length) {
+        patch.scene = { ...s, elements: usable } as unknown as Record<string, unknown>;
+      }
+    }
   }
 
   if (intent.kind === "question" || intent.kind === "retrieval_check" || intent.kind === "challenge") {
@@ -719,9 +749,10 @@ function PlanEditSheet({
         role="dialog"
         aria-modal="true"
         aria-label="Edit plan"
-        className="anim-msg flex min-h-[420px] w-[min(380px,94vw)] max-h-[86vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
+        className="anim-msg relative flex w-[min(380px,94vw)] max-h-[86vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
+        style={{ maxHeight: "calc(100dvh - 2rem)" }}
       >
-        <div className="flex items-center justify-between border-b border-white/8 px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between border-b border-white/8 px-4 py-3">
           <h2 className="m-0 text-[14px] font-medium text-fg">Edit plan</h2>
           <button
             onClick={onClose}
@@ -732,7 +763,7 @@ function PlanEditSheet({
           </button>
         </div>
 
-        <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
           <div>
             <label className="mb-1 block font-mono text-[9px] uppercase tracking-[0.14em] text-dim">Concept</label>
             <input
@@ -780,7 +811,7 @@ function PlanEditSheet({
           </button>
         </div>
 
-        <div className="flex items-center justify-between gap-2 border-t border-white/8 px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-white/8 px-4 py-3">
           <span className="text-[10px] text-dim">{savable ? "" : "Keep a heading and at least two steps."}</span>
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="rounded-md px-2.5 py-1.5 text-[11.5px] text-dim transition-colors hover:text-fg">
@@ -837,7 +868,22 @@ function ConceptCardBody({ intent, chalk, accent }: BodyProps & { intent: Extrac
 /** Bounded evaluator for readout expressions. Supports the arithmetic and the
  *  scalar functions a teaching readout needs, and nothing else — no property
  *  access, no globals, no assignment. Returns null when unevaluatable. */
+/**
+ * Compiled-expression cache for the bounded evaluator.
+ *
+ * `evaluateReadout` is the one evaluator the whole surface shares, and the
+ * scene path now calls it per sample per frame — 64 curve samples × 60fps
+ * would otherwise recompile a `Function` tens of thousands of times a second.
+ * The key includes the scope parameter names (not the values), so an
+ * expression only ever recompiles when the *shape* of its scope changes.
+ */
+const readoutFnCache = new Map<string, (...args: unknown[]) => unknown>();
+
 function evaluateReadout(expression: string, scope: Record<string, number>): number | null {
+  // Placement validates expressions, but a restored session or truncated write
+  // can still hand a non-string through; fail closed rather than throwing on
+  // `.replace` and taking the whole board down with it.
+  if (typeof expression !== "string") return null;
   const allowed: Record<string, unknown> = {
     abs: Math.abs, acos: Math.acos, asin: Math.asin, atan: Math.atan,
     cbrt: Math.cbrt, ceil: Math.ceil, cos: Math.cos, cosh: Math.cosh,
@@ -853,8 +899,13 @@ function evaluateReadout(expression: string, scope: Record<string, number>): num
   const normalized = expression.replace(/\^/g, "**");
   try {
     const names = Object.keys(allowed);
-    // eslint-disable-next-line no-new-func
-    const fn = new Function(...names, `"use strict"; return (${normalized});`);
+    const cacheKey = `${names.join(",")}|${normalized}`;
+    let fn = readoutFnCache.get(cacheKey);
+    if (!fn) {
+      // eslint-disable-next-line no-new-func
+      fn = new Function(...names, `"use strict"; return (${normalized});`) as (...args: unknown[]) => unknown;
+      readoutFnCache.set(cacheKey, fn);
+    }
     const result = fn(...names.map((name) => allowed[name]));
     return typeof result === "number" && Number.isFinite(result) ? result : null;
   } catch {
@@ -1008,6 +1059,327 @@ function polylineLength(pts: readonly [number, number][]): number {
     total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
   }
   return total;
+}
+
+/* ── 7a · Scene figure — the composed animation stage ── */
+
+/** Fixed canvas for the scene stage, matching the motion scene's box so an
+ *  animation's layout never shifts when it swaps a moving point for a scene. */
+const SCENE_W = 220;
+const SCENE_H = 126;
+
+const SCENE_ACCENT_COLORS: Record<string, string> = {
+  amber: "#fde68a",
+  cyan: "#7dd3fc",
+  violet: "#9b96e6",
+  ember: "#ff7a33",
+  green: "#86efac",
+  red: "#fca5a5",
+};
+
+function sceneColor(accentKey: SceneAccent | undefined, chalk: string, accent: string): string {
+  if (accentKey === undefined || accentKey === "chalk") return chalk;
+  if (accentKey === "accent") return accent;
+  return SCENE_ACCENT_COLORS[accentKey] ?? chalk;
+}
+
+/** Dash pattern for a line style, in viewBox units. */
+function sceneDash(style: SceneLineStyle | undefined): string | undefined {
+  if (style === "dashed") return "3 3";
+  if (style === "dotted") return "1.5 3";
+  return undefined;
+}
+
+/** Format an evaluated value for inline `{expr}` label interpolation. */
+function sceneFormat(n: number): string {
+  if (Number.isInteger(n)) return String(n);
+  return String(Number(n.toFixed(3)));
+}
+
+/**
+ * The scene stage: a fixed coordinate frame painted first, then the author's
+ * elements in order. Everything is a pure function of the playhead `t`, so a
+ * frame is screenshot-diffable — same `t`, same picture — and the host keeps
+ * owning the clock, easing, checkpoints and evidence exactly as before.
+ */
+function SceneFigure({
+  scene,
+  progress,
+  chalk,
+  accent,
+}: {
+  scene: AnimationScene;
+  progress: number;
+  chalk: string;
+  accent: string;
+}) {
+  const t = Math.min(1, Math.max(0, progress));
+  const [x0, x1] = scene.xDomain;
+  const [y0, y1] = scene.yDomain;
+  const spanX = x1 - x0;
+  const spanY = y1 - y0;
+  const padL = 26, padR = 10, padT = 8, padB = 16;
+
+  const px = (x: number) => padL + ((x - x0) / spanX) * (SCENE_W - padL - padR);
+  const py = (y: number) => SCENE_H - padB - ((y - y0) / spanY) * (SCENE_H - padT - padB);
+  const project = (x: number, y: number): [number, number] => [px(x), py(y)];
+
+  /** Evaluate an expression with the playhead, data-x and curve-u in scope. */
+  const evalExpr = (expression: string, x = 0, u = 0) => evaluateReadout(expression, { t, x, u });
+
+  const scalarAt = (s: SceneScalar, x = 0, u = 0): number | null =>
+    typeof s === "number" ? (Number.isFinite(s) ? s : null) : evalExpr(s, x, u);
+
+  const pointAt = (p: ScenePointSpec): [number, number] | null => {
+    if (!p || typeof p !== "object") return null;
+    const x = scalarAt(p.x);
+    const y = scalarAt(p.y);
+    return x === null || y === null ? null : project(x, y);
+  };
+
+  /** Interpolate `{expr}` tokens in a label against the current playhead. */
+  const labelText = (raw?: string): string | null => {
+    if (raw === undefined || raw.trim().length === 0) return null;
+    return raw.replace(/\{([^{}]+)\}/g, (_whole, expr: string) => {
+      const value = evalExpr(expr.trim());
+      return value === null ? `{${expr}}` : sceneFormat(value);
+    });
+  };
+
+  const gridOn = scene.showGrid !== false;
+  const xTicks = generateAxisTicks(x0, x1, 4);
+  const yTicks = generateAxisTicks(y0, y1, 3);
+  const xAxisY = y0 <= 0 && y1 >= 0 ? py(0) : null;
+  const yAxisX = x0 <= 0 && x1 >= 0 ? px(0) : null;
+
+  const nodes: React.ReactNode[] = [];
+
+  // Fixed frame: faint tick grid, slightly stronger axes, and the labels the
+  // scene declares — never the agent's pixel placement.
+  for (const value of xTicks) {
+    const x = px(value);
+    if (gridOn) {
+      nodes.push(<line key={`gx-${value}`} x1={x} y1={0} x2={x} y2={SCENE_H - padB} stroke={`${chalk}14`} strokeWidth={0.6} />);
+    }
+    nodes.push(
+      <text key={`tx-${value}`} x={x} y={SCENE_H - 4} textAnchor="middle" fontSize={5.5} fill={chalk} opacity={0.5} fontFamily="monospace">
+        {sceneFormat(value)}
+      </text>
+    );
+  }
+  for (const value of yTicks) {
+    const y = py(value);
+    if (gridOn) {
+      nodes.push(<line key={`gy-${value}`} x1={padL} y1={y} x2={SCENE_W - padR} y2={y} stroke={`${chalk}14`} strokeWidth={0.6} />);
+    }
+    nodes.push(
+      <text key={`ty-${value}`} x={padL - 3} y={y + 2} textAnchor="end" fontSize={5.5} fill={chalk} opacity={0.5} fontFamily="monospace">
+        {sceneFormat(value)}
+      </text>
+    );
+  }
+  if (xAxisY !== null) {
+    nodes.push(<line key="axis-x" x1={padL} y1={xAxisY} x2={SCENE_W - padR} y2={xAxisY} stroke={`${chalk}3d`} strokeWidth={0.9} />);
+  }
+  if (yAxisX !== null) {
+    nodes.push(<line key="axis-y" x1={yAxisX} y1={0} x2={yAxisX} y2={SCENE_H - padB} stroke={`${chalk}3d`} strokeWidth={0.9} />);
+  }
+  if (scene.xLabel) {
+    nodes.push(
+      <text key="xlabel" x={SCENE_W - padR} y={SCENE_H - 4} textAnchor="end" fontSize={6} fill={chalk} opacity={0.7} fontFamily="monospace">
+        {scene.xLabel}
+      </text>
+    );
+  }
+  if (scene.yLabel) {
+    nodes.push(
+      <text key="ylabel" x={padL - 2} y={padT + 6} textAnchor="end" fontSize={6} fill={chalk} opacity={0.7} fontFamily="monospace">
+        {scene.yLabel}
+      </text>
+    );
+  }
+
+  // Elements paint in author order, so later elements sit over earlier ones.
+  scene.elements.forEach((element: AnimationSceneElement) => {
+    const color = sceneColor("accent" in element ? element.accent : undefined, chalk, accent);
+
+    switch (element.kind) {
+      case "curve": {
+        const u0 = element.uDomain?.[0] ?? 0;
+        const u1 = element.uDomain?.[1] ?? 1;
+        const steps = 64;
+        const pts: [number, number][] = [];
+        for (let i = 0; i <= steps; i += 1) {
+          const u = u0 + ((u1 - u0) * i) / steps;
+          const x = evalExpr(element.xExpression, 0, u);
+          const y = evalExpr(element.yExpression, 0, u);
+          if (x === null || y === null) continue;
+          pts.push(project(x, y));
+        }
+        if (pts.length < 2) break;
+        const writing = element.writeOn === true && t < 1;
+        const reveal = Math.min(1, t / 0.18);
+        const length = polylineLength(pts);
+        nodes.push(
+          <polyline
+            key={element.id}
+            points={pts.map(([x, y]) => `${x},${y}`).join(" ")}
+            fill="none"
+            stroke={color}
+            strokeWidth={1.6}
+            strokeLinecap="round"
+            strokeDasharray={writing ? length : sceneDash(element.style)}
+            strokeDashoffset={writing ? length * (1 - reveal) : undefined}
+          />
+        );
+        break;
+      }
+      case "point": {
+        const at = pointAt({ x: element.xExpression, y: element.yExpression });
+        if (!at) break;
+        if (element.trace) {
+          const steps = 48;
+          const pts: [number, number][] = [];
+          for (let i = 0; i <= steps; i += 1) {
+            const tt = (t * i) / steps;
+            const x = evaluateReadout(element.xExpression, { t: tt });
+            const y = evaluateReadout(element.yExpression, { t: tt });
+            if (x === null || y === null) continue;
+            pts.push(project(x, y));
+          }
+          if (pts.length >= 2) {
+            nodes.push(
+              <polyline key={`${element.id}-trace`} points={pts.map(([x, y]) => `${x},${y}`).join(" ")} fill="none" stroke={color} strokeWidth={1.6} />
+            );
+          }
+        }
+        nodes.push(<circle key={element.id} cx={at[0]} cy={at[1]} r={4} fill={color} />);
+        const label = labelText(element.label);
+        if (label) {
+          nodes.push(
+            <text key={`${element.id}-label`} x={at[0] + 5} y={at[1] - 4} fontSize={6} fill={color} fontFamily="monospace">
+              {label}
+            </text>
+          );
+        }
+        break;
+      }
+      case "segment": {
+        const from = pointAt(element.from);
+        const to = pointAt(element.to);
+        if (!from || !to) break;
+        nodes.push(
+          <line key={element.id} x1={from[0]} y1={from[1]} x2={to[0]} y2={to[1]} stroke={color} strokeWidth={1.4} strokeDasharray={sceneDash(element.style)} />
+        );
+        break;
+      }
+      case "rects": {
+        const countRaw = scalarAt(element.count);
+        if (countRaw === null) break;
+        const n = Math.max(1, Math.min(MAX_RECTS, Math.round(countRaw)));
+        const rx0 = scalarAt(element.x0);
+        const rx1 = scalarAt(element.x1);
+        const baseline = element.baseline === undefined ? 0 : scalarAt(element.baseline);
+        if (rx0 === null || rx1 === null || baseline === null) break;
+        const rule = element.heightRule ?? "left";
+        const fill = sceneColor(element.fill, chalk, accent);
+        const stroke = sceneColor(element.stroke, chalk, accent);
+        for (let i = 0; i < n; i += 1) {
+          const a = rx0 + ((rx1 - rx0) * i) / n;
+          const b = rx0 + ((rx1 - rx0) * (i + 1)) / n;
+          const sampleX = rule === "right" ? b : rule === "midpoint" ? (a + b) / 2 : a;
+          const top = evalExpr(element.yExpression, sampleX);
+          if (top === null) continue;
+          const [left, topY] = project(a, top);
+          const [right, bottomY] = project(b, baseline);
+          const rectX = Math.min(left, right);
+          const rectW = Math.abs(right - left);
+          const rectY = Math.min(topY, bottomY);
+          const rectH = Math.abs(bottomY - topY);
+          nodes.push(
+            <rect key={`${element.id}-${i}`} x={rectX} y={rectY} width={rectW} height={rectH} fill={`${fill}33`} stroke={stroke} strokeWidth={0.7} />
+          );
+        }
+        break;
+      }
+      case "region": {
+        const rx0 = scalarAt(element.x0);
+        const rx1 = scalarAt(element.x1);
+        if (rx0 === null || rx1 === null) break;
+        const steps = 64;
+        const top: [number, number][] = [];
+        const bottom: [number, number][] = [];
+        for (let i = 0; i <= steps; i += 1) {
+          const x = rx0 + ((rx1 - rx0) * i) / steps;
+          const ty = evalExpr(element.topExpression, x);
+          const by = element.bottomExpression ? evalExpr(element.bottomExpression, x) : 0;
+          if (ty === null || by === null) continue;
+          top.push(project(x, ty));
+          bottom.push(project(x, by));
+        }
+        if (top.length < 2) break;
+        const pts = [...top, ...bottom.reverse()].map(([x, y]) => `${x},${y}`).join(" ");
+        nodes.push(<polygon key={element.id} points={pts} fill={`${color}30`} stroke="none" />);
+        break;
+      }
+      case "arrow": {
+        const from = pointAt(element.from);
+        const to = pointAt(element.to);
+        if (!from || !to) break;
+        const [fx, fy] = from;
+        const [tx, ty] = to;
+        const angle = Math.atan2(ty - fy, tx - fx);
+        const head = 4;
+        nodes.push(<line key={`${element.id}-shaft`} x1={fx} y1={fy} x2={tx} y2={ty} stroke={color} strokeWidth={1.3} />);
+        nodes.push(
+          <line
+            key={`${element.id}-head-a`}
+            x1={tx} y1={ty}
+            x2={tx - head * Math.cos(angle - Math.PI / 6)} y2={ty - head * Math.sin(angle - Math.PI / 6)}
+            stroke={color} strokeWidth={1.3} strokeLinecap="round"
+          />
+        );
+        nodes.push(
+          <line
+            key={`${element.id}-head-b`}
+            x1={tx} y1={ty}
+            x2={tx - head * Math.cos(angle + Math.PI / 6)} y2={ty - head * Math.sin(angle + Math.PI / 6)}
+            stroke={color} strokeWidth={1.3} strokeLinecap="round"
+          />
+        );
+        const label = labelText(element.label);
+        if (label) {
+          nodes.push(
+            <text key={`${element.id}-label`} x={(fx + tx) / 2} y={(fy + ty) / 2 - 3} textAnchor="middle" fontSize={6} fill={color} fontFamily="monospace">
+              {label}
+            </text>
+          );
+        }
+        break;
+      }
+      case "label": {
+        const at = pointAt(element.at);
+        if (!at) break;
+        const text = labelText(element.text);
+        if (!text) break;
+        const ox = element.offset?.x ?? 0;
+        const oy = element.offset?.y ?? 0;
+        const anchor = element.anchor ?? "start";
+        nodes.push(
+          <text key={element.id} x={at[0] + ox} y={at[1] + oy} textAnchor={anchor} fontSize={6} fill={color} opacity={0.9} fontFamily="monospace">
+            {text}
+          </text>
+        );
+        break;
+      }
+    }
+  });
+
+  return (
+    <svg viewBox={`0 0 ${SCENE_W} ${SCENE_H}`} className="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+      {nodes}
+    </svg>
+  );
 }
 
 /**
@@ -1283,10 +1655,12 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
 
       <div
         className="relative mb-2 overflow-hidden rounded"
-        style={{ background: "rgba(0,0,0,0.18)", height: scene ? scene.H : 62 }}
-        data-motion-scene={scene ? scene.kind : undefined}
+        style={{ background: "rgba(0,0,0,0.18)", height: intent.scene ? SCENE_H : scene ? scene.H : 62 }}
+        data-motion-scene={intent.scene ? "scene" : scene ? scene.kind : undefined}
       >
-        {scene ? (
+        {intent.scene ? (
+          <SceneFigure scene={intent.scene} progress={progress} chalk={chalk} accent={accent} />
+        ) : scene ? (
           <svg viewBox={`0 0 ${scene.W} ${scene.H}`} className="absolute inset-0 h-full w-full" preserveAspectRatio="none">
             {scene.kind === "2d" ? (
               <>
