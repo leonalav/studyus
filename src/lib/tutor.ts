@@ -593,6 +593,139 @@ export function enforceLearnerAgency(turn: TutorTurn, board?: BoardDoc): TutorTu
 }
 
 /**
+ * Show, don't just tell.
+ *
+ * The never-passive rule above gets a runtime backstop; the "show it" half of
+ * the stage vocabulary does not. The observable failure is a board that
+ * accumulates question after question while a spatial idea — slope, area,
+ * shape, motion — is never once drawn, in a stage whose whole job is to build
+ * the picture (Encounter: function/geometry, Apply/Transfer: function/equation,
+ * Understand: equation).
+ *
+ * Same honesty constraint as the agency rule: this never fabricates a figure
+ * the agent did not author. It appends an invitation in speech, so the
+ * learner's "draw it" becomes the cue the model then fulfils with a real
+ * `visualize` op.
+ *
+ * Fires at most once per board: as soon as any figure, equation, or
+ * self-drawing widget (animation/slider) exists on the board, the obligation is
+ * discharged. A session is nudged toward its first picture, not harassed on
+ * every later turn. An equation only satisfies a stage whose own visual
+ * vocabulary is `equation` — Encounter wants a *picture*, and a lone Σ is not
+ * one. `plan` and `roadmap` placements are orientation, not concept teaching,
+ * so the session-opening beat is never nudged.
+ */
+export function enforceVisualExplanation(
+  turn: TutorTurn,
+  stage: MasteryStage,
+  board?: BoardDoc
+): TutorTurn {
+  if (turn.boardOps.length === 0) return turn;
+  const spec = MASTERY_STAGE_SPECS[stage];
+  if (!spec || spec.visualizations.length === 0) return turn;
+  // A pure-explanation turn is the never-passive rule's to fix, in its own
+  // words. Two nudges on one turn is harassment, not rigour.
+  if (!turnLeavesLearnerSomethingToDo(turn)) return turn;
+  if (!turnAddsTeachingContent(turn)) return turn;
+
+  const equationSatisfies = spec.visualizations.includes("equation");
+  if (turnHasVisualRepresentation(turn, equationSatisfies)) return turn;
+  if (boardHasVisualRepresentation(board, equationSatisfies)) return turn;
+
+  const speech = turn.speech.trim();
+  const nudge =
+    "This idea is clearer seen than read — ask me to put it on the board as a graph, diagram or equation, and I'll draw the smallest one that shows it.";
+  return { ...turn, speech: speech ? `${speech} ${nudge}` : nudge };
+}
+
+/** Widgets that draw their own picture, satisfying the stage without a
+ *  separate `visualize` op. */
+const VISUAL_WIDGET_KINDS: ReadonlySet<WidgetKind> = new Set(["animation", "slider"]);
+
+/** `plan` and `roadmap` are orientation/consent, not the teaching of a spatial
+ *  concept — placing them owes no figure, so the opening turn stays clean. */
+function widgetKindTeachesConcept(kind: WidgetKind): boolean {
+  return kind !== "plan" && kind !== "roadmap";
+}
+
+function blockSpecHasVisualRepresentation(block: BoardBlockSpec, equationSatisfies: boolean): boolean {
+  if (block.kind === "visualization") return true;
+  if (block.kind === "latex") return equationSatisfies;
+  return block.kind === "widget" && VISUAL_WIDGET_KINDS.has(block.intent.kind);
+}
+
+function turnHasVisualRepresentation(turn: TutorTurn, equationSatisfies: boolean): boolean {
+  return turn.boardOps.some((op) => {
+    switch (op.op) {
+      case "visualize":
+        return true;
+      case "write_latex":
+        return equationSatisfies;
+      case "place_widget":
+      case "update_widget":
+        return VISUAL_WIDGET_KINDS.has(op.intent.kind);
+      case "replace_block":
+      case "insert_after":
+        return blockSpecHasVisualRepresentation(op.block, equationSatisfies);
+      case "spawn_thread":
+        return op.initialBlocks.some((block) => blockSpecHasVisualRepresentation(block, equationSatisfies));
+      default:
+        return false;
+    }
+  });
+}
+
+function blockHasVisualRepresentation(
+  block: BoardDoc["blocks"][number],
+  equationSatisfies: boolean
+): boolean {
+  switch (block.kind) {
+    case "visualization":
+      return true;
+    case "latex":
+      return equationSatisfies;
+    case "widget":
+      return VISUAL_WIDGET_KINDS.has(block.intent.kind);
+    case "row":
+      return block.children.some((child) => blockHasVisualRepresentation(child, equationSatisfies));
+    default:
+      return false;
+  }
+}
+
+function boardHasVisualRepresentation(board: BoardDoc | undefined, equationSatisfies: boolean): boolean {
+  return Boolean(board?.blocks.some((block) => blockHasVisualRepresentation(block, equationSatisfies)));
+}
+
+/** Does this turn add content that teaches — the kind whose missing figure is a
+ *  real gap. Housekeeping (delete/revise/redraw) owes the learner nothing new. */
+function turnAddsTeachingContent(turn: TutorTurn): boolean {
+  return turn.boardOps.some((op) => {
+    switch (op.op) {
+      case "write_title":
+      case "write_text":
+      case "write_bullets":
+      case "write_callout":
+      case "write_latex":
+      case "visualize":
+        return true;
+      case "place_widget":
+      case "update_widget":
+        return widgetKindTeachesConcept(op.intent.kind);
+      case "replace_block":
+      case "insert_after":
+        return op.block.kind !== "widget" || widgetKindTeachesConcept(op.block.intent.kind);
+      case "spawn_thread":
+        return op.initialBlocks.some(
+          (block) => block.kind !== "widget" || widgetKindTeachesConcept(block.intent.kind)
+        );
+      default:
+        return false;
+    }
+  });
+}
+
+/**
  * Widget kinds that hand the learner support rather than work.
  *
  * A `hint` is support by definition. An `example` is a worked demonstration —
@@ -2142,6 +2275,9 @@ export function buildTutorUserPrompt(params: {
     `CURRENT STAGE: ${stageSpec.ordinal}. ${stageSpec.label} — "${stageSpec.question}"\n` +
     `- Your role here: ${stageSpec.agentRole}. The learner's role: ${stageSpec.studentRole}.\n` +
     `- This stage's vocabulary: ${stageSpec.widgets.join(", ")}${stageSpec.visualizations.length ? ` (plus visualize: ${stageSpec.visualizations.join(", ")})` : ""}.\n` +
+    (stageSpec.visualizations.length
+      ? `- This stage is about a picture: draw the smallest relevant ${stageSpec.visualizations.join(" or ")} figure with visualize. A spatial idea taught only in prose and questions — slope, area, shape, motion — is an unfinished explanation.\n`
+      : "") +
     `- Exit condition: ${stageSpec.exitCondition}\n` +
     (params.masteryStageEvidence
       ? `- Evidence that carried the learner into this stage: ${params.masteryStageEvidence}\n`
@@ -2220,6 +2356,7 @@ export function buildTutorUserPrompt(params: {
     `Use a board operation only when the learner explicitly requests a board rendering/edit or when a specific visual/formal representation materially improves understanding and cannot be conveyed as clearly in the spoken response alone. If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
     `For every substantive explanation, layer simple plain-language intuition first, then precise terminology, assumptions, rigorous reasoning, and meaningful equations or worked steps; define jargon and connect formal details back to the intuitive idea. ` +
     `When a board representation is necessary, choose the smallest relevant set of equations, function graphs, data charts, or domain-faithful diagrams/scientific figures. Never add decorative, redundant, irrelevant, or semantically misleading visuals, and obey the enabled tool permissions. ` +
+    `When this stage's visualize vocabulary names a figure type, that figure is part of the explanation, not an optional extra: pair the question with the smallest relevant visualize (or an animation/slider widget that draws it) instead of describing the picture in words. ` +
     `DIAGNOSIS IS A HYPOTHESIS, NOT A LABEL. When you have an actual explanation for what you observed, put it in diagnosis.hypotheses with the kind that names the cause, because the cause determines the remedy: ` +
     HYPOTHESIS_KINDS.map((kind) => `${kind} — ${HYPOTHESIS_KIND_REMEDY[kind]}`).join(" ") +
     ` Every hypothesis MUST carry next_best_test: the specific observation that would confirm or refute it. A claim you cannot say how to test will be rejected. Propose a hypothesis only when you have seen something that supports it; a turn with no evidence for a cause should have no hypotheses. You do not decide whether a hypothesis is confirmed — repeated independent observations promote it, and the learner's own successful unaided work retires it. ` +
@@ -2727,15 +2864,22 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   });
   // Ceiling enforcement runs BEFORE the agency check, so that a turn whose only
   // learner-facing element was an over-supportive widget is caught by the
-  // never-passive net rather than shipping as a bare explanation.
-  const policedTurn = enforceLearnerAgency(
-    enforceSupportCeiling(
-      enforceTutorBoardNecessity(
-        enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
-        req.learnerMessage
+  // never-passive net rather than shipping as a bare explanation. The
+  // show-don't-just-tell backstop runs last: it only ever appends speech, and
+  // it must see the turn after the other filters have decided what survived.
+  const turnStage = policyBrief?.state.stage ?? masteryStage.stage;
+  const policedTurn = enforceVisualExplanation(
+    enforceLearnerAgency(
+      enforceSupportCeiling(
+        enforceTutorBoardNecessity(
+          enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
+          req.learnerMessage
+        ),
+        policyBrief?.support.granted ?? 3
       ),
-      policyBrief?.support.granted ?? 3
+      req.board
     ),
+    turnStage,
     req.board
   );
 

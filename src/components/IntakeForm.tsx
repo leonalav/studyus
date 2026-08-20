@@ -120,10 +120,11 @@ export function IntakeFormSheet({
         role="dialog"
         aria-modal="true"
         aria-label={form.title ?? "Intake form"}
-        className="anim-msg flex min-h-[540px] w-[min(348px,94vw)] max-h-[86vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
+        className="anim-msg relative flex w-[min(348px,94vw)] max-h-[86vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
+        style={{ maxHeight: "calc(100dvh - 2rem)" }}
       >
         {/* header */}
-        <div className="border-b border-white/8 px-4 pb-3 pt-3.5">
+        <div className="shrink-0 border-b border-white/8 px-4 pb-3 pt-3.5">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
@@ -150,7 +151,7 @@ export function IntakeFormSheet({
         </div>
 
         {/* questions — gated ones join once their constraint answer lands */}
-        <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+        <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
           {visible.map((q, index) => (
             <QuestionBlock
               key={q.id}
@@ -164,7 +165,7 @@ export function IntakeFormSheet({
         </div>
 
         {/* footer */}
-        <div className="flex items-center justify-between gap-2 border-t border-white/8 px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-white/8 px-4 py-3">
           {readOnly ? (
             <button
               onClick={onClose}

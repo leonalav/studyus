@@ -576,6 +576,67 @@ describe("WidgetSurface — animation as prediction, not video", () => {
 });
 
 /**
+ * The scene stage renders a composed figure — the same host-side clock, just a
+ * richer picture. The assertions below pin the two things that matter: the
+ * picture is driven by the playhead (same t, same frame), and the live value
+ * in a label is computed from the playhead rather than baked in as text.
+ */
+describe("WidgetSurface — animation scene, a figure composed not a preset", () => {
+  const riemannScene: WidgetIntent = {
+    kind: "animation",
+    frames: [{ id: "f1", caption: "As the slices refine, the sum settles toward the area." }],
+    scene: {
+      xDomain: [0, 1],
+      yDomain: [-0.3, 1.2],
+      elements: [
+        { kind: "curve", id: "f", xExpression: "u", yExpression: "u^2", uDomain: [0, 1], accent: "cyan" },
+        {
+          kind: "rects", id: "r", count: "round(2 + 10*t)", x0: 0, x1: 1,
+          yExpression: "x^2", heightRule: "left", fill: "amber", stroke: "ember",
+        },
+        { kind: "arrow", id: "dx", from: { x: 0.4, y: -0.16 }, to: { x: 0.6, y: -0.16 }, label: "Δx" },
+        { kind: "label", id: "n", at: { x: 0.95, y: 1.05 }, text: "n = {round(2 + 10*t)}", anchor: "end" },
+      ],
+    },
+  };
+
+  const live = (intent: WidgetIntent, state?: WidgetState) =>
+    renderToStaticMarkup(
+      <WidgetSurface intent={intent} state={state} chalk="#e8e8ea" accent="#7dd3fc" onState={() => {}} />
+    );
+
+  it("renders the composed scene rather than the lone progress dot", () => {
+    const html = live(riemannScene, { predictionLocked: true });
+    expect(html).toContain('data-motion-scene="scene"');
+    expect(html).toContain("<rect");
+    expect(html).toContain("Δx");
+  });
+
+  it("computes the live label from the playhead — same t, same N", () => {
+    const atMid = live(riemannScene, { predictionLocked: true, animationProgress: 0.5 });
+    expect(atMid).toContain("n = 7"); // round(2 + 10·0.5)
+    const atEnd = live(riemannScene, { predictionLocked: true, animationProgress: 1 });
+    expect(atEnd).toContain("n = 12"); // round(2 + 10·1)
+  });
+
+  it("is a pure function of the playhead — two renders at the same t agree", () => {
+    const first = live(riemannScene, { predictionLocked: true, animationProgress: 0.3 });
+    const second = live(riemannScene, { predictionLocked: true, animationProgress: 0.3 });
+    expect(first).toBe(second);
+  });
+
+  it("falls back to the progress dot instead of throwing on a broken scene", () => {
+    const broken = {
+      ...riemannScene,
+      scene: { xDomain: [0, 1], yDomain: [0, 1], elements: [{ kind: "rects", id: "r", count: 4, x0: 0, x1: 1 }] },
+    } as unknown as WidgetIntent;
+    // A rects element missing its function is dropped at normalize time, and
+    // the body degrades to the dot — no throw, no blank board.
+    expect(() => live(broken)).not.toThrow();
+  });
+});
+
+/**
  * The agent drafts options in priority order, parking the correct answer first
  * every time; left alone that is a legible "it's always A" pattern. Display
  * order is instead a seeded shuffle of the authored order — stable per option

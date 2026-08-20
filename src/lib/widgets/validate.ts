@@ -15,6 +15,8 @@ import {
   type QuestionFormat,
   type WidgetState,
   type MasteryEvidence,
+  type SceneAccent,
+  type SceneLineStyle,
 } from "./types";
 
 /* ── Safety bounds ── */
@@ -33,6 +35,17 @@ export const MAX_MARKS = 8;
 export const MAX_READOUTS = 4;
 export const MAX_EXPRESSION_LENGTH = 200;
 export const MAX_ID_LENGTH = 64;
+/** Upper bound on the scene element list. A scene is a figure, not a document;
+ *  past this many primitives it has stopped being something a learner reads as
+ *  one picture. */
+export const MAX_SCENE_ELEMENTS = 24;
+/** Upper bound on a literal `rects.count`. An expression in `t` can still
+ *  produce a larger N at render time; the renderer clamps to this same ceiling. */
+export const MAX_RECTS = 60;
+
+const SCENE_ELEMENT_KINDS = ["curve", "point", "segment", "rects", "region", "arrow", "label"] as const;
+const SCENE_ACCENTS: readonly SceneAccent[] = ["chalk", "accent", "amber", "cyan", "violet", "ember", "green", "red"];
+const SCENE_LINE_STYLES: readonly SceneLineStyle[] = ["solid", "dashed", "dotted"];
 /** Upper bound on a declared cluster size. A cluster gates the tutor signal, so
  *  an absurd size would silence the tutor for the rest of the session. */
 export const MAX_CLUSTER_SIZE = 8;
@@ -361,6 +374,17 @@ function validateAnimation(intent: Record<string, unknown>): ValidationResult {
     if (!optionalBoolean(motion.trace)) return fail("Animation motion trace must be a boolean");
   }
 
+  if (intent.scene !== undefined && intent.scene !== null) {
+    if (!isPlainObject(intent.scene)) return fail("Animation scene must be an object");
+    // A scene subsumes motion's point-and-guide; carrying both invites the
+    // agent to express one fact two ways and the renderer to pick between them.
+    if (intent.motion !== undefined && intent.motion !== null) {
+      return fail("Animation cannot carry both motion and scene — a scene already subsumes motion's point and guide");
+    }
+    const sceneResult = validateScene(intent.scene);
+    if (!sceneResult.valid) return sceneResult;
+  }
+
   const checkpoints = validateAnimationCheckpoints(intent.checkpoints);
   if (!checkpoints.valid) return checkpoints;
 
@@ -448,6 +472,182 @@ function validateAnimationCheckpoints(value: unknown): ValidationResult {
       }
     }
   }
+  return ok;
+}
+
+/* ── Animation scene — the composed motion stage ── */
+
+/** A scene scalar is a fixed number or a bounded expression in `t`. */
+function sceneScalar(value: unknown): boolean {
+  if (typeof value === "number") return finiteNumber(value);
+  return typeof value === "string" && safeExpression(value);
+}
+
+function scenePointSpec(value: unknown, path: string): ValidationResult {
+  if (!isPlainObject(value)) return fail(`${path} must be an object`);
+  if (!sceneScalar(value.x) || !sceneScalar(value.y)) {
+    return fail(`${path} needs numeric-or-expression x and y`);
+  }
+  return ok;
+}
+
+function optionalSceneAccent(value: unknown, path: string): ValidationResult {
+  if (value === undefined || value === null) return ok;
+  if (!SCENE_ACCENTS.includes(String(value) as SceneAccent)) {
+    return fail(`${path} accent must be one of ${SCENE_ACCENTS.join(", ")}`);
+  }
+  return ok;
+}
+
+function optionalSceneLineStyle(value: unknown, path: string): ValidationResult {
+  if (value === undefined || value === null) return ok;
+  if (!SCENE_LINE_STYLES.includes(String(value) as SceneLineStyle)) {
+    return fail(`${path} style must be one of ${SCENE_LINE_STYLES.join(", ")}`);
+  }
+  return ok;
+}
+
+function optionalSceneDomain(value: unknown, path: string): ValidationResult {
+  if (value === undefined || value === null) return ok;
+  if (!Array.isArray(value) || value.length !== 2 || !finiteNumber(value[0]) || !finiteNumber(value[1])) {
+    return fail(`${path} must be [start, end] finite numbers`);
+  }
+  if ((value[0] as number) >= (value[1] as number)) return fail(`${path} start must be less than end`);
+  return ok;
+}
+
+/**
+ * Validate the composed scene stage. Same contract as every other widget field:
+ * bounds only, fail closed, and a reason the repair loop can act on. Each
+ * element's numeric fields are either fixed numbers or bounded arithmetic
+ * expressions, so the validator can still assert something concrete — unlike a
+ * free code surface, where a sandbox can only promise the code cannot *hurt*
+ * you, never that the axes match the labels.
+ */
+export function validateScene(scene: Record<string, unknown>): ValidationResult {
+  const xDomain = scene.xDomain;
+  const yDomain = scene.yDomain;
+  if (!Array.isArray(xDomain) || xDomain.length !== 2 || !finiteNumber(xDomain[0]) || !finiteNumber(xDomain[1])) {
+    return fail("Animation scene needs xDomain [start, end] finite numbers");
+  }
+  if ((xDomain[0] as number) >= (xDomain[1] as number)) return fail("Animation scene xDomain start must be less than end");
+  if (!Array.isArray(yDomain) || yDomain.length !== 2 || !finiteNumber(yDomain[0]) || !finiteNumber(yDomain[1])) {
+    return fail("Animation scene needs yDomain [start, end] finite numbers");
+  }
+  if ((yDomain[0] as number) >= (yDomain[1] as number)) return fail("Animation scene yDomain start must be less than end");
+  if (!optionalText(scene.xLabel, MAX_SHORT_TEXT_LENGTH)) return fail("Animation scene xLabel is too long");
+  if (!optionalText(scene.yLabel, MAX_SHORT_TEXT_LENGTH)) return fail("Animation scene yLabel is too long");
+  if (!optionalBoolean(scene.showGrid)) return fail("Animation scene showGrid must be a boolean");
+
+  const elements = requiredList(scene.elements, MAX_SCENE_ELEMENTS);
+  if (!elements) return fail(`Animation scene needs 1–${MAX_SCENE_ELEMENTS} elements`);
+  const ids = uniqueIds(elements, "animation.scene.elements");
+  if (!ids.valid) return ids;
+
+  for (const raw of elements as Record<string, unknown>[]) {
+    const kind = raw.kind;
+    if (typeof kind !== "string" || !(SCENE_ELEMENT_KINDS as readonly string[]).includes(kind)) {
+      return fail(`Animation scene element kind must be one of ${SCENE_ELEMENT_KINDS.join(", ")}`);
+    }
+    const path = `animation.scene.elements.${String(raw.id)}`;
+
+    switch (kind) {
+      case "curve": {
+        if (!safeExpression(raw.xExpression) || !safeExpression(raw.yExpression)) {
+          return fail(`${path} curve needs bounded xExpression and yExpression in u`);
+        }
+        const domain = optionalSceneDomain(raw.uDomain, `${path} uDomain`);
+        if (!domain.valid) return domain;
+        const style = optionalSceneLineStyle(raw.style, path);
+        if (!style.valid) return style;
+        if (!optionalBoolean(raw.writeOn)) return fail(`${path} writeOn must be a boolean`);
+        const accent = optionalSceneAccent(raw.accent, path);
+        if (!accent.valid) return accent;
+        break;
+      }
+      case "point": {
+        if (!safeExpression(raw.xExpression) || !safeExpression(raw.yExpression)) {
+          return fail(`${path} point needs bounded xExpression and yExpression in t`);
+        }
+        if (!optionalText(raw.label, MAX_SHORT_TEXT_LENGTH)) return fail(`${path} point label is too long`);
+        if (!optionalBoolean(raw.trace)) return fail(`${path} trace must be a boolean`);
+        const accent = optionalSceneAccent(raw.accent, path);
+        if (!accent.valid) return accent;
+        break;
+      }
+      case "segment": {
+        const from = scenePointSpec(raw.from, `${path}.from`);
+        if (!from.valid) return from;
+        const to = scenePointSpec(raw.to, `${path}.to`);
+        if (!to.valid) return to;
+        const style = optionalSceneLineStyle(raw.style, path);
+        if (!style.valid) return style;
+        const accent = optionalSceneAccent(raw.accent, path);
+        if (!accent.valid) return accent;
+        break;
+      }
+      case "rects": {
+        if (!sceneScalar(raw.count)) return fail(`${path} rects count must be a number or an expression in t`);
+        if (!sceneScalar(raw.x0) || !sceneScalar(raw.x1)) {
+          return fail(`${path} rects needs numeric-or-expression x0 and x1`);
+        }
+        if (!safeExpression(raw.yExpression)) return fail(`${path} rects needs a bounded yExpression in x`);
+        if (raw.baseline !== undefined && raw.baseline !== null && !sceneScalar(raw.baseline)) {
+          return fail(`${path} rects baseline must be a number or an expression in t`);
+        }
+        if (
+          raw.heightRule !== undefined && raw.heightRule !== null &&
+          !["left", "right", "midpoint"].includes(String(raw.heightRule))
+        ) {
+          return fail(`${path} rects heightRule must be left, right, or midpoint`);
+        }
+        const fill = optionalSceneAccent(raw.fill, `${path} fill`);
+        if (!fill.valid) return fill;
+        const stroke = optionalSceneAccent(raw.stroke, `${path} stroke`);
+        if (!stroke.valid) return stroke;
+        break;
+      }
+      case "region": {
+        if (!sceneScalar(raw.x0) || !sceneScalar(raw.x1)) {
+          return fail(`${path} region needs numeric-or-expression x0 and x1`);
+        }
+        if (!safeExpression(raw.topExpression)) return fail(`${path} region needs a bounded topExpression in x`);
+        if (raw.bottomExpression !== undefined && raw.bottomExpression !== null && !safeExpression(raw.bottomExpression)) {
+          return fail(`${path} region bottomExpression must be a bounded expression in x`);
+        }
+        const fill = optionalSceneAccent(raw.fill, `${path} fill`);
+        if (!fill.valid) return fill;
+        break;
+      }
+      case "arrow": {
+        const from = scenePointSpec(raw.from, `${path}.from`);
+        if (!from.valid) return from;
+        const to = scenePointSpec(raw.to, `${path}.to`);
+        if (!to.valid) return to;
+        if (!optionalText(raw.label, MAX_SHORT_TEXT_LENGTH)) return fail(`${path} arrow label is too long`);
+        const accent = optionalSceneAccent(raw.accent, path);
+        if (!accent.valid) return accent;
+        break;
+      }
+      case "label": {
+        const at = scenePointSpec(raw.at, `${path}.at`);
+        if (!at.valid) return at;
+        if (!optionalText(raw.text, MAX_SHORT_TEXT_LENGTH)) return fail(`${path} label text is too long`);
+        if (raw.anchor !== undefined && raw.anchor !== null && !["start", "middle", "end"].includes(String(raw.anchor))) {
+          return fail(`${path} label anchor must be start, middle, or end`);
+        }
+        if (raw.offset !== undefined && raw.offset !== null) {
+          if (!isPlainObject(raw.offset) || !finiteNumber(raw.offset.x) || !finiteNumber(raw.offset.y)) {
+            return fail(`${path} label offset must be { x, y } finite numbers`);
+          }
+        }
+        const accent = optionalSceneAccent(raw.accent, path);
+        if (!accent.valid) return accent;
+        break;
+      }
+    }
+  }
+
   return ok;
 }
 
