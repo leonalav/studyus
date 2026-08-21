@@ -14,9 +14,23 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { renderMath } from "../../lib/latex/render";
-import { gradeAnswerableWidget } from "../../lib/widgets/validate";
-import { WIDGET_LABEL, type WidgetIntent, type WidgetState, type WidgetKind, type WidgetRespondSpec } from "../../lib/widgets/types";
+import { generateAxisTicks } from "./Visuals";
+import { gradeAnswerableWidget, MAX_RECTS, sanitizeWidgetState } from "../../lib/widgets/validate";
+import {
+  WIDGET_LABEL,
+  type WidgetIntent,
+  type WidgetState,
+  type WidgetKind,
+  type WidgetRespondSpec,
+  type AnimationScene,
+  type AnimationSceneElement,
+  type SceneScalar,
+  type SceneAccent,
+  type SceneLineStyle,
+  type ScenePointSpec,
+} from "../../lib/widgets/types";
 import { assessMastery, MASTERY_DIMENSION_LABEL, MASTERY_THRESHOLD } from "../../lib/mastery";
 import { MASTERY_EVIDENCE_DIMENSIONS } from "../../lib/widgets/types";
 import { ErrorBoundary } from "../ErrorBoundary";
@@ -52,6 +66,7 @@ export interface WidgetSurfaceProps {
 
 const MARKS: Record<WidgetKind, string> = {
   roadmap: "M4 18c0-3 4-3 4-6s-4-3-4-6M20 6c0 3-4 3-4 6s4 3 4 6",
+  plan: "M7 5.5h9M7 12h9M7 18.5h5M4 5.2l.9.9L6.5 4.5M4 11.7l.9.9 1.6-1.6M4 18.2l.9.9 1.6-1.6",
   concept_card: "M6 4h9l4 4v12H6zM14 4v5h5M9 13h6M9 16h4",
   slider: "M3 12h18",
   animation: "M4 16c4-9 12-9 16 0",
@@ -79,6 +94,7 @@ const EXTRA_MARK_SHAPES: Partial<Record<WidgetKind, React.ReactElement>> = {
 
 const DEFAULT_TAGS: Record<WidgetKind, string> = {
   roadmap: "Path",
+  plan: "Your say",
   concept_card: "Idea",
   slider: "Manipulate",
   animation: "Over time",
@@ -212,6 +228,24 @@ function WidgetShell({
 
 /* ── Entry point ── */
 
+/** Cheap stable fingerprint of an intent so error boundaries remount when the
+ *  payload is repaired (e.g. after a session hydrate) rather than staying stuck
+ *  on a previous throw. */
+function widgetResetKey(intent: WidgetIntent): string {
+  try {
+    const kind = intent.kind;
+    if (kind === "animation") {
+      const frames = Array.isArray(intent.frames) ? intent.frames.length : 0;
+      const scene = intent.scene ? 1 : 0;
+      const motion = intent.motion ? 1 : 0;
+      return `${kind}:${frames}:${scene}:${motion}:${intent.id ?? ""}`;
+    }
+    return `${kind}:${intent.id ?? ""}`;
+  } catch {
+    return intent.kind;
+  }
+}
+
 export const WidgetSurface = memo(function WidgetSurface({
   intent,
   state,
@@ -222,6 +256,10 @@ export const WidgetSurface = memo(function WidgetSurface({
   cluster,
   onState,
 }: WidgetSurfaceProps) {
+  // Bound learner state once at the surface so a restored NaN / non-finite
+  // progress value cannot crash a body that indexes frames by playhead.
+  const safeState = useMemo(() => sanitizeWidgetState(state) ?? {}, [state]);
+
   const emit = useCallback(
     (patch: WidgetState) => {
       if (readOnly || !onState) return;
@@ -231,22 +269,29 @@ export const WidgetSurface = memo(function WidgetSurface({
       // with no fallback UI. Contain it at the single choke point instead: the
       // learner's click is lost, which is recoverable; the session is not.
       try {
-        onState({ ...(state ?? {}), ...patch, interactedAt: new Date().toISOString() });
+        onState({ ...safeState, ...patch, interactedAt: new Date().toISOString() });
       } catch (error) {
         console.error("[widget] failed to record interaction", error);
       }
     },
-    [onState, readOnly, state]
+    [onState, readOnly, safeState]
   );
 
-  const shared = { chalk, accent, state: state ?? {}, emit, readOnly };
+  const shared = { chalk, accent, state: safeState, emit, readOnly };
 
   return (
     <WidgetShell intent={intent} chalk={chalk} accent={accent} scale={scale} cluster={cluster}>
       {/* The shell (title, tag, chalk mark) renders outside this boundary, so a
           body that fails still leaves an identifiable card on the board rather
           than a hole the learner cannot connect to anything. */}
-      <ErrorBoundary label={WIDGET_LABEL[intent.kind]} resetKey={intent.id ?? intent.kind} fallback={widgetBodyFallback}>
+      {/* resetKey includes a stable content fingerprint so a repaired payload
+          (or a hot-reload of the renderer) remounts the body instead of leaving
+          the learner stranded on a stale error card from a previous paint. */}
+      <ErrorBoundary
+        label={WIDGET_LABEL[intent.kind] ?? intent.kind}
+        resetKey={`${intent.id ?? intent.kind}:${widgetResetKey(intent)}`}
+        fallback={widgetBodyFallback}
+      >
         {renderBody(intent, shared)}
       </ErrorBoundary>
     </WidgetShell>
@@ -269,10 +314,11 @@ interface BodyProps {
  * the renderer unchecked. Those bodies used to throw on the missing field and —
  * before error boundaries existed — blank the entire application. Naming the
  * requirement here keeps the check in one auditable place instead of scattering
- * optional chaining through seventeen components.
+ * optional chaining through eighteen components.
  */
 const REQUIRED_LIST: Partial<Record<WidgetIntent["kind"], string>> = {
   roadmap: "steps",
+  plan: "steps",
   animation: "frames",
   comparison: "columns",
   hint: "steps",
@@ -305,7 +351,7 @@ function usableEntries(value: unknown): Record<string, unknown>[] {
  * Placement validates intents, but three paths reach the renderer unchecked: a
  * board restored from a saved session, a payload truncated mid-write, and a
  * widget authored by an older build. Rather than scatter optional chaining
- * across seventeen components, normalize once here so each body keeps its
+ * across eighteen components, normalize once here so each body keeps its
  * straightforward, readable shape.
  *
  * Returns the repaired intent, or a reason string when nothing renderable is
@@ -367,6 +413,32 @@ function normalizeIntent(intent: WidgetIntent): { intent: WidgetIntent } | { rea
         typeof m.xExpression === "string" &&
         typeof m.yExpression === "string";
       if (!ok) patch.motion = undefined;
+      else if (
+        // A stray non-string z from a truncated write would otherwise silently
+        // promote the scene to a broken 3D view.
+        (m as { zExpression?: unknown }).zExpression !== undefined &&
+        typeof (m as { zExpression?: unknown }).zExpression !== "string"
+      ) {
+        patch.motion = { ...(m as Record<string, unknown>), zExpression: undefined };
+      }
+    }
+
+    // A composed scene with no frame or no readable elements has nothing to
+    // draw; drop it so the body falls back to the progress dot rather than
+    // throwing on the first element access. Ragged element lists are repaired,
+    // not rejected — nine good primitives out of ten are still worth teaching
+    // with, exactly like every other list field.
+    const scene = (intent as unknown as { scene?: unknown }).scene;
+    if (scene !== undefined) {
+      const s = scene as { xDomain?: unknown; yDomain?: unknown; elements?: unknown } | null;
+      const domainOk = (d: unknown) =>
+        Array.isArray(d) && d.length >= 2 && d.slice(0, 2).every((n) => typeof n === "number" && Number.isFinite(n));
+      const usable = s && Array.isArray(s.elements) ? usableEntries(s.elements) : [];
+      if (s === null || typeof s !== "object" || !domainOk(s.xDomain) || !domainOk(s.yDomain) || usable.length === 0) {
+        patch.scene = undefined;
+      } else if (s && Array.isArray(s.elements) && usable.length !== s.elements.length) {
+        patch.scene = { ...s, elements: usable } as unknown as Record<string, unknown>;
+      }
     }
   }
 
@@ -385,10 +457,17 @@ function normalizeIntent(intent: WidgetIntent): { intent: WidgetIntent } | { rea
 }
 
 /** Shown when a widget body throws despite normalization. */
-function widgetBodyFallback() {
+function widgetBodyFallback(_error: Error, reset: () => void) {
   return (
-    <div className="text-[10.5px] opacity-60">
-      This widget could not be drawn. The rest of the board is unaffected.
+    <div className="text-[10.5px] opacity-70">
+      <p className="m-0">This widget could not be drawn. The rest of the board is unaffected.</p>
+      <button
+        type="button"
+        onClick={reset}
+        className="mt-1.5 underline underline-offset-2 opacity-80 hover:opacity-100"
+      >
+        Try again
+      </button>
     </div>
   );
 }
@@ -410,6 +489,7 @@ function renderBody(rawIntent: WidgetIntent, props: BodyProps) {
 
   switch (intent.kind) {
     case "roadmap": return <RoadmapBody intent={intent} {...props} />;
+    case "plan": return <PlanBody intent={intent} {...props} />;
     case "concept_card": return <ConceptCardBody intent={intent} {...props} />;
     case "slider": return <SliderBody intent={intent} {...props} />;
     case "animation": return <AnimationBody intent={intent} {...props} />;
@@ -534,6 +614,260 @@ function RoadmapBody({ intent, chalk, accent }: BodyProps & { intent: Extract<Wi
   );
 }
 
+/* ── 21 · Plan — the agreed route from zero to mastery ── */
+
+function PlanBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & { intent: Extract<WidgetIntent, { kind: "plan" }> }) {
+  const [editing, setEditing] = useState(false);
+  const agreed = state.submitted === true;
+
+  // The learner's edited route wins whenever present — what renders (and what
+  // the tutor is told about on agreement) is THEIR version of the plan.
+  const heading = state.planDraft?.heading ?? intent.heading;
+  const steps = state.planDraft?.steps ?? intent.steps;
+
+  const start = () => emit({ submitted: true });
+
+  return (
+    <div>
+      <div className="mb-2 flex items-baseline justify-between gap-2">
+        <div className="text-[13px] font-semibold leading-snug opacity-90">{heading}</div>
+        {state.planDraft ? (
+          <span
+            className="flex-none rounded-full px-1.5 py-px font-mono text-[8px] uppercase tracking-wide"
+            style={{ background: `${accent}1f`, color: accent }}
+            title="You edited this plan"
+          >
+            your version
+          </span>
+        ) : null}
+      </div>
+
+      <ol className="m-0 list-none space-y-0.5 p-0">
+        {steps.map((step, index) => (
+          <li key={step.id} className="grid grid-cols-[20px_1fr] gap-2.5">
+            <span className="relative flex flex-col items-center">
+              <span
+                className="grid h-[18px] w-[18px] flex-none place-items-center rounded-md border font-mono text-[9px]"
+                style={{ borderColor: `${accent}4d`, color: accent, background: "rgba(255,255,255,0.04)" }}
+              >
+                {index + 1}
+              </span>
+              {index < steps.length - 1 ? <span className="mt-0.5 w-px flex-1" style={{ background: `${chalk}1f` }} /> : null}
+            </span>
+            <div className="min-w-0 pb-2.5">
+              <div className="text-[11.5px] font-medium leading-snug opacity-90">{step.label}</div>
+              {step.details?.length ? (
+                <ol className="m-0 mt-1 list-none space-y-0.5 p-0">
+                  {step.details.map((detail, i) => (
+                    <li key={i} className="text-[10px] leading-snug opacity-65">
+                      <span className="mr-1 font-mono opacity-70">({i + 1})</span>
+                      {detail}
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      {/* Consent, not a time estimate: nothing is taught until the learner
+          signs the route off — or rewrites it. */}
+      <div className="mt-1 border-t pt-2.5" style={{ borderColor: `${chalk}18` }}>
+        <p className="m-0 mb-2 text-[10.5px] opacity-85">{intent.agreementPrompt ?? "Do you agree with this plan?"}</p>
+        {agreed ? (
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[9.5px] opacity-55">Agreed — the session is on this plan.</span>
+            <span
+              className="rounded-full px-2 py-[3px] font-mono text-[9px]"
+              style={{ background: "rgba(134,239,172,0.12)", color: "#86efac" }}
+            >
+              ✓ Started
+            </span>
+          </div>
+        ) : (
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={() => setEditing(true)}
+              className="rounded-md px-2.5 py-1.5 text-[11px] opacity-80 transition-colors hover:bg-white/10 disabled:opacity-40"
+            >
+              Edit plan
+            </button>
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={start}
+              className="rounded-md px-3 py-1.5 text-[11px] font-medium text-white transition-colors disabled:opacity-40"
+              style={{ background: "#33479e" }}
+            >
+              Start learning
+            </button>
+          </div>
+        )}
+      </div>
+
+      {editing ? (
+        <PlanEditSheet
+          heading={heading}
+          steps={steps}
+          onClose={() => setEditing(false)}
+          onSave={(next) => {
+            setEditing(false);
+            // A save that changed nothing is not an edit — leaving no draft
+            // means the card keeps presenting the agent's proposal as itself.
+            const unchanged =
+              next.heading === intent.heading &&
+              JSON.stringify(next.steps) ===
+                JSON.stringify(intent.steps.map((s) => ({ id: s.id, label: s.label, ...(s.details?.length ? { details: s.details } : {}) })));
+            if (!unchanged) emit({ planDraft: next });
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** The floating editor behind "Edit plan": every line is free text, steps add
+ *  and remove freely, and a save that empties the route is refused — a plan
+ *  with one step is a sentence, with zero it's a shrug. */
+function PlanEditSheet({
+  heading,
+  steps,
+  onSave,
+  onClose,
+}: {
+  heading: string;
+  steps: { id: string; label: string; details?: string[] }[];
+  onSave: (next: { heading: string; steps: { id: string; label: string; details?: string[] }[] }) => void;
+  onClose: () => void;
+}) {
+  const [draftHeading, setDraftHeading] = useState(heading);
+  const [draftSteps, setDraftSteps] = useState<{ id: string; label: string; details: string }[]>(
+    steps.map((step) => ({ id: step.id, label: step.label, details: (step.details ?? []).join("\n") }))
+  );
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const patchStep = (id: string, patch: Partial<{ label: string; details: string }>) =>
+    setDraftSteps((current) => current.map((step) => (step.id === id ? { ...step, ...patch } : step)));
+  const removeStep = (id: string) => setDraftSteps((current) => current.filter((step) => step.id !== id));
+  const addStep = () =>
+    setDraftSteps((current) => [...current, { id: `edit-${Date.now()}`, label: "", details: "" }]);
+
+  const normalized = {
+    heading: draftHeading.trim(),
+    steps: draftSteps
+      .map((step, index) => ({
+        id: step.id || `s${index + 1}`,
+        label: step.label.trim(),
+        details: step.details.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+      }))
+      .filter((step) => step.label),
+  };
+  const savable = normalized.heading.length > 0 && normalized.steps.length >= 2;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit plan"
+        className="anim-msg relative flex w-[min(380px,94vw)] max-h-[86vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
+        style={{ maxHeight: "calc(100dvh - 2rem)" }}
+      >
+        <div className="flex shrink-0 items-center justify-between border-b border-white/8 px-4 py-3">
+          <h2 className="m-0 text-[14px] font-medium text-fg">Edit plan</h2>
+          <button
+            onClick={onClose}
+            aria-label="Close editor"
+            className="grid h-6 w-6 place-items-center rounded-md text-dim transition-colors hover:bg-white/[0.07] hover:text-fg"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+          <div>
+            <label className="mb-1 block font-mono text-[9px] uppercase tracking-[0.14em] text-dim">Concept</label>
+            <input
+              value={draftHeading}
+              onChange={(event) => setDraftHeading(event.target.value)}
+              className="w-full rounded-md border border-white/10 bg-black/25 px-2.5 py-1.5 text-[12.5px] text-fg outline-none focus:border-accent/50"
+            />
+          </div>
+
+          {draftSteps.map((step, index) => (
+            <div key={step.id} className="rounded-lg border border-white/8 bg-black/20 px-3 py-2.5">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[9.5px] text-dim">{index + 1}.</span>
+                <input
+                  value={step.label}
+                  placeholder="Phase…"
+                  aria-label={`Step ${index + 1} label`}
+                  onChange={(event) => patchStep(step.id, { label: event.target.value })}
+                  className="min-w-0 flex-1 rounded border border-white/10 bg-black/25 px-2 py-1 text-[12px] text-fg outline-none focus:border-accent/50"
+                />
+                <button
+                  onClick={() => removeStep(step.id)}
+                  aria-label={`Remove step ${index + 1}`}
+                  className="grid h-5 w-5 shrink-0 place-items-center rounded text-dim transition-colors hover:bg-white/[0.07] hover:text-[#ff8b80]"
+                >
+                  ×
+                </button>
+              </div>
+              <textarea
+                value={step.details}
+                rows={2}
+                placeholder="What this phase covers — one line per item (optional)"
+                aria-label={`Step ${index + 1} details`}
+                onChange={(event) => patchStep(step.id, { details: event.target.value })}
+                className="mt-1.5 w-full resize-y rounded border border-white/10 bg-black/25 px-2 py-1.5 text-[11px] leading-relaxed text-fg outline-none focus:border-accent/50"
+              />
+            </div>
+          ))}
+
+          <button
+            onClick={addStep}
+            className="w-full rounded-md border border-dashed border-white/15 py-1.5 text-[11.5px] text-mut transition-colors hover:border-accent/40 hover:text-fg"
+          >
+            + Add a step
+          </button>
+        </div>
+
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-white/8 px-4 py-3">
+          <span className="text-[10px] text-dim">{savable ? "" : "Keep a heading and at least two steps."}</span>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="rounded-md px-2.5 py-1.5 text-[11.5px] text-dim transition-colors hover:text-fg">
+              Cancel
+            </button>
+            <button
+              onClick={() => savable && onSave(normalized)}
+              disabled={!savable}
+              className="rounded-md bg-accent px-3 py-1.5 text-[11.5px] font-medium text-white transition-colors hover:bg-accent-deep disabled:opacity-40"
+            >
+              Save plan
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 /* ── 2 · Concept Card ── */
 
 function ConceptCardBody({ intent, chalk, accent }: BodyProps & { intent: Extract<WidgetIntent, { kind: "concept_card" }> }) {
@@ -570,7 +904,22 @@ function ConceptCardBody({ intent, chalk, accent }: BodyProps & { intent: Extrac
 /** Bounded evaluator for readout expressions. Supports the arithmetic and the
  *  scalar functions a teaching readout needs, and nothing else — no property
  *  access, no globals, no assignment. Returns null when unevaluatable. */
+/**
+ * Compiled-expression cache for the bounded evaluator.
+ *
+ * `evaluateReadout` is the one evaluator the whole surface shares, and the
+ * scene path now calls it per sample per frame — 64 curve samples × 60fps
+ * would otherwise recompile a `Function` tens of thousands of times a second.
+ * The key includes the scope parameter names (not the values), so an
+ * expression only ever recompiles when the *shape* of its scope changes.
+ */
+const readoutFnCache = new Map<string, (...args: unknown[]) => unknown>();
+
 function evaluateReadout(expression: string, scope: Record<string, number>): number | null {
+  // Placement validates expressions, but a restored session or truncated write
+  // can still hand a non-string through; fail closed rather than throwing on
+  // `.replace` and taking the whole board down with it.
+  if (typeof expression !== "string") return null;
   const allowed: Record<string, unknown> = {
     abs: Math.abs, acos: Math.acos, asin: Math.asin, atan: Math.atan,
     cbrt: Math.cbrt, ceil: Math.ceil, cos: Math.cos, cosh: Math.cosh,
@@ -586,8 +935,13 @@ function evaluateReadout(expression: string, scope: Record<string, number>): num
   const normalized = expression.replace(/\^/g, "**");
   try {
     const names = Object.keys(allowed);
-    // eslint-disable-next-line no-new-func
-    const fn = new Function(...names, `"use strict"; return (${normalized});`);
+    const cacheKey = `${names.join(",")}|${normalized}`;
+    let fn = readoutFnCache.get(cacheKey);
+    if (!fn) {
+      // eslint-disable-next-line no-new-func
+      fn = new Function(...names, `"use strict"; return (${normalized});`) as (...args: unknown[]) => unknown;
+      readoutFnCache.set(cacheKey, fn);
+    }
     const result = fn(...names.map((name) => allowed[name]));
     return typeof result === "number" && Number.isFinite(result) ? result : null;
   } catch {
@@ -723,6 +1077,417 @@ function CommitBox({
 /** Playback speeds offered when the intent declares the speed control. */
 const ANIMATION_SPEEDS = [0.5, 1, 2] as const;
 
+/** Manim-style ease curves for the moving point. "smooth" (the default) is
+ *  smoothstep — easing both ends is what reads as *motion* rather than a
+ *  timer ticker. */
+const MOTION_EASING: Record<"linear" | "smooth" | "enter" | "exit", (t: number) => number> = {
+  linear: (t) => t,
+  smooth: (t) => t * t * (3 - 2 * t),
+  enter: (t) => t * t,
+  exit: (t) => 1 - (1 - t) * (1 - t),
+};
+
+/** Total screen-space (viewBox-unit) length of a polyline, for dash-driven
+ *  write-on reveals. */
+function polylineLength(pts: readonly [number, number][]): number {
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) {
+    total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  }
+  return total;
+}
+
+/* ── 7a · Scene figure — the composed animation stage ── */
+
+/**
+ * Animation stages used to paint into a short wide strip (220×126) with
+ * independent x/y scales and `preserveAspectRatio="none"`. That made unit
+ * circles render as ellipses and looked low-res once the card stretched full
+ * width. The frame below is isotropic: one data unit is one data unit on both
+ * axes, the viewBox aspect follows the domain, and the host CSS aspect-ratio
+ * matches so the SVG never has to stretch.
+ */
+const SCENE_PAD_L = 34;
+const SCENE_PAD_R = 16;
+const SCENE_PAD_T = 14;
+const SCENE_PAD_B = 24;
+/** Longest plot edge in viewBox units — larger than the old 220 strip so
+ *  curves stay sharp when the card is wide. */
+const SCENE_PLOT_BUDGET = 300;
+
+type SceneFrame = {
+  W: number;
+  H: number;
+  padL: number;
+  padR: number;
+  padT: number;
+  padB: number;
+  unit: number;
+  plotW: number;
+  plotH: number;
+  originX: number;
+  originY: number;
+  x0: number;
+  y0: number;
+};
+
+/** Build a viewBox that fits `spanX`×`spanY` data units isotropically. */
+function fitSceneFrame(x0: number, x1: number, y0: number, y1: number): SceneFrame {
+  const spanX = Math.max(1e-6, x1 - x0);
+  const spanY = Math.max(1e-6, y1 - y0);
+  const unit = Math.min(SCENE_PLOT_BUDGET / spanX, SCENE_PLOT_BUDGET / spanY);
+  const plotW = spanX * unit;
+  const plotH = spanY * unit;
+  return {
+    W: Math.round(plotW + SCENE_PAD_L + SCENE_PAD_R),
+    H: Math.round(plotH + SCENE_PAD_T + SCENE_PAD_B),
+    padL: SCENE_PAD_L,
+    padR: SCENE_PAD_R,
+    padT: SCENE_PAD_T,
+    padB: SCENE_PAD_B,
+    unit,
+    plotW,
+    plotH,
+    originX: SCENE_PAD_L,
+    originY: SCENE_PAD_T,
+    x0,
+    y0,
+  };
+}
+
+function projectInFrame(frame: SceneFrame, x: number, y: number): [number, number] {
+  return [
+    frame.originX + (x - frame.x0) * frame.unit,
+    frame.originY + frame.plotH - (y - frame.y0) * frame.unit,
+  ];
+}
+
+const SCENE_ACCENT_COLORS: Record<string, string> = {
+  amber: "#fde68a",
+  cyan: "#7dd3fc",
+  violet: "#9b96e6",
+  ember: "#ff7a33",
+  green: "#86efac",
+  red: "#fca5a5",
+};
+
+function sceneColor(accentKey: SceneAccent | undefined, chalk: string, accent: string): string {
+  if (accentKey === undefined || accentKey === "chalk") return chalk;
+  if (accentKey === "accent") return accent;
+  return SCENE_ACCENT_COLORS[accentKey] ?? chalk;
+}
+
+/** Dash pattern for a line style, in viewBox units. */
+function sceneDash(style: SceneLineStyle | undefined): string | undefined {
+  if (style === "dashed") return "3 3";
+  if (style === "dotted") return "1.5 3";
+  return undefined;
+}
+
+/** Format an evaluated value for inline `{expr}` label interpolation. */
+function sceneFormat(n: number): string {
+  if (Number.isInteger(n)) return String(n);
+  return String(Number(n.toFixed(3)));
+}
+
+/**
+ * The scene stage: a fixed coordinate frame painted first, then the author's
+ * elements in order. Everything is a pure function of the playhead `t`, so a
+ * frame is screenshot-diffable — same `t`, same picture — and the host keeps
+ * owning the clock, easing, checkpoints and evidence exactly as before.
+ */
+function SceneFigure({
+  scene,
+  progress,
+  chalk,
+  accent,
+}: {
+  scene: AnimationScene;
+  progress: number;
+  chalk: string;
+  accent: string;
+}) {
+  const t = Math.min(1, Math.max(0, progress));
+  const [x0, x1] = scene.xDomain;
+  const [y0, y1] = scene.yDomain;
+  const frame = fitSceneFrame(x0, x1, y0, y1);
+  const { W: SCENE_W, H: SCENE_H, padL, padT } = frame;
+
+  const px = (x: number) => projectInFrame(frame, x, y0)[0];
+  const py = (y: number) => projectInFrame(frame, x0, y)[1];
+  const project = (x: number, y: number): [number, number] => projectInFrame(frame, x, y);
+
+  /** Evaluate an expression with the playhead, data-x and curve-u in scope. */
+  const evalExpr = (expression: string, x = 0, u = 0) => evaluateReadout(expression, { t, x, u });
+
+  const scalarAt = (s: SceneScalar, x = 0, u = 0): number | null =>
+    typeof s === "number" ? (Number.isFinite(s) ? s : null) : evalExpr(s, x, u);
+
+  const pointAt = (p: ScenePointSpec): [number, number] | null => {
+    if (!p || typeof p !== "object") return null;
+    const x = scalarAt(p.x);
+    const y = scalarAt(p.y);
+    return x === null || y === null ? null : project(x, y);
+  };
+
+  /** Interpolate `{expr}` tokens in a label against the current playhead. */
+  const labelText = (raw?: string): string | null => {
+    if (raw === undefined || raw.trim().length === 0) return null;
+    return raw.replace(/\{([^{}]+)\}/g, (_whole, expr: string) => {
+      const value = evalExpr(expr.trim());
+      return value === null ? `{${expr}}` : sceneFormat(value);
+    });
+  };
+
+  const gridOn = scene.showGrid !== false;
+  const xTicks = generateAxisTicks(x0, x1, 4);
+  const yTicks = generateAxisTicks(y0, y1, 3);
+  const xAxisY = y0 <= 0 && y1 >= 0 ? py(0) : null;
+  const yAxisX = x0 <= 0 && x1 >= 0 ? px(0) : null;
+  const plotTop = frame.originY;
+  const plotBottom = frame.originY + frame.plotH;
+  const plotLeft = frame.originX;
+  const plotRight = frame.originX + frame.plotW;
+
+  const nodes: React.ReactNode[] = [];
+
+  // Fixed frame: faint tick grid, slightly stronger axes, and the labels the
+  // scene declares — never the agent's pixel placement.
+  for (const value of xTicks) {
+    const x = px(value);
+    if (gridOn) {
+      nodes.push(<line key={`gx-${value}`} x1={x} y1={plotTop} x2={x} y2={plotBottom} stroke={`${chalk}14`} strokeWidth={0.6} />);
+    }
+    nodes.push(
+      <text key={`tx-${value}`} x={x} y={SCENE_H - 6} textAnchor="middle" fontSize={7} fill={chalk} opacity={0.5} fontFamily="monospace">
+        {sceneFormat(value)}
+      </text>
+    );
+  }
+  for (const value of yTicks) {
+    const y = py(value);
+    if (gridOn) {
+      nodes.push(<line key={`gy-${value}`} x1={plotLeft} y1={y} x2={plotRight} y2={y} stroke={`${chalk}14`} strokeWidth={0.6} />);
+    }
+    nodes.push(
+      <text key={`ty-${value}`} x={padL - 4} y={y + 2.5} textAnchor="end" fontSize={7} fill={chalk} opacity={0.5} fontFamily="monospace">
+        {sceneFormat(value)}
+      </text>
+    );
+  }
+  if (xAxisY !== null) {
+    nodes.push(<line key="axis-x" x1={plotLeft} y1={xAxisY} x2={plotRight} y2={xAxisY} stroke={`${chalk}3d`} strokeWidth={0.9} />);
+  }
+  if (yAxisX !== null) {
+    nodes.push(<line key="axis-y" x1={yAxisX} y1={plotTop} x2={yAxisX} y2={plotBottom} stroke={`${chalk}3d`} strokeWidth={0.9} />);
+  }
+  if (scene.xLabel) {
+    nodes.push(
+      <text key="xlabel" x={plotRight} y={SCENE_H - 6} textAnchor="end" fontSize={7.5} fill={chalk} opacity={0.7} fontFamily="monospace">
+        {scene.xLabel}
+      </text>
+    );
+  }
+  if (scene.yLabel) {
+    nodes.push(
+      <text key="ylabel" x={padL - 3} y={padT + 8} textAnchor="end" fontSize={7.5} fill={chalk} opacity={0.7} fontFamily="monospace">
+        {scene.yLabel}
+      </text>
+    );
+  }
+
+  // Elements paint in author order, so later elements sit over earlier ones.
+  // Skip unreadable entries instead of throwing — a restored scene can carry a
+  // nullish or half-written primitive without losing the rest of the figure.
+  scene.elements.forEach((element: AnimationSceneElement, elementIndex: number) => {
+    if (!element || typeof element !== "object" || !("kind" in element)) return;
+    const color = sceneColor("accent" in element ? element.accent : undefined, chalk, accent);
+    const elementKey = typeof element.id === "string" && element.id.length > 0 ? element.id : `el-${elementIndex}`;
+
+    switch (element.kind) {
+      case "curve": {
+        const u0 = element.uDomain?.[0] ?? 0;
+        const u1 = element.uDomain?.[1] ?? 1;
+        const steps = 64;
+        const pts: [number, number][] = [];
+        for (let i = 0; i <= steps; i += 1) {
+          const u = u0 + ((u1 - u0) * i) / steps;
+          const x = evalExpr(element.xExpression, 0, u);
+          const y = evalExpr(element.yExpression, 0, u);
+          if (x === null || y === null) continue;
+          pts.push(project(x, y));
+        }
+        if (pts.length < 2) break;
+        const writing = element.writeOn === true && t < 1;
+        const reveal = Math.min(1, t / 0.18);
+        const length = polylineLength(pts);
+        nodes.push(
+          <polyline
+            key={elementKey}
+            points={pts.map(([x, y]) => `${x},${y}`).join(" ")}
+            fill="none"
+            stroke={color}
+            strokeWidth={1.6}
+            strokeLinecap="round"
+            strokeDasharray={writing ? length : sceneDash(element.style)}
+            strokeDashoffset={writing ? length * (1 - reveal) : undefined}
+          />
+        );
+        break;
+      }
+      case "point": {
+        const at = pointAt({ x: element.xExpression, y: element.yExpression });
+        if (!at) break;
+        if (element.trace) {
+          const steps = 48;
+          const pts: [number, number][] = [];
+          for (let i = 0; i <= steps; i += 1) {
+            const tt = (t * i) / steps;
+            const x = evaluateReadout(element.xExpression, { t: tt });
+            const y = evaluateReadout(element.yExpression, { t: tt });
+            if (x === null || y === null) continue;
+            pts.push(project(x, y));
+          }
+          if (pts.length >= 2) {
+            nodes.push(
+              <polyline key={`${elementKey}-trace`} points={pts.map(([x, y]) => `${x},${y}`).join(" ")} fill="none" stroke={color} strokeWidth={1.6} />
+            );
+          }
+        }
+        nodes.push(<circle key={elementKey} cx={at[0]} cy={at[1]} r={4} fill={color} />);
+        const label = labelText(element.label);
+        if (label) {
+          nodes.push(
+            <text key={`${elementKey}-label`} x={at[0] + 5} y={at[1] - 4} fontSize={6} fill={color} fontFamily="monospace">
+              {label}
+            </text>
+          );
+        }
+        break;
+      }
+      case "segment": {
+        const from = pointAt(element.from);
+        const to = pointAt(element.to);
+        if (!from || !to) break;
+        nodes.push(
+          <line key={elementKey} x1={from[0]} y1={from[1]} x2={to[0]} y2={to[1]} stroke={color} strokeWidth={1.4} strokeDasharray={sceneDash(element.style)} />
+        );
+        break;
+      }
+      case "rects": {
+        const countRaw = scalarAt(element.count);
+        if (countRaw === null) break;
+        const n = Math.max(1, Math.min(MAX_RECTS, Math.round(countRaw)));
+        const rx0 = scalarAt(element.x0);
+        const rx1 = scalarAt(element.x1);
+        const baseline = element.baseline === undefined ? 0 : scalarAt(element.baseline);
+        if (rx0 === null || rx1 === null || baseline === null) break;
+        const rule = element.heightRule ?? "left";
+        const fill = sceneColor(element.fill, chalk, accent);
+        const stroke = sceneColor(element.stroke, chalk, accent);
+        for (let i = 0; i < n; i += 1) {
+          const a = rx0 + ((rx1 - rx0) * i) / n;
+          const b = rx0 + ((rx1 - rx0) * (i + 1)) / n;
+          const sampleX = rule === "right" ? b : rule === "midpoint" ? (a + b) / 2 : a;
+          const top = evalExpr(element.yExpression, sampleX);
+          if (top === null) continue;
+          const [left, topY] = project(a, top);
+          const [right, bottomY] = project(b, baseline);
+          const rectX = Math.min(left, right);
+          const rectW = Math.abs(right - left);
+          const rectY = Math.min(topY, bottomY);
+          const rectH = Math.abs(bottomY - topY);
+          nodes.push(
+            <rect key={`${elementKey}-${i}`} x={rectX} y={rectY} width={rectW} height={rectH} fill={`${fill}33`} stroke={stroke} strokeWidth={0.7} />
+          );
+        }
+        break;
+      }
+      case "region": {
+        const rx0 = scalarAt(element.x0);
+        const rx1 = scalarAt(element.x1);
+        if (rx0 === null || rx1 === null) break;
+        const steps = 64;
+        const top: [number, number][] = [];
+        const bottom: [number, number][] = [];
+        for (let i = 0; i <= steps; i += 1) {
+          const x = rx0 + ((rx1 - rx0) * i) / steps;
+          const ty = evalExpr(element.topExpression, x);
+          const by = element.bottomExpression ? evalExpr(element.bottomExpression, x) : 0;
+          if (ty === null || by === null) continue;
+          top.push(project(x, ty));
+          bottom.push(project(x, by));
+        }
+        if (top.length < 2) break;
+        const pts = [...top, ...bottom.reverse()].map(([x, y]) => `${x},${y}`).join(" ");
+        nodes.push(<polygon key={elementKey} points={pts} fill={`${color}30`} stroke="none" />);
+        break;
+      }
+      case "arrow": {
+        const from = pointAt(element.from);
+        const to = pointAt(element.to);
+        if (!from || !to) break;
+        const [fx, fy] = from;
+        const [tx, ty] = to;
+        const angle = Math.atan2(ty - fy, tx - fx);
+        const head = 4;
+        nodes.push(<line key={`${elementKey}-shaft`} x1={fx} y1={fy} x2={tx} y2={ty} stroke={color} strokeWidth={1.3} />);
+        nodes.push(
+          <line
+            key={`${elementKey}-head-a`}
+            x1={tx} y1={ty}
+            x2={tx - head * Math.cos(angle - Math.PI / 6)} y2={ty - head * Math.sin(angle - Math.PI / 6)}
+            stroke={color} strokeWidth={1.3} strokeLinecap="round"
+          />
+        );
+        nodes.push(
+          <line
+            key={`${elementKey}-head-b`}
+            x1={tx} y1={ty}
+            x2={tx - head * Math.cos(angle + Math.PI / 6)} y2={ty - head * Math.sin(angle + Math.PI / 6)}
+            stroke={color} strokeWidth={1.3} strokeLinecap="round"
+          />
+        );
+        const label = labelText(element.label);
+        if (label) {
+          nodes.push(
+            <text key={`${elementKey}-label`} x={(fx + tx) / 2} y={(fy + ty) / 2 - 3} textAnchor="middle" fontSize={6} fill={color} fontFamily="monospace">
+              {label}
+            </text>
+          );
+        }
+        break;
+      }
+      case "label": {
+        const at = pointAt(element.at);
+        if (!at) break;
+        const text = labelText(element.text);
+        if (!text) break;
+        const ox = element.offset?.x ?? 0;
+        const oy = element.offset?.y ?? 0;
+        const anchor = element.anchor ?? "start";
+        nodes.push(
+          <text key={elementKey} x={at[0] + ox} y={at[1] + oy} textAnchor={anchor} fontSize={6} fill={color} opacity={0.9} fontFamily="monospace">
+            {text}
+          </text>
+        );
+        break;
+      }
+    }
+  });
+
+  return (
+    <svg
+      viewBox={`0 0 ${SCENE_W} ${SCENE_H}`}
+      className="block h-auto w-full"
+      preserveAspectRatio="xMidYMid meet"
+      data-scene-frame={`${SCENE_W}x${SCENE_H}`}
+    >
+      {nodes}
+    </svg>
+  );
+}
+
 /**
  * Animation as an instrument of inquiry rather than a video.
  *
@@ -740,16 +1505,29 @@ const ANIMATION_SPEEDS = [0.5, 1, 2] as const;
  * author deliberately withheld.
  */
 function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & { intent: Extract<WidgetIntent, { kind: "animation" }> }) {
+  // Restored sessions can hand non-finite progress through older saves; clamp
+  // once so every downstream index (frames, checkpoints, head) stays defined.
+  const initialProgress = Number.isFinite(state.animationProgress)
+    ? Math.min(1, Math.max(0, state.animationProgress as number))
+    : 0;
   const [playing, setPlaying] = useState(false);
-  const [progress, setProgress] = useState(state.animationProgress ?? 0);
+  const [progress, setProgress] = useState(initialProgress);
   const [rate, setRate] = useState(1);
-  const baseDuration = intent.durationMs ?? Math.max(1600, intent.frames.length * 1200);
-  const duration = baseDuration / rate;
+  const frames = intent.frames.length > 0 ? intent.frames : [{ id: "empty", caption: "" }];
+  const baseDuration = intent.durationMs ?? Math.max(1600, frames.length * 1200);
+  const duration = baseDuration / Math.max(0.25, rate || 1);
   const rafRef = useRef<number | null>(null);
   const startRef = useRef(0);
 
+  // Keep local playhead aligned when the board rehydrates state from disk.
+  useEffect(() => {
+    if (!Number.isFinite(state.animationProgress)) return;
+    const next = Math.min(1, Math.max(0, state.animationProgress as number));
+    setProgress((current) => (Math.abs(current - next) > 1e-6 ? next : current));
+  }, [state.animationProgress]);
+
   const checkpoints = useMemo(
-    () => [...(intent.checkpoints ?? [])].sort((a, b) => a.at - b.at),
+    () => [...(intent.checkpoints ?? [])].filter((c) => c && typeof c.at === "number" && Number.isFinite(c.at)).sort((a, b) => a.at - b.at),
     [intent.checkpoints]
   );
   const controls = intent.controls ?? {};
@@ -761,14 +1539,16 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
   // whole difference between predicting and describing.
   const locked = predictionRequired && !predictionCommitted;
 
+  const safeProgress = Number.isFinite(progress) ? Math.min(1, Math.max(0, progress)) : 0;
+
   /** The first checkpoint at or before the playhead that is still unanswered. */
   const pendingCheckpoint = useMemo(
-    () => checkpoints.find((checkpoint) => progress >= checkpoint.at - 1e-6 && !responses[checkpoint.id]) ?? null,
-    [checkpoints, progress, responses]
+    () => checkpoints.find((checkpoint) => safeProgress >= checkpoint.at - 1e-6 && !responses[checkpoint.id]) ?? null,
+    [checkpoints, safeProgress, responses]
   );
 
   const allCheckpointsAnswered = checkpoints.every((checkpoint) => Boolean(responses[checkpoint.id]));
-  const finished = progress >= 1 - 1e-6;
+  const finished = safeProgress >= 1 - 1e-6;
   const observationComplete = finished && allCheckpointsAnswered;
 
   // A looping animation never finishes, so it can never reach reconciliation.
@@ -777,14 +1557,14 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
 
   useEffect(() => {
     if (!playing || locked || pendingCheckpoint) return;
-    startRef.current = performance.now() - progress * duration;
+    startRef.current = performance.now() - safeProgress * duration;
     const tick = (now: number) => {
       const next = (now - startRef.current) / duration;
 
       // Halt at the next checkpoint the playhead is about to cross. The learner
       // answers at the moment the thing happens, not in recollection afterwards.
       const upcoming = checkpoints.find(
-        (checkpoint) => !responses[checkpoint.id] && checkpoint.at > progress + 1e-6 && checkpoint.at <= next
+        (checkpoint) => !responses[checkpoint.id] && checkpoint.at > safeProgress + 1e-6 && checkpoint.at <= next
       );
       if (upcoming) {
         setProgress(upcoming.at);
@@ -812,7 +1592,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
     return () => {
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
-    // `progress` is intentionally excluded: it is the animation's own output.
+    // `safeProgress` is intentionally excluded: it is the animation's own output.
   }, [playing, duration, mayLoop, locked, pendingCheckpoint, checkpoints, responses]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => {
@@ -826,7 +1606,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
   };
 
   const seek = (target: number) => {
-    const next = clampToCheckpoint(Math.min(1, Math.max(0, target)));
+    const next = clampToCheckpoint(Math.min(1, Math.max(0, Number.isFinite(target) ? target : 0)));
     setPlaying(false);
     setProgress(next);
     emit({ animationProgress: next });
@@ -838,38 +1618,155 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
     });
   };
 
-  const frameIndex = Math.min(intent.frames.length - 1, Math.floor(progress * intent.frames.length));
-  const frame = intent.frames[frameIndex];
+  const frameIndex = Math.min(frames.length - 1, Math.max(0, Math.floor(safeProgress * frames.length)));
+  const frame = frames[frameIndex] ?? frames[0];
 
-  const path = useMemo(() => {
+  // The motion scene: the sampled path, the agent's guide curve (the graph the
+  // motion happens over), and the coordinate frame itself. An animation about
+  // positions on a graph must SHOW the graph — a dot drifting over emptiness
+  // teaches motion, not the mathematics it moves through. With a zExpression
+  // the scene is 3D and renders in an isometric view over a floor grid.
+  const scene = useMemo(() => {
     const motion = intent.motion;
     if (!motion) return null;
     const [t0, t1] = motion.tDomain;
     const samples = 96;
-    const pts: [number, number][] = [];
-    for (let i = 0; i <= samples; i += 1) {
-      const t = t0 + ((t1 - t0) * i) / samples;
-      const x = evaluateReadout(motion.xExpression, { t });
-      const y = evaluateReadout(motion.yExpression, { t });
-      if (x === null || y === null) continue;
-      pts.push([x, y]);
-    }
-    if (pts.length < 2) return null;
-    const xs = pts.map(([x]) => x);
-    const ys = pts.map(([, y]) => y);
+    const is3d = typeof motion.zExpression === "string" && motion.zExpression.trim().length > 0;
+
+    const sample = (xExpr: string, yExpr: string, zExpr?: string): [number, number, number][] => {
+      const pts: [number, number, number][] = [];
+      for (let i = 0; i <= samples; i += 1) {
+        const t = t0 + ((t1 - t0) * i) / samples;
+        const x = evaluateReadout(xExpr, { t });
+        const y = evaluateReadout(yExpr, { t });
+        const z = zExpr ? evaluateReadout(zExpr, { t }) : 0;
+        if (x === null || y === null || z === null) continue;
+        pts.push([x, y, z]);
+      }
+      return pts;
+    };
+
+    const pathPts = sample(motion.xExpression, motion.yExpression, is3d ? motion.zExpression : undefined);
+    if (pathPts.length < 2) return null;
+    const guidePts = motion.guideXExpression && motion.guideYExpression
+      ? sample(motion.guideXExpression, motion.guideYExpression)
+      : [];
+    const world = [...pathPts, ...guidePts];
+
+    const xs = world.map((p) => p[0]);
+    const ys = world.map((p) => p[1]);
+    const zs = world.map((p) => p[2]);
     const xMin = Math.min(...xs), xMax = Math.max(...xs);
     const yMin = Math.min(...ys), yMax = Math.max(...ys);
-    const spanX = Math.max(1e-6, xMax - xMin);
-    const spanY = Math.max(1e-6, yMax - yMin);
-    const project = ([x, y]: [number, number]): [number, number] => [
-      6 + ((x - xMin) / spanX) * 208,
-      56 - ((y - yMin) / spanY) * 46,
+    const zMin = Math.min(...zs), zMax = Math.max(...zs);
+
+    if (!is3d) {
+      // Pad the data extents a touch so the moving point and guide never sit
+      // on the frame edge, then fit isotropically so a unit circle stays round.
+      const padDataX = Math.max(0.15, (xMax - xMin) * 0.08);
+      const padDataY = Math.max(0.15, (yMax - yMin) * 0.08);
+      const frame = fitSceneFrame(xMin - padDataX, xMax + padDataX, yMin - padDataY, yMax + padDataY);
+      const project = ([x, y]: [number, number, number]): [number, number] => projectInFrame(frame, x, y);
+      const xTicks = generateAxisTicks(frame.x0, frame.x0 + frame.plotW / frame.unit, 4);
+      const yTicks = generateAxisTicks(frame.y0, frame.y0 + frame.plotH / frame.unit, 3);
+      const xAxisY = yMin - padDataY <= 0 && yMax + padDataY >= 0 ? project([0, 0, 0])[1] : null;
+      const yAxisX = xMin - padDataX <= 0 && xMax + padDataX >= 0 ? project([0, 0, 0])[0] : null;
+      return {
+        kind: "2d" as const,
+        W: frame.W,
+        H: frame.H,
+        padL: frame.padL,
+        padR: frame.padR,
+        padB: frame.padB,
+        plotLeft: frame.originX,
+        plotRight: frame.originX + frame.plotW,
+        plotTop: frame.originY,
+        plotBottom: frame.originY + frame.plotH,
+        pts: pathPts.map(project),
+        guide: guidePts.map(project),
+        xTicks: xTicks.map((value) => ({ value, x: project([value, 0, 0])[0] })),
+        yTicks: yTicks.map((value) => ({ value, y: project([0, value, 0])[1] })),
+        xAxisY,
+        yAxisX,
+      };
+    }
+
+    // Isometric projection: x runs down-right, y runs down-left, z rises. The
+    // floor plane (z = floor) is drawn as a gridded parallelogram so the path
+    // has somewhere to "stand"; everything normalizes into the box with margin.
+    const COS30 = Math.cos(Math.PI / 6);
+    const SQUASH = 0.55;
+    const zFloor = Math.min(0, zMin);
+    const zCeil = Math.max(zMax, zFloor + 1e-6);
+    const isoRaw = ([x, y, z]: [number, number, number]): [number, number] => [
+      (x - y) * COS30,
+      (x + y) * COS30 * SQUASH - z,
     ];
-    return { pts: pts.map(project), raw: pts, project };
+    const corners = [
+      isoRaw([xMin, yMin, zFloor]),
+      isoRaw([xMax, yMin, zFloor]),
+      isoRaw([xMax, yMax, zFloor]),
+      isoRaw([xMin, yMax, zFloor]),
+      isoRaw([xMin, yMin, zCeil]),
+      isoRaw([xMax, yMax, zCeil]),
+    ];
+    const sxs = corners.map((c) => c[0]);
+    const sys = corners.map((c) => c[1]);
+    const sMinX = Math.min(...sxs), sMaxX = Math.max(...sxs);
+    const sMinY = Math.min(...sys), sMaxY = Math.max(...sys);
+    // Keep isometric extents on a shared unit so the floor parallelogram is
+    // not squashed when the host is wider than tall.
+    const spanSX = Math.max(1e-6, sMaxX - sMinX);
+    const spanSY = Math.max(1e-6, sMaxY - sMinY);
+    const unit = Math.min(SCENE_PLOT_BUDGET / spanSX, SCENE_PLOT_BUDGET / spanSY);
+    const plotW = spanSX * unit;
+    const plotH = spanSY * unit;
+    const pad = 16;
+    const W = Math.round(plotW + 2 * pad);
+    const H = Math.round(plotH + 2 * pad);
+    const project = (p: [number, number, number]): [number, number] => {
+      const [sx, sy] = isoRaw(p);
+      return [pad + (sx - sMinX) * unit, pad + (sy - sMinY) * unit];
+    };
+    // Floor grid: the parallelogram rim plus two interior lines per direction.
+    const floorFrame = [
+      [xMin, yMin], [xMax, yMin], [xMax, yMax], [xMin, yMax], [xMin, yMin],
+    ].map(([x, y]) => project([x, y, zFloor]));
+    const gridLines: [number, number][][] = [];
+    for (const f of [1 / 3, 2 / 3]) {
+      gridLines.push([project([xMin + (xMax - xMin) * f, yMin, zFloor]), project([xMin + (xMax - xMin) * f, yMax, zFloor])]);
+      gridLines.push([project([xMin, yMin + (yMax - yMin) * f, zFloor]), project([xMax, yMin + (yMax - yMin) * f, zFloor])]);
+    }
+    // Vertical posts at the near-left and apex corners give the z axis scale.
+    const zPosts = [
+      [project([xMin, yMin, zFloor]), project([xMin, yMin, zCeil])],
+      [project([xMax, yMax, zFloor]), project([xMax, yMax, zCeil])],
+    ];
+    return {
+      kind: "3d" as const,
+      W,
+      H,
+      pts: pathPts.map(project),
+      guide: guidePts.map((p) => project([p[0], p[1], zFloor] as [number, number, number])),
+      floorFrame,
+      gridLines,
+      zPosts,
+    };
   }, [intent.motion]);
 
-  const headIndex = path ? Math.min(path.pts.length - 1, Math.round(progress * (path.pts.length - 1))) : 0;
-  const head = path?.pts[headIndex];
+  // The playhead position is EASED time → eased distance: linear reads as a
+  // ticker, smooth reads as moving. Checkpoints stay on raw time, so easing
+  // never shifts when a halt lands. Unknown easing from an older build falls
+  // back to smooth rather than throwing on a missing table entry.
+  const ease = MOTION_EASING[intent.motion?.easing ?? "smooth"] ?? MOTION_EASING.smooth;
+  const easedProgress = ease(safeProgress);
+  const headIndex = scene ? Math.min(scene.pts.length - 1, Math.round(easedProgress * (scene.pts.length - 1))) : 0;
+  const head = scene?.pts[headIndex];
+
+  // The guide graph writes itself on during the opening 18% of playback —
+  // Manim's Create — then lives as the solid reference the motion rides.
+  const guideWriteOn = intent.motion?.guideWriteOn !== false;
+  const guideReveal = Math.min(1, safeProgress / 0.18);
 
   return (
     <div>
@@ -892,11 +1789,83 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
         </div>
       ) : null}
 
-      <div className="relative mb-2 h-[62px] overflow-hidden rounded" style={{ background: "rgba(0,0,0,0.18)" }}>
-        {path ? (
-          <svg viewBox="0 0 220 62" className="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+      <div
+        className="relative mb-2 overflow-hidden rounded"
+        style={{ background: "rgba(0,0,0,0.18)" }}
+        data-motion-scene={intent.scene ? "scene" : scene ? scene.kind : undefined}
+      >
+        {intent.scene ? (
+          <SceneFigure scene={intent.scene} progress={safeProgress} chalk={chalk} accent={accent} />
+        ) : scene ? (
+          <svg
+            viewBox={`0 0 ${scene.W} ${scene.H}`}
+            className="block h-auto w-full"
+            preserveAspectRatio="xMidYMid meet"
+            data-scene-frame={`${scene.W}x${scene.H}`}
+          >
+            {scene.kind === "2d" ? (
+              <>
+                {/* coordinate frame: faint tick grid, slightly stronger axes */}
+                {scene.xTicks.map((tick) => (
+                  <g key={`x-${tick.value}`}>
+                    <line x1={tick.x} y1={scene.plotTop} x2={tick.x} y2={scene.plotBottom} stroke={`${chalk}14`} strokeWidth={0.6} />
+                    <text x={tick.x} y={scene.H - 6} textAnchor="middle" fontSize={7} fill={chalk} opacity={0.5} fontFamily="monospace">
+                      {tick.value}
+                    </text>
+                  </g>
+                ))}
+                {scene.yTicks.map((tick) => (
+                  <g key={`y-${tick.value}`}>
+                    <line x1={scene.plotLeft} y1={tick.y} x2={scene.plotRight} y2={tick.y} stroke={`${chalk}14`} strokeWidth={0.6} />
+                    <text x={scene.padL - 4} y={tick.y + 2.5} textAnchor="end" fontSize={7} fill={chalk} opacity={0.5} fontFamily="monospace">
+                      {tick.value}
+                    </text>
+                  </g>
+                ))}
+                {scene.xAxisY !== null ? <line x1={scene.plotLeft} y1={scene.xAxisY} x2={scene.plotRight} y2={scene.xAxisY} stroke={`${chalk}3d`} strokeWidth={0.9} /> : null}
+                {scene.yAxisX !== null ? <line x1={scene.yAxisX} y1={scene.plotTop} x2={scene.yAxisX} y2={scene.plotBottom} stroke={`${chalk}3d`} strokeWidth={0.9} /> : null}
+              </>
+            ) : (
+              <>
+                {/* isometric floor grid + z posts: the 3D graph's frame */}
+                <polyline
+                  points={scene.floorFrame.map(([x, y]) => `${x},${y}`).join(" ")}
+                  fill="none"
+                  stroke={`${chalk}2e`}
+                  strokeWidth={0.9}
+                />
+                {scene.gridLines.map((line, i) => (
+                  <line key={i} x1={line[0][0]} y1={line[0][1]} x2={line[1][0]} y2={line[1][1]} stroke={`${chalk}16`} strokeWidth={0.6} />
+                ))}
+                {scene.zPosts.map((line, i) => (
+                  <line key={`z-${i}`} x1={line[0][0]} y1={line[0][1]} x2={line[1][0]} y2={line[1][1]} stroke={`${chalk}26`} strokeWidth={0.8} strokeDasharray="2 2.5" />
+                ))}
+              </>
+            )}
+            {/* The guide curve IS the graph the motion happens over — solid,
+                unmissable, behind the animated path. It writes itself on
+                during the opening stretch (Manim's Create), so the curve
+                *becomes* rather than just being there. */}
+            {scene.guide.length >= 2 ? (
+              (() => {
+                const length = polylineLength(scene.guide);
+                const writing = guideWriteOn && guideReveal < 1;
+                return (
+                  <polyline
+                    data-guide={guideWriteOn ? "write-on" : undefined}
+                    points={scene.guide.map(([x, y]) => `${x},${y}`).join(" ")}
+                    fill="none"
+                    stroke={`${chalk}99`}
+                    strokeWidth={1.6}
+                    strokeLinecap="round"
+                    strokeDasharray={writing ? length : undefined}
+                    strokeDashoffset={writing ? length * (1 - guideReveal) : undefined}
+                  />
+                );
+              })()
+            ) : null}
             <polyline
-              points={path.pts.map(([x, y]) => `${x},${y}`).join(" ")}
+              points={scene.pts.map(([x, y]) => `${x},${y}`).join(" ")}
               fill="none"
               stroke={`${chalk}44`}
               strokeWidth={1.4}
@@ -904,7 +1873,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
             />
             {intent.motion?.trace ? (
               <polyline
-                points={path.pts.slice(0, headIndex + 1).map(([x, y]) => `${x},${y}`).join(" ")}
+                points={scene.pts.slice(0, headIndex + 1).map(([x, y]) => `${x},${y}`).join(" ")}
                 fill="none"
                 stroke={accent}
                 strokeWidth={1.8}
@@ -913,16 +1882,18 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
             {head ? <circle cx={head[0]} cy={head[1]} r={4} fill="#ff7a33" /> : null}
           </svg>
         ) : (
-          <div
-            className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full"
-            style={{ left: `calc(${progress * 100}% - 6px)`, background: "#ff7a33", boxShadow: "0 0 12px rgba(255,122,51,0.6)" }}
-          />
+          <div className="relative h-[62px] w-full">
+            <div
+              className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full"
+              style={{ left: `calc(${safeProgress * 100}% - 6px)`, background: "#ff7a33", boxShadow: "0 0 12px rgba(255,122,51,0.6)" }}
+            />
+          </div>
         )}
         {checkpoints.map((checkpoint) => (
           <i
             key={checkpoint.id}
             aria-hidden
-            className="absolute top-0 h-full w-px"
+            className="pointer-events-none absolute top-0 h-full w-px"
             style={{
               left: `${checkpoint.at * 100}%`,
               background: responses[checkpoint.id] ? `${chalk}33` : "#ff7a3399",
@@ -965,16 +1936,16 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
               type="button"
               disabled={readOnly || locked || frameIndex === 0}
               aria-label="Step back one frame"
-              onClick={() => seek((frameIndex - 1) / intent.frames.length)}
+              onClick={() => seek((frameIndex - 1) / frames.length)}
               className="flex-none rounded px-1.5 py-0.5 font-mono text-[9px] hover:bg-white/10 disabled:opacity-30"
             >
               ‹
             </button>
             <button
               type="button"
-              disabled={readOnly || locked || frameIndex >= intent.frames.length - 1}
+              disabled={readOnly || locked || frameIndex >= frames.length - 1}
               aria-label="Step forward one frame"
-              onClick={() => seek((frameIndex + 1) / intent.frames.length)}
+              onClick={() => seek((frameIndex + 1) / frames.length)}
               className="flex-none rounded px-1.5 py-0.5 font-mono text-[9px] hover:bg-white/10 disabled:opacity-30"
             >
               ›
@@ -988,7 +1959,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
             min={0}
             max={1}
             step={0.01}
-            value={progress}
+            value={safeProgress}
             disabled={readOnly || locked}
             aria-label="Scrub animation"
             onChange={(event) => seek(Number(event.target.value))}
@@ -997,7 +1968,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
           />
         ) : (
           <div className="h-[3px] flex-1 overflow-hidden rounded-full" style={{ background: "rgba(255,255,255,0.1)" }}>
-            <i className="block h-full" style={{ width: `${progress * 100}%`, background: accent }} />
+            <i className="block h-full" style={{ width: `${safeProgress * 100}%`, background: accent }} />
           </div>
         )}
 
@@ -1019,7 +1990,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
         {controls.replay ? (
           <button
             type="button"
-            disabled={readOnly || locked || progress === 0}
+            disabled={readOnly || locked || safeProgress === 0}
             aria-label="Replay from the start"
             onClick={() => seek(0)}
             className="flex-none rounded px-1.5 py-0.5 text-[9px] hover:bg-white/10 disabled:opacity-30"
@@ -1028,17 +1999,20 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
           </button>
         ) : null}
 
-        <span className="font-mono text-[9px] opacity-45">{frameIndex + 1}/{intent.frames.length}</span>
+        <span className="font-mono text-[9px] opacity-45">{frameIndex + 1}/{frames.length}</span>
       </div>
 
-      <div className="mt-2 min-h-[32px]">
-        <p className="m-0 text-[10.5px] opacity-80">{frame.caption}</p>
-        {frame.latex ? <div className="mt-1"><TexBlock tex={frame.latex} color={chalk} size={16} /></div> : null}
+      {/* Caption and its equation read as one beat. The padding guards the
+          display-math descenders so the linked-representation chips can no
+          longer collide with them. */}
+      <div className="mt-2 space-y-1.5 pb-1">
+        <p className="m-0 text-[10.5px] leading-relaxed opacity-80">{frame?.caption ?? ""}</p>
+        {frame?.latex ? <TexBlock tex={frame.latex} color={chalk} size={16} /> : null}
       </div>
 
       {/* Representations held in sync, so the same change is read two ways. */}
       {intent.linkedRepresentations?.length ? (
-        <div className="mt-2 grid gap-1">
+        <div className="mt-3 grid gap-1.5">
           {intent.linkedRepresentations.map((linked) => (
             <div
               key={linked.id}
@@ -1122,10 +2096,19 @@ function CheckpointAnswer({
 }) {
   const [draft, setDraft] = useState("");
 
+  // Same anti-position-gaming shuffle as the question widget, seeded per
+  // checkpoint so each halt keeps a stable order of its own.
+  const authored = checkpoint.options ?? [];
+  const shownOptions = useMemo(
+    () => shuffleSeeded(authored, optionsSeedKey(checkpoint.id, authored)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [authored, checkpoint.id]
+  );
+
   if (checkpoint.options?.length) {
     return (
       <div className="grid gap-1.5">
-        {checkpoint.options.map((option) => (
+        {shownOptions.map((option) => (
           <button
             key={option.id}
             type="button"
@@ -1242,6 +2225,44 @@ function ComparisonBody({ intent, chalk, accent }: BodyProps & { intent: Extract
 
 /* ── 9 · Question · 17 · Retrieval Check ── */
 
+/**
+ * Fisher–Yates over a content-derived seed: one stable permutation per option
+ * set, identical across re-renders, restored sessions and reloads.
+ *
+ * The agent reliably writes the correct answer first (it drafts options in
+ * priority order), so an unshuffled multiple-choice widget legibly marks the
+ * answer as "A" every time — learners figure that out in one afternoon. The
+ * seed comes from the option ids themselves, so a re-sent intent with the same
+ * options keeps the same order and committed picks never visually migrate.
+ *
+ * Exported for unit testing.
+ */
+export function shuffleSeeded<T>(items: T[], seedKey: string): T[] {
+  if (items.length < 2) return items;
+  let seed = 2166136261 >>> 0; // FNV-1a offset basis
+  for (let i = 0; i < seedKey.length; i++) {
+    seed = Math.imul(seed ^ seedKey.charCodeAt(i), 16777619) >>> 0;
+  }
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    // xorshift: advance the deterministic stream.
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    seed >>>= 0;
+    const j = seed % (i + 1);
+    const tmp = out[i];
+    out[i] = out[j];
+    out[j] = tmp;
+  }
+  return out;
+}
+
+/** The stable permutation key for an option set: widget identity + option ids. */
+function optionsSeedKey(ownerId: string, options: readonly { id: string }[]): string {
+  return `${ownerId}|${options.map((option) => option.id).join("|")}`;
+}
+
 function AnswerableBody({
   intent,
   chalk,
@@ -1261,6 +2282,17 @@ function AnswerableBody({
 
   const chosen = intent.options?.find((option) => option.id === state.selectedOptionId);
 
+  // Display order is a seeded shuffle of the authored order — grading and
+  // persisted state still key on option id, only the letter positions move.
+  const authoredOptions = intent.options ?? [];
+  const shownOptions = useMemo(
+    () => shuffleSeeded(authoredOptions, optionsSeedKey(intent.id ?? intent.prompt, authoredOptions)),
+    // The seed is content-derived, so a rebuilt intent with the same options
+    // lands on the same permutation anyway; the array identity dep just debounces.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [authoredOptions, intent.id, intent.prompt]
+  );
+
   return (
     <div>
       {isRetrieval && "source" in intent && intent.source ? (
@@ -1272,7 +2304,7 @@ function AnswerableBody({
 
       {intent.format === "multiple_choice" ? (
         <div className="grid gap-1.5">
-          {(intent.options ?? []).map((option, index) => {
+          {shownOptions.map((option, index) => {
             const picked = state.selectedOptionId === option.id;
             const showAsCorrect = submitted && option.correct === true;
             const showAsWrong = submitted && picked && option.correct !== true;

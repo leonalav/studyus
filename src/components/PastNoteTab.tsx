@@ -24,6 +24,7 @@ import {
   getSnapshotVerticalRange,
   moveSnapshotY,
 } from "../lib/pastNoteSnapshot";
+import { collectBoardStrokes } from "../lib/boardPagination";
 
 interface Props {
   sessionId: string;
@@ -161,7 +162,7 @@ export function PastNoteTab({ sessionId, onNotify, onReopen }: Props) {
         <BoardSnapshot
           board={board}
           view={session.viewMap[board.id] ?? DEFAULT_VIEW}
-          strokes={session.strokeMap[board.id] ?? []}
+          strokes={collectBoardStrokes(session.strokeMap, board.id)}
           themeId={theme.id}
           fontCss={fontCss}
           fontScale={appearance.fontScale}

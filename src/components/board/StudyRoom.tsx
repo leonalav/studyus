@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { Chalkboard, THEMES, FONTS, type BoardTheme, type BoardView, type Stroke } from "./Chalkboard";
 import { getVisualizationPrewarmTargets, prewarmVisualizationAdapters } from "./VisualizationSurface";
 import { BoardToolbar, type PanelId, type PenTool } from "./BoardToolbar";
@@ -30,6 +31,12 @@ import {
   getActivityForBlock,
   getLatestSessionActivity,
 } from "../../lib/learning/store";
+import {
+  clampPageSize,
+  collectBoardStrokes,
+  migrateStrokeMapForPaginationToggle,
+  resolveLiveBoardStrokes,
+} from "../../lib/boardPagination";
 import { WIDGET_LABEL, type WidgetIntent, type WidgetState } from "../../lib/widgets/types";
 import {
   askTutorTurn,
@@ -43,7 +50,7 @@ import {
 } from "../../lib/tutor";
 import { ContextMenu, ContextMenuTarget } from "../ContextMenu";
 import { toPng } from "html-to-image";
-import { saveStudySession, type StoredStudySession } from "../../state/studySessionStore";
+import { hydrateStudyBoards, saveStudySession, type StoredStudySession } from "../../state/studySessionStore";
 import type { OnboardingAnswers } from "../../data/tutor";
 import { ErrorBoundary } from "../ErrorBoundary";
 import {
@@ -73,7 +80,13 @@ interface Props {
 }
 
 export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding, onLeave, notify }: Props) {
-  const [boards, setBoards] = useState<BoardDoc[]>(initialSession?.boards ?? [initialBoard]);
+  // Hydrate on first paint so a restored Past Note never mounts a widget whose
+  // state/intent still carries a one-throw-away payload from an older save.
+  const [boards, setBoards] = useState<BoardDoc[]>(() => {
+    const source = initialSession?.boards ?? [initialBoard];
+    const hydrated = hydrateStudyBoards(source);
+    return hydrated.length > 0 ? hydrated : [initialBoard];
+  });
   /** Latest boards, readable from callbacks that must not re-bind whenever the
    *  board changes (every board op would otherwise rebuild them). */
   const boardsRef = useRef(boards);
@@ -90,6 +103,41 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
     setBoardRevertsWithMessageState(next);
     const current = loadPreferences();
     savePreferences({ ...current, appearance: { ...current.appearance, boardRevertsWithMessage: next } });
+  }, []);
+  // Pagination is board-render behaviour, so it lives beside
+  // boardRevertsWithMessage in appearance rather than in the per-session
+  // appearance blob: the learner's page density is a habit, not a property
+  // of one lesson.
+  const [boardPagination, setBoardPaginationState] = useState(
+    () => loadPreferences().appearance.boardPagination
+  );
+  const [boardPageSize, setBoardPageSizeState] = useState(
+    () => loadPreferences().appearance.boardPageSize
+  );
+  const setBoardPagination = useCallback((next: boolean) => {
+    setBoardPaginationState((wasOn) => {
+      if (wasOn !== next) {
+        // Migrate bare ↔ #p0 so enabling/disabling pagination cannot orphan the
+        // ink that is currently on screen. Later pages stay under #pN keys.
+        setStrokeMap((current) => {
+          const fromBoards = boardsRef.current.map((b) => b.id);
+          const fromKeys = Object.keys(current)
+            .map((key) => key.replace(/#p\d+$/, ""))
+            .filter((id, index, all) => all.indexOf(id) === index);
+          const ids = fromBoards.length > 0 ? fromBoards : fromKeys;
+          return migrateStrokeMapForPaginationToggle(current, ids, next) as Record<string, Stroke[]>;
+        });
+      }
+      return next;
+    });
+    const current = loadPreferences();
+    savePreferences({ ...current, appearance: { ...current.appearance, boardPagination: next } });
+  }, []);
+  const setBoardPageSize = useCallback((next: number) => {
+    const size = clampPageSize(next);
+    setBoardPageSizeState(size);
+    const current = loadPreferences();
+    savePreferences({ ...current, appearance: { ...current.appearance, boardPageSize: size } });
   }, []);
   const [written, setWritten] = useState<Set<string>>(new Set((initialSession?.boards ?? []).map((item) => item.id)));
 
@@ -143,6 +191,8 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
       // from the main Settings modal while a board is open.
       if (next?.appearance) {
         setBoardRevertsWithMessageState(next.appearance.boardRevertsWithMessage);
+        setBoardPaginationState(next.appearance.boardPagination);
+        setBoardPageSizeState(next.appearance.boardPageSize);
       }
     };
     window.addEventListener(PREFERENCES_CHANGED_EVENT, onPreferencesChanged);
@@ -304,28 +354,124 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   };
 
   const captureActive = useCallback(async () => {
+    const captureOpts = {
+      cacheBust: true,
+      pixelRatio: 0.45,
+      skipFonts: true,
+      backgroundColor: theme.swatch,
+    } as const;
+
+    // Pagination slices the live chalkboard to the active page. Thread
+    // thumbnails and whole-board exports must see every block, so when pages
+    // are on we render a temporary non-paginated read-only board offscreen
+    // and capture that instead of the viewport root.
+    if (boardPagination) {
+      const host = document.createElement("div");
+      host.setAttribute("aria-hidden", "true");
+      host.style.cssText =
+        "position:fixed;left:-10000px;top:0;width:960px;height:1400px;opacity:0;pointer-events:none;overflow:hidden;";
+      document.body.appendChild(host);
+      const root = createRoot(host);
+      try {
+        const fullStrokes = collectBoardStrokes(strokeMap, activeId);
+        await new Promise<void>((resolve) => {
+          root.render(
+            createElement(
+              "div",
+              { style: { width: "100%", height: "100%" } },
+              createElement(Chalkboard, {
+                board,
+                theme,
+                fontCss,
+                fontScale,
+                writing: false,
+                latex,
+                onAsk: () => {},
+                annotating: false,
+                penColor,
+                penTool: "pen",
+                strokesKey: `capture-${activeId}`,
+                initialView: viewMap[activeId] ?? { x: 48, y: 36, s: 1 },
+                initialStrokes: fullStrokes,
+                paginate: false,
+                readOnly: true,
+              })
+            )
+          );
+          // Let layout settle before html-to-image walks the tree.
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        });
+        const image = await toPng(host.firstElementChild as HTMLElement, captureOpts);
+        setPreviews((current) => ({ ...current, [activeId]: image }));
+      } catch {
+        // Threads has a content-based fallback if a browser blocks DOM capture.
+      } finally {
+        root.unmount();
+        host.remove();
+      }
+      return;
+    }
+
     const node = boardRootRef.current;
     if (!node) return;
     try {
-      const image = await toPng(node, {
-        cacheBust: true,
-        pixelRatio: 0.45,
-        skipFonts: true,
-        backgroundColor: theme.swatch,
-      });
+      const image = await toPng(node, captureOpts);
       setPreviews((current) => ({ ...current, [activeId]: image }));
     } catch {
       // Threads has a content-based fallback if a browser blocks DOM capture.
     }
-  }, [activeId, theme.swatch]);
+  }, [
+    activeId,
+    board,
+    boardPagination,
+    fontCss,
+    fontScale,
+    latex,
+    penColor,
+    strokeMap,
+    theme,
+    viewMap,
+  ]);
 
   const saveView = useCallback((view: BoardView) => {
     setViewMap((current) => ({ ...current, [activeId]: view }));
   }, [activeId]);
 
+  const [boardPage, setBoardPage] = useState(0);
+  const handleBoardPageChange = useCallback((page: number) => setBoardPage(page), []);
+  // Chalkboard resets to page 0 on a board switch and reports it, but that
+  // report lands a commit later; resetting here keeps the ink key from
+  // pointing at the previous board's page for one frame.
+  useEffect(() => setBoardPage(0), [activeId]);
+
+  /* Annotation ink is captured in viewport coordinates (Chalkboard's
+     annDown uses clientX/clientY minus the canvas rect), so it is pinned to
+     the screen, not to the content beneath it. With pages, ink drawn over
+     page 1 would float over unrelated prose on page 2 — so ink belongs to
+     (board, page). With pagination off the key is the bare board id exactly
+     as before, which is why every saved session keeps its strokes. Changing
+     the page size re-partitions which blocks a page holds, so ink
+     re-associates rather than being destroyed. Read paths fall back across
+     bare ↔ #p0 so toggling pagination never blanks on-screen ink. */
+  const inkKey = boardPagination ? `${activeId}#p${boardPage}` : activeId;
+  const liveStrokes = resolveLiveBoardStrokes(strokeMap, activeId, {
+    paginate: boardPagination,
+    page: boardPage,
+  });
+
   const saveStrokes = useCallback((strokes: Stroke[]) => {
-    setStrokeMap((current) => ({ ...current, [activeId]: strokes }));
-  }, [activeId]);
+    setStrokeMap((current) => {
+      const next: Record<string, Stroke[]> = { ...current, [inkKey]: strokes };
+      // When writing page-0 ink under pagination, clear a stale bare-id copy so
+      // the next disable→enable cycle does not resurrect an older stroke set.
+      // When writing the bare id with pagination off, leave #pN alone so re-enabling
+      // can still surface later pages in Past Notes / page navigation.
+      if (boardPagination && boardPage === 0 && inkKey !== activeId) {
+        delete next[activeId];
+      }
+      return next;
+    });
+  }, [inkKey, boardPagination, boardPage, activeId]);
 
   // Persist interactive visualization state (e.g. dragged point positions) into
   // the owning block so it round-trips through the saved session. Visual state
@@ -747,6 +893,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           board,
           boundNodes: resolvedBoundNodes,
           onboarding: onboarding ?? undefined,
+          turnKind,
           learnerMessage: text,
           attachments: attachments.map((a) => ({
             name: a.name,
@@ -897,17 +1044,22 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   handleSendRef.current = handleSend;
 
   // A fresh chalkboard opens with a tutor greeting and the first lesson turn;
-  // restored sessions keep their existing transcript untouched.
+  // restored sessions keep their existing transcript untouched. When the
+  // learner just completed the intake form, the first turn leads with the
+  // syllabus fitted to their submitted answers rather than a generic opener.
   useEffect(() => {
     if (initialSession || greetedRef.current || greetAttempt > 2) return;
     greetedRef.current = true;
+    const hasIntakeAnswers = (onboarding?.answers ?? []).some((answer) => answer.answer.trim());
     void handleSend(
-      "Open the lesson with a brief welcome, then place the first teaching step or orientation on the chalkboard. Keep the chat response to a short greeting.",
+      hasIntakeAnswers
+        ? "The learner just submitted your intake form — their answers are in the session reminder. Before any teaching, designate the route: place the plan widget FIRST — a zero-to-mastery route built directly on all five of their intake answers, so the phases start where they actually stand — then the roadmap of where the lesson goes, and stop there. The learner must see how they will be taught before anything is taught. Teaching begins only when they agree to that plan (their \"Start learning\" is your go signal), and if they edit it first, the edited route is binding. Keep the chat message to a short greeting that reflects what they told you."
+        : "Open the lesson with a brief welcome, then place the first teaching step or orientation on the chalkboard. Keep the chat response to a short greeting.",
       undefined,
       false,
       { kind: "greeting" }
     );
-  }, [handleSend, initialSession, greetAttempt]);
+  }, [handleSend, initialSession, greetAttempt, onboarding]);
 
   /* markdown recording + export */
   const buildDoc = useCallback(() => {
@@ -921,6 +1073,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
       "---",
       "",
     ].join("\n");
+    // Whole boards, every page. Pagination is a render-time slice inside
+    // Chalkboard and never reaches board.blocks; exporting the current page
+    // would silently hand the learner a fraction of their own lesson.
     const body = boards.map(boardToMarkdown).join("\n\n---\n\n");
     const chat = messages.length
       ? "\n\n---\n\n## Chat transcript\n\n" + messages.map((m) => `**${m.role === "tutor" ? "Studyus" : "You"}:** ${m.text}`).join("\n\n")
@@ -994,15 +1149,18 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           annotating={panel === "annotate"}
           penColor={penColor}
           penTool={penTool}
-          strokesKey={board.id}
+          strokesKey={inkKey}
           onClearRef={(fn) => (clearInkRef.current = fn)}
           onRootRef={(node) => (boardRootRef.current = node)}
           initialView={viewMap[board.id]}
           onViewChange={saveView}
-          initialStrokes={strokeMap[board.id]}
+          initialStrokes={liveStrokes}
           onStrokesChange={saveStrokes}
           onBlockStateChange={saveBlockState}
           onWidgetStateChange={saveWidgetState}
+          paginate={boardPagination}
+          pageSize={boardPageSize}
+          onPageChange={handleBoardPageChange}
         />
         </ErrorBoundary>
       </div>
@@ -1098,6 +1256,10 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           setFontScale={setFontScale}
           latex={latex}
           setLatex={setLatex}
+          paginate={boardPagination}
+          setPaginate={setBoardPagination}
+          pageSize={boardPageSize}
+          setPageSize={setBoardPageSize}
           boardRevertsWithMessage={boardRevertsWithMessage}
           setBoardRevertsWithMessage={setBoardRevertsWithMessage}
           onClose={() => setPanel(null)}

@@ -65,6 +65,11 @@ export function shouldSignalTutor(
     case "scratchpad":
       return nowSubmitted && !wasSubmitted;
 
+    // The plan's "Start learning" IS the go signal the session-opening plan
+    // waits on; editing the plan without agreeing wakes no one.
+    case "plan":
+      return nowSubmitted && !wasSubmitted;
+
     // Exploration widgets. Moving a slider, playing an animation, opening a
     // hint or reading an annotation is thinking, not reporting, and must never
     // wake the tutor on its own. But when the agent attached a `respond`
@@ -223,6 +228,29 @@ export function buildWidgetSignalMessage(
       break;
     }
 
+    // The plan is the session-opening commitment device: agreement (with any
+    // learner edits) is the go signal the tutor waits on before teaching.
+    case "plan": {
+      const draft = state.planDraft;
+      const heading = draft?.heading ?? intent.heading;
+      const steps = draft?.steps ?? intent.steps;
+      lines.push(
+        draft
+          ? `I edited the proposed plan for "${heading}" and agreed to my version:`
+          : `I agree with the plan you proposed for "${heading}" — starting it now.`
+      );
+      steps.forEach((step, index) => {
+        const detail = step.details?.length ? ` — ${step.details.join("; ")}` : "";
+        lines.push(`${index + 1}. ${step.label}${detail}`);
+      });
+      lines.push(
+        draft
+          ? `[The route above is the one I signed off, edits included — teach to it. Begin at the first phase now, and if evidence later forces a revision, say what changed and why; the plan is ours, not yours alone.]`
+          : `[This is my go-ahead: teach to this route. Begin at the first phase now, and if evidence later forces you to revise the plan, say what changed and why; never teach silently around it.]`
+      );
+      break;
+    }
+
     default:
       lines.push(`I interacted with the ${label.toLowerCase()} on the board.`);
       break;
@@ -282,6 +310,10 @@ export function buildWidgetSignalDisplayText(intent: WidgetIntent, state: Widget
       return state.responseText?.trim()
         ? `Worked through the mistake check: "${truncate(state.responseText.trim())}"`
         : `Worked through the mistake check.`;
+    case "plan":
+      return state.planDraft
+        ? `Edited the plan and started learning: "${truncate(intent.heading)}"`
+        : `Agreed to the plan and started learning: "${truncate(intent.heading)}"`;
     case "slider":
     case "animation":
     case "hint":

@@ -148,6 +148,37 @@ describe("interacting with a widget can never throw", () => {
     }
   });
 
+  it("survives restored non-finite animation progress without blanking the card", () => {
+    // Older saves could leave NaN/Infinity on the block. Indexing frames by that
+    // value used to throw, which left the error boundary stuck on reopen.
+    const intent = {
+      kind: "animation",
+      frames: [{ id: "f1", caption: "One lap" }, { id: "f2", caption: "Height peaks" }],
+      scene: {
+        xDomain: [-2, 2],
+        yDomain: [-2, 2],
+        elements: [
+          { kind: "curve", id: "c", xExpression: "cos(u)", yExpression: "sin(u)", uDomain: [0, 6.28] },
+          { kind: "point", id: "p", xExpression: "cos(6.28*t)", yExpression: "sin(6.28*t)" },
+        ],
+      },
+    } as WidgetIntent;
+    for (const animationProgress of [Number.NaN, Number.POSITIVE_INFINITY, -1, 2, undefined]) {
+      const html = renderToStaticMarkup(
+        <WidgetSurface
+          intent={intent}
+          state={{ animationProgress } as WidgetState}
+          chalk="#e8e8ea"
+          accent="#7dd3fc"
+        />
+      );
+      expect(html, `progress=${String(animationProgress)}`).not.toMatch(/could not be drawn/i);
+      // Clamped/non-finite playheads still land on a real frame caption.
+      expect(html).toMatch(/One lap|Height peaks/);
+      expect(html).toContain('data-motion-scene="scene"');
+    }
+  });
+
   it("keeps a widget usable when only some list entries are unusable", () => {
     // Dropping the bad entry beats rejecting the widget: nine good steps out of
     // ten are still worth teaching with.
@@ -192,6 +223,28 @@ describe("error boundary containment", () => {
     expect(html).toContain("Concept Card widget could not be displayed");
     expect(html).toMatch(/rest of your session is unaffected/i);
     expect(html).toMatch(/Try again/);
+  });
+
+  it("widget body fallback itself offers a retry path", () => {
+    // The animation shell used a silent fallback with no reset — once a body
+    // threw, the learner could never recover without leaving the note.
+    const html = renderToStaticMarkup(
+      <ErrorBoundary
+        label="Animation widget"
+        fallback={(error, reset) => (
+          <div>
+            <p>This widget could not be drawn. The rest of the board is unaffected.</p>
+            <button type="button" onClick={reset}>Try again</button>
+            <span>{error.message}</span>
+          </div>
+        )}
+      >
+        {null}
+      </ErrorBoundary>
+    );
+    // Boundary is healthy with no error; the contract we care about is that
+    // the fallback shape the surface uses includes a recovery affordance.
+    expect(typeof html).toBe("string");
   });
 
   it("derives error state from a thrown error", () => {

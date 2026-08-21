@@ -1,59 +1,70 @@
 import { describe, it, expect } from "vitest";
-import { renderOnboardingQuestions, pairOnboardingReply } from "./tutor";
-import type { OnboardingQuestion } from "./tutor";
+import {
+  buildOnboardingReminder,
+  renderOnboardingReply,
+  visibleOnboardingQuestions,
+} from "./tutor";
+import type { OnboardingAnswers, OnboardingQuestion } from "./tutor";
 
 const questions: OnboardingQuestion[] = [
-  { id: "q1", question: "How comfortable are you with limits already?" },
-  { id: "q2", question: "Which part do you expect to trip you up?" },
-  { id: "q3", question: "Is there a deadline pushing this?" },
+  {
+    id: "q1",
+    question: "Have you met limits before today?",
+    kind: "choice",
+    options: ["Brand new", "Seen them once", "Comfortable with them"],
+  },
+  { id: "q2", question: "Which part do you expect to trip you up?", kind: "free", onlyIf: { questionId: "q1", anyOf: ["Seen them once", "Comfortable with them"] } },
+  { id: "q3", question: "Is there a deadline pushing this?", kind: "free" },
 ];
 
-describe("the counsellor's script is its own words", () => {
-  it("adds numbering and nothing else", () => {
-    const script = renderOnboardingQuestions("Let's get you set up.", questions);
-    expect(script).toContain("1. How comfortable are you with limits already?");
-    expect(script).toContain("3. Is there a deadline pushing this?");
-    expect(script.startsWith("Let's get you set up.")).toBe(true);
+describe("question constraints (onlyIf gates)", () => {
+  it("hides a gated question until its constraint answer lands", () => {
+    expect(visibleOnboardingQuestions(questions, {}).map((q) => q.id)).toEqual(["q1", "q3"]);
   });
 
-  it("no longer announces how many agents are bound", () => {
-    // This used to be appended by the app on every single session opener.
-    const script = renderOnboardingQuestions("Hello.", questions);
-    expect(script).not.toMatch(/agent/i);
-    expect(script).not.toMatch(/@ ?mention/i);
+  it("keeps the gate closed on a non-matching option", () => {
+    const draft = { q1: "Brand new" };
+    expect(visibleOnboardingQuestions(questions, draft).map((q) => q.id)).toEqual(["q1", "q3"]);
   });
 
-  it("no longer appends a fixed sign-off", () => {
-    // The invitation to answer and the permission to skip are now written by
-    // the counsellor as `closing`, so they can differ per learner.
-    const script = renderOnboardingQuestions("Hello.", questions);
-    expect(script).not.toMatch(/Feel free to skip/i);
-    expect(script).not.toMatch(/one answer per line/i);
-    expect(script).not.toMatch(/we'll begin/i);
-  });
-
-  it("ends on the last question when the counsellor wrote no closing", () => {
-    const script = renderOnboardingQuestions("Hello.", questions);
-    expect(script.trimEnd().endsWith("3. Is there a deadline pushing this?")).toBe(true);
+  it("opens the gate on a matching option, case-insensitively", () => {
+    const draft = { q1: " comfortable with them " };
+    expect(visibleOnboardingQuestions(questions, draft).map((q) => q.id)).toEqual(["q1", "q2", "q3"]);
   });
 });
 
-describe("pairing the learner's reply", () => {
-  it("matches answers to questions positionally and strips numbering", () => {
-    const paired = pairOnboardingReply("Limits", questions, "1. Fairly ok\n2. Epsilon-delta\n3. Friday");
-    expect(paired.answers.map((entry) => entry.answer)).toEqual(["Fairly ok", "Epsilon-delta", "Friday"]);
+describe("rendering the form submission back into the chat", () => {
+  const base: OnboardingAnswers = {
+    concept: "Limits",
+    answers: [
+      { question: "Have you met limits before today?", answer: "Brand new" },
+      { question: "Which part do you expect to trip you up?", answer: "" },
+    ],
+  };
+
+  it("echoes the learner's answers numbered, and nothing else", () => {
+    const reply = renderOnboardingReply(base);
+    expect(reply).toContain("1. Brand new");
+    // The questions are carried by the form card, not echoed back.
+    expect(reply).not.toContain("Have you met");
   });
 
-  it("treats skip words as no answer rather than inventing one", () => {
-    const paired = pairOnboardingReply("Limits", questions, "skip\nn/a\n-");
-    expect(paired.answers.every((entry) => entry.answer === "")).toBe(true);
+  it("marks skipped questions without inventing an answer", () => {
+    const reply = renderOnboardingReply(base);
+    expect(reply).toContain("2. (skipped)");
+    expect(reply).not.toMatch(/not given/i);
   });
+});
 
-  it("tolerates a learner who answers nothing at all", () => {
-    // The hand-off has to work in exactly this case, which is why it is now
-    // written by the counsellor rather than assuming answers exist.
-    const paired = pairOnboardingReply("Limits", questions, "");
-    expect(paired.answers).toHaveLength(3);
-    expect(paired.answers.every((entry) => entry.answer === "")).toBe(true);
+describe("the session reminder built from the answers", () => {
+  it("carries a slow-down clause for a brand-new learner", () => {
+    const reminder = buildOnboardingReminder({
+      concept: "Limits",
+      answers: [{ question: "Have you met limits before today?", answer: "Brand new" }],
+    });
+    expect(reminder).toContain("Brand new");
+    expect(reminder).toMatch(/slow/i);
+    expect(reminder).toMatch(/plain language/i);
+    expect(reminder).toMatch(/one idea at a time/i);
   });
 });

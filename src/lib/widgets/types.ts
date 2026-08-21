@@ -10,7 +10,7 @@
  * Three of the twenty widgets in the original board specification (Graph,
  * Point/Geometry, Equation) are NOT defined here: they already exist as
  * first-class visualization intents (`function`, `geometry`, `equation`) and
- * must keep going through `visualize`. The remaining seventeen live here.
+ * must keep going through `visualize`. The remaining eighteen live here.
  *
  * Design rules for every widget in this file:
  *  - Every learner-visible string is agent-supplied. No hardcoded lesson text.
@@ -24,6 +24,7 @@
 
 export type WidgetIntent =
   | RoadmapWidget
+  | PlanWidget
   | ConceptCardWidget
   | SliderWidget
   | AnimationWidget
@@ -43,10 +44,11 @@ export type WidgetIntent =
 
 export type WidgetKind = WidgetIntent["kind"];
 
-/** Every widget kind, in the canonical board order (widget numbers 1–20 with
+/** Every widget kind, in the canonical board order (widget numbers 1–21 with
  *  the three built-in visualization widgets 3/4/5 omitted). */
 export const WIDGET_KINDS = [
   "roadmap",
+  "plan",
   "concept_card",
   "slider",
   "animation",
@@ -68,6 +70,7 @@ export const WIDGET_KINDS = [
 /** Board-spec widget numbers, preserved so product/design references line up. */
 export const WIDGET_BOARD_NUMBER: Record<WidgetKind, number> = {
   roadmap: 1,
+  plan: 21,
   concept_card: 2,
   slider: 6,
   animation: 7,
@@ -88,6 +91,7 @@ export const WIDGET_BOARD_NUMBER: Record<WidgetKind, number> = {
 
 export const WIDGET_LABEL: Record<WidgetKind, string> = {
   roadmap: "Roadmap",
+  plan: "Plan",
   concept_card: "Concept Card",
   slider: "Slider",
   animation: "Animation",
@@ -172,6 +176,41 @@ export interface RoadmapWidget extends WidgetBase {
   steps: RoadmapStep[];
 }
 
+/* ── 21 · Plan — the agreed route from zero to mastery ── */
+
+export interface PlanStep {
+  id: string;
+  /** Phase headline, e.g. "Read the picture before the letters". */
+  label: string;
+  /** One to three short numbered detail lines spelling out what the phase
+   *  covers — the (1)(2)(3) sub-bullets under a phase. */
+  details?: string[];
+}
+
+/**
+ * The course-of-study the tutor proposes and the learner signs off BEFORE
+ * teaching begins.
+ *
+ * A plan is not content; it is a commitment device. The learner reads the
+ * proposed route — built from their intake answers — and either agrees
+ * ("Start learning", the go signal the tutor waits on) or edits the steps
+ * into the course they actually came for. A session that teaches over an
+ * unagreed plan is the tutor talking to itself.
+ *
+ * The tutor writes the intent; the learner's edited version lives in
+ * `WidgetState.planDraft` and wins on render whenever present.
+ */
+export interface PlanWidget extends WidgetBase {
+  kind: "plan";
+  /** What is being mastered, e.g. "Convergence of series" — the card title. */
+  heading: string;
+  steps: PlanStep[];
+  /** The consent question under the steps. Defaults to "Do you agree with
+   *  this plan?" — override when the session needs a more specific ask, and
+   *  only then. */
+  agreementPrompt?: string;
+}
+
 /* ── 2 · Concept Card — the durable definition ── */
 
 export interface ConceptCardWidget extends WidgetBase {
@@ -227,14 +266,31 @@ export interface AnimationFrame {
 
 /** Optional parametric motion drawn on the animation stage, e.g. a secant line
  *  rotating into a tangent as its second point approaches the first. */
+/** Easing profiles for motion, Manim-style. "smooth" (the default) eases both
+ *  ends, "linear" is constant speed, "enter" starts slow, "exit" lands slow. */
+export type AnimationEasing = "linear" | "smooth" | "enter" | "exit";
+
 export interface AnimationMotion {
   /** Bounded expressions in `t`. */
   xExpression: string;
   yExpression: string;
+  /** When set, the motion lives on a 3D graph: x and y run across the floor
+   *  plane, z rises vertically, and the surface renders in an isometric view. */
+  zExpression?: string;
   tDomain: [number, number];
   /** Leave a fading trace of the path. */
   trace?: boolean;
-  /** Optional static guide curve, also in `t`. */
+  /** How the moving point travels: default "smooth" (Manim's default easing).
+   *  Constant-speed "linear" only when the rate itself is the lesson. */
+  easing?: AnimationEasing;
+  /** The guide graph draws itself on across the opening stretch of playback —
+   *  Manim's signature Create/Write move — so the curve *becomes* rather than
+   *  just exists. Default on whenever a guide exists. */
+  guideWriteOn?: boolean;
+  /** Optional static guide curve, also in `t` — the graph the motion happens
+   *  over. It renders as a solid line with the coordinate frame behind it, so
+   *  never send graph-bound motion without it. (In 3D the guide lies on the
+   *  floor plane.) */
   guideXExpression?: string;
   guideYExpression?: string;
 }
@@ -290,10 +346,188 @@ export interface AnimationLinkedRepresentation {
   tracks: string;
 }
 
+/* ── 7a · Animation scene — the motion stage, generalized ── */
+
+/**
+ * A value that is either a fixed number or a bounded expression in the
+ * animation playhead `t ∈ [0, 1]`. Expressions use the same bounded arithmetic
+ * evaluator as slider readouts and motion paths, so the agent never writes
+ * statements, closures, or property access — only an expression the validator
+ * can gate and the renderer can evaluate deterministically.
+ */
+export type SceneScalar = number | string;
+
+/** A point in scene (data) coordinates, each axis fixed or bound to `t`. */
+export interface ScenePointSpec {
+  x: SceneScalar;
+  y: SceneScalar;
+}
+
+/** Line style for a scene element. */
+export type SceneLineStyle = "solid" | "dashed" | "dotted";
+
+/** The small color vocabulary a scene element may claim. The renderer maps each
+ *  to the chalkboard palette; the agent never names a hex value or a CSS color.
+ *  `chalk` and `accent` resolve to the widget's own ink and accent, so a scene
+ *  stays coherent with the board it sits on. */
+export type SceneAccent =
+  | "chalk"
+  | "accent"
+  | "amber"
+  | "cyan"
+  | "violet"
+  | "ember"
+  | "green"
+  | "red";
+
+/** A sampled curve — the graph the action happens over, or the action itself.
+ *  `xExpression`/`yExpression` are parametric in `u` over `uDomain` (default
+ *  [0, 1]), so a plain graph is `xExpression: "u"` and a unit circle is
+ *  `xExpression: "cos(u)", yExpression: "sin(u)"`. */
+export interface SceneCurve {
+  kind: "curve";
+  id: string;
+  xExpression: string;
+  yExpression: string;
+  uDomain?: [number, number];
+  style?: SceneLineStyle;
+  /** Write on across the opening stretch of playback (Manim's Create), so the
+   *  curve *becomes* rather than just being there. */
+  writeOn?: boolean;
+  accent?: SceneAccent;
+}
+
+/** A moving point. Expressions are in the playhead `t`; the point's path is
+ *  drawn in scene coordinates through the fixed frame. `trace` leaves the path
+ *  already travelled, so a moving point can carry its own history. */
+export interface ScenePoint {
+  kind: "point";
+  id: string;
+  xExpression: string;
+  yExpression: string;
+  /** Short plain-text label (Unicode fine) rendered beside the point. */
+  label?: string;
+  trace?: boolean;
+  accent?: SceneAccent;
+}
+
+/** A straight segment — a secant, a rise/run step, or a dashed guide line. */
+export interface SceneSegment {
+  kind: "segment";
+  id: string;
+  from: ScenePointSpec;
+  to: ScenePointSpec;
+  style?: SceneLineStyle;
+  accent?: SceneAccent;
+}
+
+/** The Riemann workhorse: a partition of an interval into `count` rectangles
+ *  whose heights sample `yExpression` (an expression in the data `x`). `count`
+ *  is typically an expression in `t`, which is what makes N animate as the
+ *  partition refines. */
+export interface SceneRects {
+  kind: "rects";
+  id: string;
+  /** Number of rectangles — usually an expression in `t`, e.g. "round(2 + 10*t)". */
+  count: SceneScalar;
+  x0: SceneScalar;
+  x1: SceneScalar;
+  /** The function being approximated, in the data coordinate `x`. */
+  yExpression: string;
+  /** Baseline each rectangle rises from. Defaults to 0. */
+  baseline?: SceneScalar;
+  /** Where in each subinterval the height is sampled. Defaults to "left". */
+  heightRule?: "left" | "right" | "midpoint";
+  fill?: SceneAccent;
+  stroke?: SceneAccent;
+}
+
+/** A shaded region between a top and bottom curve (default bottom = 0) over an
+ *  interval — the "area under / between curves" picture that rectangles
+ *  approximate. */
+export interface SceneRegion {
+  kind: "region";
+  id: string;
+  x0: SceneScalar;
+  x1: SceneScalar;
+  /** Top boundary, in the data coordinate `x`. */
+  topExpression: string;
+  /** Bottom boundary, in `x`. Defaults to 0. */
+  bottomExpression?: string;
+  fill?: SceneAccent;
+}
+
+/** A dimension or rate arrow with an optional label — the arrow that says "dx"
+ *  under a partition, or "rate" beside a moving quantity. */
+export interface SceneArrow {
+  kind: "arrow";
+  id: string;
+  from: ScenePointSpec;
+  to: ScenePointSpec;
+  /** Plain-text label (supports `{expr}` interpolation in `t`). */
+  label?: string;
+  accent?: SceneAccent;
+}
+
+/** A corner or point annotation. `text` supports `{expr}` interpolation, so a
+ *  label can read out a live value — "n = {round(2 + 10*t)}". */
+export interface SceneLabel {
+  kind: "label";
+  id: string;
+  at: ScenePointSpec;
+  text?: string;
+  anchor?: "start" | "middle" | "end";
+  /** Pixel offset in scene space, for nudging a label off a curve or corner. */
+  offset?: { x: number; y: number };
+  accent?: SceneAccent;
+}
+
+export type AnimationSceneElement =
+  | SceneCurve
+  | ScenePoint
+  | SceneSegment
+  | SceneRects
+  | SceneRegion
+  | SceneArrow
+  | SceneLabel;
+
+/**
+ * The animation stage as a *composition* rather than a preset.
+ *
+ * `motion` expresses exactly one thing — a point moving along x(t), y(t) — and
+ * no amount of schema tweaking gets a Riemann sum, a unit circle, or a
+ * secant-to-tangent construction out of it. The scene answers that gap with the
+ * same rule the rest of the protocol already obeys: the agent composes
+ * semantic, time-bound *primitives* (curve, point, segment, rects, region,
+ * arrow, label), a validator gates each one, and the renderer owns every pixel.
+ * Nothing here is named after a lesson; "rects + curve + arrow + label" is how
+ * the agent *says* Riemann sum, exactly as "point + guide curve" was how it
+ * said tangent before.
+ *
+ * The scene declares its own fixed frame (`xDomain`/`yDomain`), so the axes
+ * stay put while N animates — an auto-fitted frame would re-zoom on every
+ * refinement and destroy the very stability the picture is meant to show.
+ */
+export interface AnimationScene {
+  xDomain: [number, number];
+  yDomain: [number, number];
+  /** Axis labels, rendered at the frame ends. */
+  xLabel?: string;
+  yLabel?: string;
+  /** Light gridlines behind the scene. Defaults to on. */
+  showGrid?: boolean;
+  /** Draw order is preserved: elements are painted first to last. */
+  elements: AnimationSceneElement[];
+}
+
 export interface AnimationWidget extends WidgetBase {
   kind: "animation";
   frames: AnimationFrame[];
   motion?: AnimationMotion;
+  /** The composed scene stage. Mutually exclusive with `motion`: a scene
+   *  subsumes motion's point-and-guide, so an animation declares one or the
+   *  other, never both. */
+  scene?: AnimationScene;
   /** Total run time across all frames. */
   durationMs?: number;
   loop?: boolean;
@@ -609,6 +843,7 @@ export interface MasteryEvidence {
  * which is exactly why it exists.
  */
 export const ACTIONABLE_WIDGET_KINDS = [
+  "plan",
   "question",
   "retrieval_check",
   "challenge",
@@ -711,6 +946,11 @@ export interface WidgetState {
   reconcileText?: string;
   /** animation: the unaided reconstruction written after reconciliation. */
   reconstructText?: string;
+  /** plan: `submitted` marks the learner's "Start learning" click. A learner-
+   *  edited route lives here (set only when the learner actually changed
+   *  something) and takes display precedence over the agent-authored `steps`;
+   *  the tutor receives it on the agreement signal. */
+  planDraft?: { heading: string; steps: PlanStep[] };
   /** hint: highest hint level the learner has opened. */
   hintLevelOpened?: number;
   /** Learner's own confidence in this answer, 0–100.

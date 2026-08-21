@@ -1,6 +1,8 @@
-import type { BoardDoc } from "../data/boards";
+import type { Block, BoardDoc } from "../data/boards";
 import type { BoardView, Stroke } from "../components/board/Chalkboard";
 import type { ChatMsg } from "../components/board/BoardPanels";
+import { sanitizeWidgetState, validateWidgetIntent } from "../lib/widgets/validate";
+import type { WidgetIntent } from "../lib/widgets/types";
 
 export interface StoredBoardAppearance {
   themeId: "classic" | "blueprint" | "carbon";
@@ -22,6 +24,71 @@ export interface StoredStudySession {
   /** Presentation settings are part of the saved board, not viewer defaults. */
   appearance?: StoredBoardAppearance;
   updatedAt: string;
+}
+
+/**
+ * Rehydrate a board tree so widgets survive reopen.
+ *
+ * localStorage only guarantees JSON shape. A truncated write, an older build,
+ * or a partially migrated payload can leave widget intents/states that throw
+ * on first paint — which is exactly how a working animation becomes "could not
+ * be drawn" the next time the learner opens the note. Validate + sanitize once
+ * at the storage boundary so the renderer always receives a durable payload.
+ */
+function hydrateBlock(block: Block): Block {
+  if (block.kind === "row") {
+    return { ...block, children: block.children.map(hydrateBlock) };
+  }
+  if (block.kind !== "widget") return block;
+
+  const validated = validateWidgetIntent(block.intent);
+  const intent = validated.valid
+    ? (block.intent as WidgetIntent)
+    : // Keep the block on the board even if validation fails: the surface's
+      // normalizeIntent path still tries to draw what it can, and dropping the
+      // block would erase the learner's interaction history.
+      (block.intent as WidgetIntent);
+
+  const state = block.state ? sanitizeWidgetState(block.state) : undefined;
+  if (state === block.state && intent === block.intent) return block;
+  return { ...block, intent, ...(state ? { state } : { state: undefined }) };
+}
+
+export function hydrateStudyBoards(boards: BoardDoc[] | undefined | null): BoardDoc[] {
+  if (!Array.isArray(boards) || boards.length === 0) return [];
+  return boards.map((board) => {
+    if (!board || !Array.isArray(board.blocks)) {
+      return {
+        id: board?.id ?? `board-${Date.now()}`,
+        title: board?.title ?? "Board",
+        subtitle: board?.subtitle ?? "",
+        domain: board?.domain ?? "math",
+        blocks: [],
+        parentId: board?.parentId,
+        thread: board?.thread,
+      };
+    }
+    return {
+      ...board,
+      blocks: board.blocks.map(hydrateBlock),
+    };
+  });
+}
+
+export function hydrateStudySession(session: StoredStudySession): StoredStudySession {
+  const boards = hydrateStudyBoards(session.boards);
+  const activeId =
+    boards.some((board) => board.id === session.activeId)
+      ? session.activeId
+      : boards[0]?.id ?? session.activeId;
+  return {
+    ...session,
+    boards,
+    activeId,
+    viewMap: session.viewMap && typeof session.viewMap === "object" ? session.viewMap : {},
+    strokeMap: session.strokeMap && typeof session.strokeMap === "object" ? session.strokeMap : {},
+    messages: Array.isArray(session.messages) ? session.messages : [],
+  };
 }
 
 const KEY = "studyus.study_sessions.v1";
@@ -57,7 +124,10 @@ export function subscribeToStudySessions(listener: () => void): () => void {
 function read(): StoredStudySession[] {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(KEY) ?? "[]");
-    return Array.isArray(value) ? value as StoredStudySession[] : [];
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((item): item is StoredStudySession => Boolean(item && typeof item === "object" && typeof (item as StoredStudySession).id === "string"))
+      .map((item) => hydrateStudySession(item));
   } catch {
     return [];
   }
@@ -72,9 +142,22 @@ export function getStudySession(id: string): StoredStudySession | null {
 }
 
 export function saveStudySession(session: StoredStudySession): void {
-  const sessions = read().filter((item) => item.id !== session.id);
-  localStorage.setItem(KEY, JSON.stringify([session, ...sessions].slice(0, 50)));
-  emitSessionsChanged();
+  // Always persist a hydrated copy so the on-disk form stays round-trippable:
+  // widget states stay bounded, boards keep their widget blocks, and a later
+  // reopen does not reintroduce a payload that once threw on paint.
+  const durable = hydrateStudySession({
+    ...session,
+    updatedAt: session.updatedAt || new Date().toISOString(),
+  });
+  const sessions = read().filter((item) => item.id !== durable.id);
+  try {
+    localStorage.setItem(KEY, JSON.stringify([durable, ...sessions].slice(0, 50)));
+    emitSessionsChanged();
+  } catch (error) {
+    // Quota / private mode must not crash the study room mid-turn. The in-
+    // memory board remains authoritative for the current visit.
+    console.error("[session] failed to persist study session", error);
+  }
 }
 
 /** Rename one persisted note while retaining all boards, views, and chat. */

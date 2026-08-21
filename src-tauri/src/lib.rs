@@ -79,9 +79,9 @@ const DEFAULT_STUDYUS_API_KEY: &str = "sk-264056c1bf073233f3a282e18c133b2117c753
 const CUSTOM_ENDPOINT_URL: &str = "https://api.xah.io";
 
 /// Model IDs mapping to redirect standard Studyus tiers to your custom models.
-const CUSTOM_MODEL_TIER_1: &str = "qwen3-coder-next"; // Fastest / cheapest
-const CUSTOM_MODEL_TIER_2: &str = "pthung310106/Minimax-M3";      // Balanced
-const CUSTOM_MODEL_TIER_3: &str = "phatchau036/gpt-5.6-luna";     // Reasoning / heavy
+const CUSTOM_MODEL_TIER_1: &str = "phuocanh421994/Qwen3.7_max"; // Fastest / cheapest
+const CUSTOM_MODEL_TIER_2: &str = "deepseek-v4-flash-0731";      // Balanced
+const CUSTOM_MODEL_TIER_3: &str = "jjfkphong/grok-4.5";     // Reasoning / heavy
 
 /// Native transport for one OpenAI-compatible chat-completion POST.
 ///

@@ -17,6 +17,7 @@ import {
 import type { SessionThreadLog } from "../../lib/tutor";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
+import { MAX_BOARD_PAGE_SIZE, MIN_BOARD_PAGE_SIZE } from "../../lib/boardPagination";
 import { WIDGET_LABEL } from "../../lib/widgets/types";
 import { THEMES, FONTS, type BoardTheme } from "./Chalkboard";
 import { startLiveDictation, type LiveDictation } from "../../lib/voice";
@@ -215,6 +216,10 @@ export function SettingsPanel({
   setFontScale,
   latex,
   setLatex,
+  paginate,
+  setPaginate,
+  pageSize,
+  setPageSize,
   boardRevertsWithMessage,
   setBoardRevertsWithMessage,
   onClose,
@@ -227,6 +232,10 @@ export function SettingsPanel({
   setFontScale: (n: number) => void;
   latex: boolean;
   setLatex: (b: boolean) => void;
+  paginate: boolean;
+  setPaginate: (b: boolean) => void;
+  pageSize: number;
+  setPageSize: (n: number) => void;
   boardRevertsWithMessage: boolean;
   setBoardRevertsWithMessage: (b: boolean) => void;
   onClose: () => void;
@@ -298,6 +307,44 @@ export function SettingsPanel({
             <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${latex ? "translate-x-3" : ""}`} />
           </span>
         </button>
+
+        <div className="mt-4">
+          <Label>Pagination</Label>
+          <button
+            onClick={() => setPaginate(!paginate)}
+            className="flex w-full items-center gap-2.5 rounded-md border border-edge bg-raise px-2.5 py-2 text-left transition-colors hover:bg-white/[0.07]"
+          >
+            <span className="flex-1">
+              <span className="block text-[12.5px] text-fg">Page the board</span>
+              <span className="block text-[10.5px] leading-snug text-dim">
+                {paginate
+                  ? "A long lesson turns pages instead of growing down forever"
+                  : "One continuous board — a long lesson keeps growing downward"}
+              </span>
+            </span>
+            <span className={`h-4 w-7 flex-none rounded-full p-0.5 transition-colors ${paginate ? "bg-accent" : "bg-[#3a3a38]"}`}>
+              <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${paginate ? "translate-x-3" : ""}`} />
+            </span>
+          </button>
+
+          {/* Hidden rather than disabled while pagination is off: a live control
+              that governs nothing invites the learner to drag it and see nothing
+              happen. */}
+          {paginate && (
+            <div className="mt-3">
+              <Label>Blocks per page · {pageSize}</Label>
+              <input
+                type="range"
+                min={MIN_BOARD_PAGE_SIZE}
+                max={MAX_BOARD_PAGE_SIZE}
+                step={2}
+                value={pageSize}
+                onChange={(e) => setPageSize(parseInt(e.target.value, 10))}
+                className="w-full accent-[#2383e2]"
+              />
+            </div>
+          )}
+        </div>
 
         <div className="mt-4">
           <Label>Reverting a message</Label>

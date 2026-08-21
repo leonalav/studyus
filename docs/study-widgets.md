@@ -1,6 +1,6 @@
 # Study widgets and the Guide to Mastery
 
-The chalkboard's 17 study widgets are the tutor agent's **teaching vocabulary**,
+The chalkboard's 18 study widgets are the tutor agent's **teaching vocabulary**,
 not a toolbox of features. Each one is a specific pedagogical move, and the
 agent is expected to place the widget that *is* the move it is making.
 
@@ -38,11 +38,12 @@ never drift into duplicating each other.
 
 ---
 
-## The 17 widgets
+## The 18 widgets
 
 | # | Kind | The move it makes |
 | --- | --- | --- |
 | 1 | `roadmap` | Show where the lesson goes; mark the current step |
+| 21 | `plan` | The agreed route from zero to mastery — the learner consents or edits before teaching starts |
 | 2 | `concept_card` | The durable definition, given *after* the encounter |
 | 6 | `slider` | Move one parameter and watch what changes |
 | 7 | `animation` | Show a process over time, after a prediction |
@@ -337,6 +338,42 @@ Example, Mistake Check, Memory Hook, Reflection, Mastery Card) are unchanged —
 they either present rather than ask, or already carry their own input.
 
 ---
+
+## The animation scene — composed figures, not presets
+
+The `animation` widget originally had one picture: a point moving along
+`x(t), y(t)` over an optional guide curve. That is exactly one thing, and no
+amount of schema tweaking gets a Riemann sum, a unit circle sweep, or a
+secant-into-tangent construction out of it.
+
+The answer is **not** a `riemann` preset — presets are the one thing the
+architecture bans (the agent emits semantic intents and never names a preset or
+a renderer). The answer is a *composition*: `animation.scene` is a fixed
+coordinate frame plus a list of time-bound primitives.
+
+| Primitive | What it says |
+| --- | --- |
+| `curve` | A sampled curve, parametric in `u` (`xExpression:"u"` gives a graph) |
+| `point` | A moving point, expressions in the playhead `t` |
+| `segment` | A straight line — secants, rise/run, dashed guides |
+| `rects` | A partition of an interval into `count` rectangles sampling `yExpression` — the Riemann/histogram picture |
+| `region` | A shaded area between a top and bottom curve — the exact "area under/between curves" |
+| `arrow` | A dimension or rate arrow with a label |
+| `label` | A corner/point annotation, with live `{expr}` interpolation |
+
+Every numeric field is a fixed number **or a bounded expression in `t`**, so the
+picture animates by binding the changing quantity to the playhead: a
+`rects.count` of `"round(2 + 10*t)"` is what makes N refine, and a label of
+`"n = {round(2 + 10*t)}"` says it out loud. The scene declares its own
+`xDomain`/`yDomain` so the axes hold still while the picture moves — an
+auto-fitted frame would re-zoom on every refinement and destroy the very
+stability the figure exists to show.
+
+Because the scene is still a validated intent, the whole contract around it is
+untouched: the host keeps owning the clock, easing, scrub, step, checkpoints,
+the prediction lock, and `signal.ts` — the picture changed, the evidence
+machinery did not. `motion` and `scene` are mutually exclusive; a scene
+subsumes motion's point-and-guide.
 
 ## Failure containment
 

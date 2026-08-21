@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildTutorUserPrompt } from "./tutor";
+import { buildTutorUserPrompt, resolveTurnWidgetPermit } from "./tutor";
 import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
 import type { Domain } from "../data/boards";
 
@@ -59,6 +59,9 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
   it("tells the tutor to draw on explicit visualization requests instead of asking questions", () => {
     expect(prompt).toMatch(/comply first with a best-effort board rendering/i);
     expect(prompt).toMatch(/confirm what you drew instead of asking a question/i);
+    expect(prompt).toMatch(/NO TEXT-ONLY DEAD ENDS/i);
+    expect(prompt).toMatch(/NO QUIZ LOOPS/i);
+    expect(prompt).toMatch(/look-alike checks/i);
   });
 
   it("requires all structural fields and constrains evidence handles", () => {
@@ -223,10 +226,63 @@ describe("the never-passive policy reaches the model", () => {
     const directive = formatMasteryDirective();
     expect(directive).toMatch(/let me know when you're ready/i);
     expect(directive).toMatch(/does that make sense/i);
+    expect(directive).toMatch(/tell me what you already know/i);
+    expect(directive).toMatch(/before we go on/i);
+  });
+
+  it("forbids text-only dead ends and isomorphic quiz loops by name", () => {
+    const directive = formatMasteryDirective();
+    expect(directive).toMatch(/NO TEXT-ONLY DEAD ENDS/i);
+    expect(directive).toMatch(/STRICTLY FORBIDDEN/i);
+    expect(directive).toMatch(/NO QUIZ LOOPS/i);
+    expect(directive).toMatch(/look-alike/i);
+    expect(directive).toMatch(/When the learner says continue/i);
   });
 
   it("tells the agent a roadmap must be placed alongside the move that opens step 1", () => {
     expect(formatWidgetCatalog()).toMatch(/roadmap is orientation, NOT teaching/i);
+  });
+
+  it("requires updating the existing roadmap when a goal is completed, never a second map", () => {
+    const directive = formatMasteryDirective();
+    expect(directive).toMatch(/update_widget/i);
+    expect(directive).toMatch(/existing roadmap/i);
+    expect(directive).toMatch(/never append a second roadmap|never place a second roadmap/i);
+    expect(directive).toMatch(/same turn that opens the next step/i);
+    expect(formatWidgetCatalog()).toMatch(/update_widget on the existing roadmap/i);
+  });
+});
+
+describe("board summary exposes roadmap anchors and step states", () => {
+  it("lists step ids and states so the model can update_widget precisely", () => {
+    const prompt = buildTutorUserPrompt({
+      ...baseParams,
+      board: {
+        id: "b1",
+        title: "t",
+        subtitle: "",
+        domain: "math",
+        blocks: [
+          {
+            id: "agent-rm-9",
+            kind: "widget",
+            intent: {
+              kind: "roadmap",
+              heading: "Path",
+              steps: [
+                { id: "encounter", label: "Encounter", state: "done" },
+                { id: "understand", label: "Understand", state: "current" },
+                { id: "construct", label: "Construct", state: "upcoming" },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(prompt).toMatch(/anchor=agent-rm-9/);
+    expect(prompt).toMatch(/encounter:done/);
+    expect(prompt).toMatch(/understand:current/);
+    expect(prompt).toMatch(/construct:upcoming/);
   });
 });
 
@@ -245,5 +301,32 @@ describe("widget cluster groups reach the model", () => {
 
   it("tells the agent to answer a completed set in one reply", () => {
     expect(formatMasteryDirective()).toMatch(/respond to the SET in one reply/i);
+  });
+});
+
+describe("session opening — the plan widget is always placeable", () => {
+  it("greeting turns with onboarding bypass the route's widget permit list", () => {
+    // The reported failure: the post-intake greeting was routed like any
+    // policy move, the route's catalog whitelisted four pedagogical kinds, and
+    // the plan was never placed — the model literally never saw it exists.
+    expect(resolveTurnWidgetPermit("greeting", true, ["question"])).toBeUndefined();
+    // Only that specific turn is exempt: everything else keeps the route permit.
+    expect(resolveTurnWidgetPermit("greeting", false, ["question"])).toEqual(["question"]);
+    expect(resolveTurnWidgetPermit("chat", true, ["question"])).toEqual(["question"]);
+    expect(resolveTurnWidgetPermit("widget", true, ["question"])).toEqual(["question"]);
+    expect(resolveTurnWidgetPermit(undefined, true, ["question"])).toEqual(["question"]);
+  });
+
+  it("the full catalog names the plan widget and its agreement gate", () => {
+    // An unfiltered greeting-turn catalog must describe plan + roadmap.
+    const catalog = formatWidgetCatalog();
+    expect(catalog).toMatch(/- Plan \[plan\]/);
+    expect(catalog).toMatch(/- Roadmap \[roadmap\]/);
+    expect(catalog).toMatch(/agreementPrompt/);
+    expect(catalog).toMatch(/Start learning/);
+    // While a route-scoped catalog still hides them, as the policy intends.
+    const scoped = formatWidgetCatalog(["question"]);
+    expect(scoped).not.toMatch(/\[plan\]/);
+    expect(scoped).not.toMatch(/\[roadmap\]/);
   });
 });

@@ -4,6 +4,7 @@ import {
   MAX_TUTOR_VERSIONS,
   applyAppearancePreferences,
   buildTutorPreferenceReminder,
+  loadPreferences,
   sanitizePreferences,
 } from "./preferences";
 import { cadenceMilliseconds } from "./notifications";
@@ -26,6 +27,29 @@ describe("persisted Studyus preferences", () => {
     ).toBe(true);
   });
 
+  it("defaults board pagination OFF and clamps page size into range", () => {
+    // Default OFF is a hard requirement, not a taste call: enabling it changes
+    // how every already-open session looks, and no learner should have their
+    // continuous board cut into pages by an update they did not ask for.
+    expect(sanitizePreferences({}).appearance.boardPagination).toBe(false);
+    expect(
+      sanitizePreferences({ appearance: { boardPagination: true } }).appearance.boardPagination
+    ).toBe(true);
+    expect(
+      sanitizePreferences({ appearance: { boardPagination: "yes" } }).appearance.boardPagination
+    ).toBe(false);
+    expect(sanitizePreferences({}).appearance.boardPageSize).toBe(8);
+    expect(
+      sanitizePreferences({ appearance: { boardPageSize: 2 } }).appearance.boardPageSize
+    ).toBe(4);
+    expect(
+      sanitizePreferences({ appearance: { boardPageSize: 400 } }).appearance.boardPageSize
+    ).toBe(16);
+    expect(
+      sanitizePreferences({ appearance: { boardPageSize: "eight" } }).appearance.boardPageSize
+    ).toBe(8);
+  });
+
   it("applies every appearance control to global document state", () => {
     const dataset: Record<string, string> = {};
     const properties = new Map<string, string>();
@@ -46,6 +70,8 @@ describe("persisted Studyus preferences", () => {
       dyslexiaFriendly: true,
       captions: false,
       boardRevertsWithMessage: true,
+      boardPagination: false,
+      boardPageSize: 8,
     });
 
     expect(dataset).toMatchObject({
@@ -228,6 +254,57 @@ describe("persisted Studyus preferences", () => {
     expect(reminder).toContain("target 45 minutes");
     expect(reminder).toContain("break after about 15 minutes");
     expect(reminder).toContain("Auto-notes are enabled");
+  });
+});
+
+describe("the v1 → v2 preference migration (default font switch)", () => {
+  const makeStorage = (seed: Record<string, string>) => {
+    const map = new Map(Object.entries(seed));
+    return {
+      map,
+      getItem: (key: string) => (map.has(key) ? map.get(key)! : null),
+      setItem: (key: string, value: string) => void map.set(key, value),
+      removeItem: (key: string) => void map.delete(key),
+    };
+  };
+
+  it("upgrades the stored Space Grotesk default to Helvetica Now and retires v1", () => {
+    // A v1 value of "grotesk" almost always meant "the app chose it for me",
+    // so the reinstatement of Helvetica Now must reach existing installs.
+    const store = makeStorage({
+      "studyus.preferences.v1": JSON.stringify({ appearance: { font: "grotesk", theme: "dark" } }),
+    });
+    vi.stubGlobal("window", { localStorage: store });
+
+    const loaded = loadPreferences();
+    expect(loaded.appearance.font).toBe("helvetica");
+    expect(loaded.appearance.theme).toBe("dark");
+    expect(store.map.has("studyus.preferences.v1")).toBe(false);
+    const persisted = JSON.parse(store.map.get("studyus.preferences.v2")!);
+    expect(persisted.appearance.font).toBe("helvetica");
+  });
+
+  it("keeps a deliberate non-default face from v1, e.g. serif", () => {
+    const store = makeStorage({
+      "studyus.preferences.v1": JSON.stringify({ appearance: { font: "serif" } }),
+    });
+    vi.stubGlobal("window", { localStorage: store });
+    expect(loadPreferences().appearance.font).toBe("serif");
+    expect(store.map.has("studyus.preferences.v2")).toBe(true);
+  });
+
+  it("never re-migrates a deliberate grotesk pick saved under v2", () => {
+    const store = makeStorage({
+      "studyus.preferences.v2": JSON.stringify({ appearance: { font: "grotesk" } }),
+    });
+    vi.stubGlobal("window", { localStorage: store });
+    expect(loadPreferences().appearance.font).toBe("grotesk");
+  });
+
+  it("leaves a fresh install on the default", () => {
+    const store = makeStorage({});
+    vi.stubGlobal("window", { localStorage: store });
+    expect(loadPreferences().appearance.font).toBe(DEFAULT_PREFERENCES.appearance.font);
   });
 });
 

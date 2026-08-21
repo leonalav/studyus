@@ -50,12 +50,19 @@ import {
   recordLearnerModelEntry,
 } from "./learnerModel";
 import { getEvidenceForSelectedNodes } from "./curriculum";
-import { buildOnboardingReminder, type OnboardingAnswers, type OnboardingQuestion } from "../data/tutor";
+import {
+  CREATE_FORMS_TOOL,
+  buildOnboardingReminder,
+  type OnboardingAnswers,
+  type OnboardingForm,
+  type OnboardingQuestion,
+  type OnboardingQuestionKind,
+} from "../data/tutor";
 import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
 import type { MathNode, FunctionNode, OperatorNode, SymbolNode } from "mathjs";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
-import type { WidgetIntent, WidgetKind, WidgetState } from "./widgets/types";
+import type { RoadmapStep, RoadmapWidget, WidgetIntent, WidgetKind, WidgetState } from "./widgets/types";
 import type { SupportLevel } from "./learning/types";
 import { WIDGET_LABEL, isActionableWidget } from "./widgets/types";
 import { validateWidgetIntent } from "./widgets/validate";
@@ -85,10 +92,10 @@ import {
   type TutorToolPermissions,
 } from "./preferences";
 
-export const TUTOR_PROMPT_VERSION = "tutor_v7";
+export const TUTOR_PROMPT_VERSION = "tutor_v8";
 export const TUTOR_SCHEMA_VERSION = "tutor_turn_v4";
-export const ONBOARDING_PROMPT_VERSION = "tutor_onboarding_v1";
-export const ONBOARDING_SCHEMA_VERSION = "onboarding_questions_v1";
+export const ONBOARDING_PROMPT_VERSION = "tutor_onboarding_v2";
+export const ONBOARDING_SCHEMA_VERSION = "onboarding_create_forms_v1";
 export const MAX_HINT_LEVEL = 3;
 export const MAX_BOARD_OPS_PER_TURN = 12;
 export const MAX_THREAD_INITIAL_BLOCKS = 6;
@@ -527,11 +534,13 @@ export function turnLeavesLearnerSomethingToDo(turn: TutorTurn): boolean {
 
 /**
  * The learner-facing nudge appended when a teaching turn forgot to hand the
- * work back. Speech, not a board op: inventing a question the agent did not
- * author would put words in its mouth and could contradict the lesson.
+ * work back. Speech only — inventing a widget the agent did not author would
+ * put words in its mouth. This must NEVER interview the learner about prior
+ * knowledge or open another Socratic stall: the failure mode is a text-only
+ * dead end, and the fix is a continuation lane into the real teaching move.
  */
 const PASSIVE_TURN_NUDGE =
-  "Before we go on — tell me what you already know about this, or ask me the first thing that looks unclear. I'll build the next step around your answer.";
+  "Type **continue** and I will put the core figure and the mechanism on the board next - not another quiz and not a text-only phase header.";
 
 /**
  * Does the learner already owe an answer on the board?
@@ -583,6 +592,584 @@ export function enforceLearnerAgency(turn: TutorTurn, board?: BoardDoc): TutorTu
   if (boardHasOpenCommitment(board)) return turn;
   const speech = turn.speech.trim();
   return { ...turn, speech: speech ? `${speech} ${PASSIVE_TURN_NUDGE}` : PASSIVE_TURN_NUDGE };
+}
+
+/* ─────────────────────────────────────────────────────────────
+   ROADMAP PROGRESS (tied to the evidence ledger, not model claims)
+   ───────────────────────────────────────────────────────────── */
+
+/**
+ * Locate the lesson roadmap already on the board.
+ *
+ * A session is allowed one roadmap. The first top-level (or nested-in-row)
+ * roadmap widget is the map; later placements are duplicates the runtime must
+ * rewrite into updates of this one.
+ */
+export function findBoardRoadmap(
+  board: BoardDoc | undefined
+): { anchor: string; index: number; intent: RoadmapWidget } | null {
+  if (!board) return null;
+
+  const walk = (
+    blocks: BoardDoc["blocks"],
+    pathPrefix: number[]
+  ): { anchor: string; index: number; intent: RoadmapWidget } | null => {
+    for (let i = 0; i < blocks.length; i += 1) {
+      const block = blocks[i];
+      if (block.kind === "widget" && block.intent.kind === "roadmap") {
+        // Prefer the top-level index for targetIndex fallbacks; nested roadmaps
+        // still expose their stable anchor, which update_widget prefers.
+        return {
+          anchor: block.id,
+          index: pathPrefix.length === 0 ? i : pathPrefix[0] ?? i,
+          intent: block.intent,
+        };
+      }
+      if (block.kind === "row") {
+        const nested = walk(block.children, pathPrefix.length === 0 ? [i] : pathPrefix);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  };
+
+  return walk(board.blocks, []);
+}
+
+/**
+ * Resolve a roadmap step id to a mastery stage when the id (or label) names one.
+ * Custom lesson steps that do not map onto the ladder return null and are left
+ * alone — this path only autowires Guide-to-Mastery roadmaps.
+ *
+ * Matching is exact (after normalizing to letters) against the stage id or the
+ * published stage label. Substring includes (`"application".includes("apply")`)
+ * are deliberately rejected: they silently promote free-form lesson steps onto
+ * the mastery ladder and mark them done when the ledger moves.
+ */
+function stageFromRoadmapStep(step: Pick<RoadmapStep, "id" | "label">): MasteryStage | null {
+  const candidates = [step.id, step.label]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim().toLowerCase().replace(/[^a-z]/g, ""));
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (isMasteryStage(candidate)) return candidate;
+    for (const stage of MASTERY_STAGES) {
+      const label = MASTERY_STAGE_SPECS[stage].label.toLowerCase().replace(/[^a-z]/g, "");
+      if (candidate === stage || candidate === label) return stage;
+    }
+  }
+  return null;
+}
+
+/** True when a board block spec is a roadmap widget. */
+function isRoadmapBlockSpec(block: BoardBlockSpec): block is Extract<BoardBlockSpec, { kind: "widget" }> & {
+  intent: RoadmapWidget;
+} {
+  return block.kind === "widget" && block.intent.kind === "roadmap";
+}
+
+/**
+ * Any board op that would put a roadmap on the board or rewrite one in place.
+ * Covers place/update and the block-shaped insert/replace/thread paths so a
+ * second map cannot slip through a non-place channel.
+ */
+function opCarriesRoadmap(op: BoardOp): boolean {
+  if (op.op === "place_widget" || op.op === "update_widget") {
+    return op.intent.kind === "roadmap";
+  }
+  if (op.op === "insert_after" || op.op === "replace_block") {
+    return isRoadmapBlockSpec(op.block);
+  }
+  if (op.op === "spawn_thread") {
+    return op.initialBlocks.some((block) => isRoadmapBlockSpec(block));
+  }
+  return false;
+}
+
+/**
+ * Align roadmap step states to a demonstrated mastery stage.
+ *
+ * Steps that map onto the Guide to Mastery ladder become `done` when they sit
+ * strictly before `liveStage`, `current` when they are the live stage, and
+ * `upcoming` otherwise. Steps that do not map onto a stage keep their prior
+ * state — we never invent progress for free-form lesson checkpoints.
+ *
+ * This is the only place that may mark a stage step done. Callers must pass a
+ * stage that the evidence ledger (or an observed regression) actually moved to;
+ * there is no weaker unsupported promotion path.
+ */
+export function buildRoadmapIntentForStage(
+  existing: RoadmapWidget,
+  liveStage: MasteryStage
+): RoadmapWidget {
+  const liveIndex = MASTERY_STAGES.indexOf(liveStage);
+  let assignedCurrent = false;
+
+  const steps: RoadmapStep[] = existing.steps.map((step) => {
+    const mapped = stageFromRoadmapStep(step);
+    if (!mapped) return { ...step };
+
+    const stepIndex = MASTERY_STAGES.indexOf(mapped);
+    let state: RoadmapStep["state"];
+    if (stepIndex < liveIndex) {
+      state = "done";
+    } else if (stepIndex === liveIndex && !assignedCurrent) {
+      state = "current";
+      assignedCurrent = true;
+    } else {
+      state = "upcoming";
+    }
+    return { ...step, state };
+  });
+
+  // If no step mapped onto the live stage, leave the first non-done step as
+  // current so the board still shows a single pointer — never invent a new step.
+  if (!assignedCurrent) {
+    const pointer = steps.find((step) => step.state !== "done");
+    if (pointer) pointer.state = "current";
+  }
+
+  // At most one current — validator invariant, enforced here too.
+  let sawCurrent = false;
+  for (const step of steps) {
+    if (step.state === "current") {
+      if (sawCurrent) step.state = "upcoming";
+      else sawCurrent = true;
+    }
+  }
+
+  return { ...existing, steps };
+}
+
+function isRoadmapWidgetOp(
+  op: BoardOp
+): op is Extract<BoardOp, { op: "place_widget" | "update_widget" }> & { intent: RoadmapWidget } {
+  return (
+    (op.op === "place_widget" || op.op === "update_widget") &&
+    op.intent.kind === "roadmap"
+  );
+}
+
+/** Strip roadmap widgets from a spawn_thread's initial block list. */
+function stripRoadmapsFromThread(op: Extract<BoardOp, { op: "spawn_thread" }>): BoardOp | null {
+  const initialBlocks = op.initialBlocks.filter((block) => !isRoadmapBlockSpec(block));
+  if (initialBlocks.length === op.initialBlocks.length) return op;
+  if (initialBlocks.length === 0) return null;
+  return { ...op, initialBlocks };
+}
+
+/** True when two roadmap intents disagree on step ids or states (order-sensitive). */
+function roadmapIntentDiffers(a: RoadmapWidget, b: RoadmapWidget): boolean {
+  if (a.steps.length !== b.steps.length) return true;
+  return a.steps.some(
+    (step, i) => step.id !== b.steps[i]?.id || step.state !== b.steps[i]?.state
+  );
+}
+
+/**
+ * Keep the board's single roadmap honest when a goal is demonstrably complete.
+ *
+ * Invariants enforced in code (the prompt asks for the same behaviour):
+ *
+ *  1. Never place a second roadmap when one already exists — rewrite to
+ *     `update_widget` on the existing anchor. insert_after / replace_block /
+ *     spawn_thread roadmap payloads are rewritten or stripped the same way.
+ *  2. When the session stage moved on ledger evidence (forward `advancedTo` or
+ *     an explicit `liveStage` from the caller — including regression), the
+ *     existing roadmap is healed to that stage. A missing update is injected
+ *     even when the turn has no other board work: stage can persist without a
+ *     teaching op, and the map must not lie about where the learner is. Model-
+ *     claimed `turn.stage` alone never triggers a heal (that would re-open a
+ *     claim path); only `advancedTo` / caller `liveStage` do.
+ *  3. Roadmap-only turns that are not an honest heal (duplicate place, idle
+ *     retouch while the map already matches the live stage) are dropped rather
+ *     than painted as a second map or a no-op progress flash.
+ *
+ * This never creates a weaker promotion path: step states are derived only from
+ * `advancedTo` / the live stage the predicates already accepted. On regression
+ * (`liveStage` behind the map's furthest done/current stage), steps are pulled
+ * back so the board cannot advertise progress the ledger has withdrawn.
+ */
+export function enforceRoadmapProgress(
+  turn: TutorTurn,
+  board: BoardDoc | undefined,
+  opts: { advancedTo: MasteryStage | null; liveStage?: MasteryStage }
+): TutorTurn {
+  const existing = findBoardRoadmap(board);
+  // Clamp path may fall back to turn.stage so a model-authored update still gets
+  // pulled toward something coherent; heal injection never uses that fallback.
+  const liveStage = opts.advancedTo ?? opts.liveStage ?? turn.stage ?? null;
+  const healStage = opts.advancedTo ?? opts.liveStage ?? null;
+
+  // No board roadmap and no stage movement: still strip multi-roadmap payloads
+  // within a single turn (place + insert + thread) so an empty board cannot
+  // grow two maps at once.
+  if (!existing && !opts.advancedTo) {
+    let sawRoadmap = false;
+    let changed = false;
+    const deduped = turn.boardOps.flatMap<BoardOp>((op) => {
+      if (op.op === "place_widget" && op.intent.kind === "roadmap") {
+        if (sawRoadmap) {
+          changed = true;
+          return [];
+        }
+        sawRoadmap = true;
+        return [op];
+      }
+      if ((op.op === "insert_after" || op.op === "replace_block") && isRoadmapBlockSpec(op.block)) {
+        if (sawRoadmap) {
+          changed = true;
+          return [];
+        }
+        // Normalize the first block-shaped roadmap into a place_widget so the
+        // rest of the pipeline only has one shape to reason about.
+        sawRoadmap = true;
+        changed = true;
+        return [{ op: "place_widget" as const, intent: op.block.intent }];
+      }
+      if (op.op === "spawn_thread" && op.initialBlocks.some((b) => isRoadmapBlockSpec(b))) {
+        const stripped = stripRoadmapsFromThread(op);
+        if (!stripped) {
+          changed = true;
+          return [];
+        }
+        if (stripped !== op) {
+          changed = true;
+          // Keep at most one roadmap overall: if the turn already has a map,
+          // drop thread roadmaps; if not, lift the first thread roadmap out as
+          // a place_widget on the main board (session maps are not thread-local).
+          if (sawRoadmap) return [stripped];
+          const first = op.initialBlocks.find((b) => isRoadmapBlockSpec(b));
+          if (first && isRoadmapBlockSpec(first)) {
+            sawRoadmap = true;
+            return [{ op: "place_widget" as const, intent: first.intent }, stripped];
+          }
+          return [stripped];
+        }
+      }
+      return [op];
+    });
+    return changed ? { ...turn, boardOps: deduped } : turn;
+  }
+
+  let hadRoadmapOp = false;
+  let changed = false;
+
+  const rewriteToUpdate = (intentSource: RoadmapWidget): BoardOp[] => {
+    if (!existing) return [];
+    // Without a demonstrated stage move (forward or regression), a second-map
+    // attempt is dropped entirely rather than painted as a progress update.
+    if (!healStage) return [];
+    const intent = buildRoadmapIntentForStage(
+      existing.intent.steps.length ? existing.intent : intentSource,
+      healStage
+    );
+    return [
+      {
+        op: "update_widget" as const,
+        targetAnchor: existing.anchor,
+        intent,
+      },
+    ];
+  };
+
+  const boardOps = turn.boardOps.flatMap<BoardOp>((op) => {
+    // Block-shaped second maps: rewrite to update when stage moved, else drop.
+    if ((op.op === "insert_after" || op.op === "replace_block") && isRoadmapBlockSpec(op.block)) {
+      hadRoadmapOp = true;
+      changed = true;
+      if (existing) return rewriteToUpdate(op.block.intent);
+      // No existing map: normalize to place_widget so one path owns placement.
+      return [{ op: "place_widget" as const, intent: op.block.intent }];
+    }
+
+    if (op.op === "spawn_thread" && op.initialBlocks.some((b) => isRoadmapBlockSpec(b))) {
+      changed = true;
+      const stripped = stripRoadmapsFromThread(op);
+      const first = op.initialBlocks.find((b) => isRoadmapBlockSpec(b));
+      if (existing && first && isRoadmapBlockSpec(first)) {
+        hadRoadmapOp = true;
+        const update = rewriteToUpdate(first.intent);
+        return stripped ? [...update, stripped] : update;
+      }
+      if (!existing && first && isRoadmapBlockSpec(first)) {
+        hadRoadmapOp = true;
+        const place: BoardOp = { op: "place_widget", intent: first.intent };
+        return stripped ? [place, stripped] : [place];
+      }
+      return stripped ? [stripped] : [];
+    }
+
+    if (!isRoadmapWidgetOp(op)) return [op];
+    hadRoadmapOp = true;
+
+    // A place_widget roadmap when one already exists is always a duplicate.
+    // Only rewrite into an update when the stage actually moved on the ledger
+    // (forward or regression) — otherwise drop it. Falling back to turn.stage
+    // here would paint a "progress" update on every stray second map.
+    if (op.op === "place_widget" && existing) {
+      changed = true;
+      if (!healStage) return [];
+      const intent = buildRoadmapIntentForStage(
+        // Prefer the board's step list (stable ids) over a free rewrite.
+        existing.intent.steps.length ? existing.intent : op.intent,
+        healStage
+      );
+      return [
+        {
+          op: "update_widget" as const,
+          targetAnchor: existing.anchor,
+          intent,
+        },
+      ];
+    }
+
+    // An update (or the first place, when none exists yet) is clamped to the
+    // demonstrated stage when we know one — never trust the model to mark later
+    // steps done. `liveStage` may be the current stage even without a forward
+    // move (including regression), so over-promoted updates still get pulled
+    // back to what the ledger supports; non-progressing retouches stay honest
+    // under the same clamp.
+    if (liveStage && (op.op === "update_widget" || (op.op === "place_widget" && !existing))) {
+      const base =
+        existing && existing.intent.steps.length > 0
+          ? {
+              ...existing.intent,
+              ...("heading" in op.intent
+                ? { heading: op.intent.heading ?? existing.intent.heading }
+                : {}),
+            }
+          : op.intent;
+      // Preserve model-authored step labels/ids when it is rewriting the map on
+      // first place; when updating, prefer the existing ids so we never invent
+      // a parallel checklist.
+      const source: RoadmapWidget =
+        op.op === "update_widget" && existing
+          ? {
+              ...existing.intent,
+              heading: op.intent.heading ?? existing.intent.heading,
+              steps:
+                op.intent.steps?.length &&
+                op.intent.steps.every((step) =>
+                  existing.intent.steps.some((prior) => prior.id === step.id)
+                )
+                  ? op.intent.steps.map((step) => {
+                      const prior = existing.intent.steps.find((p) => p.id === step.id)!;
+                      return {
+                        ...prior,
+                        label: step.label || prior.label,
+                        detail: step.detail ?? prior.detail,
+                      };
+                    })
+                  : existing.intent.steps,
+            }
+          : base;
+
+      const intent = buildRoadmapIntentForStage(source, liveStage);
+      const same =
+        op.op === "update_widget" &&
+        op.intent.steps.length === intent.steps.length &&
+        op.intent.steps.every(
+          (step, i) =>
+            step.id === intent.steps[i]?.id && step.state === intent.steps[i]?.state
+        );
+      if (!same) changed = true;
+      if (op.op === "update_widget") {
+        return [
+          {
+            ...op,
+            targetAnchor: op.targetAnchor ?? existing?.anchor,
+            intent,
+          },
+        ];
+      }
+      return [{ ...op, intent }];
+    }
+
+    // place without existing and without live stage: leave as authored (session open).
+    return [op];
+  });
+
+  // Stage moved on evidence (or explicit liveStage, e.g. regression) but the
+  // model forgot the map: inject a heal so the board cannot advertise a stale
+  // current after setSessionMasteryStage. Prefer attaching beside teaching work;
+  // when the turn is empty or roadmap-only, still ship the heal alone so stage
+  // and map cannot desync across turns.
+  const hasNonRoadmapWork = boardOps.some((op) => !opCarriesRoadmap(op));
+  if (healStage && existing && !hadRoadmapOp) {
+    const intent = buildRoadmapIntentForStage(existing.intent, healStage);
+    if (roadmapIntentDiffers(existing.intent, intent)) {
+      boardOps.unshift({
+        op: "update_widget",
+        targetAnchor: existing.anchor,
+        intent,
+      });
+      changed = true;
+    }
+  }
+
+  // Drop a turn that, after rewrites, is only idle roadmap housekeeping with no
+  // teaching/work and no needed heal — whether the model authored a lone update
+  // that already matches the board or a duplicate place with nowhere to go.
+  // Keep a genuine first-place on an empty board (session open). Keep a heal
+  // that actually changes step states so stage movement is visible on the map.
+  const onlyRoadmapLeft =
+    boardOps.length > 0 && boardOps.every((op) => opCarriesRoadmap(op));
+  if (onlyRoadmapLeft && existing) {
+    const healNeeded =
+      healStage != null &&
+      boardOps.some((op) => {
+        if (!isRoadmapWidgetOp(op)) return false;
+        const intent =
+          op.op === "update_widget" || op.op === "place_widget"
+            ? (op.intent as RoadmapWidget)
+            : null;
+        if (!intent) return false;
+        return roadmapIntentDiffers(existing.intent, intent);
+      });
+    if (!healNeeded && !hasNonRoadmapWork) {
+      changed = true;
+      return { ...turn, boardOps: [] };
+    }
+  }
+
+  if (!changed) return turn;
+  return { ...turn, boardOps };
+}
+
+/**
+ * Show, don't just tell.
+ *
+ * The never-passive rule above gets a runtime backstop; the "show it" half of
+ * the stage vocabulary does not. The observable failure is a board that
+ * accumulates question after question while a spatial idea — slope, area,
+ * shape, motion — is never once drawn, in a stage whose whole job is to build
+ * the picture (Encounter: function/geometry, Apply/Transfer: function/equation,
+ * Understand: equation).
+ *
+ * Same honesty constraint as the agency rule: this never fabricates a figure
+ * the agent did not author. It appends an invitation in speech, so the
+ * learner's "draw it" becomes the cue the model then fulfils with a real
+ * `visualize` op.
+ *
+ * Fires at most once per board: as soon as any figure, equation, or
+ * self-drawing widget (animation/slider) exists on the board, the obligation is
+ * discharged. A session is nudged toward its first picture, not harassed on
+ * every later turn. An equation only satisfies a stage whose own visual
+ * vocabulary is `equation` — Encounter wants a *picture*, and a lone Σ is not
+ * one. `plan` and `roadmap` placements are orientation, not concept teaching,
+ * so the session-opening beat is never nudged.
+ */
+export function enforceVisualExplanation(
+  turn: TutorTurn,
+  stage: MasteryStage,
+  board?: BoardDoc
+): TutorTurn {
+  if (turn.boardOps.length === 0) return turn;
+  const spec = MASTERY_STAGE_SPECS[stage];
+  if (!spec || spec.visualizations.length === 0) return turn;
+  // A pure-explanation turn is the never-passive rule's to fix, in its own
+  // words. Two nudges on one turn is harassment, not rigour.
+  if (!turnLeavesLearnerSomethingToDo(turn)) return turn;
+  if (!turnAddsTeachingContent(turn)) return turn;
+
+  const equationSatisfies = spec.visualizations.includes("equation");
+  if (turnHasVisualRepresentation(turn, equationSatisfies)) return turn;
+  if (boardHasVisualRepresentation(board, equationSatisfies)) return turn;
+
+  const speech = turn.speech.trim();
+  // Do not interview the learner or wait for them to invent a drawing request.
+  // The obligation is on the tutor: next content turn must draw the picture.
+  const nudge =
+    "This step still needs the core picture on the board — type **continue** and I will draw the smallest graph, diagram or animation that shows the mechanism, instead of another text block or look-alike quiz.";
+  return { ...turn, speech: speech ? `${speech} ${nudge}` : nudge };
+}
+
+/** Widgets that draw their own picture, satisfying the stage without a
+ *  separate `visualize` op. */
+const VISUAL_WIDGET_KINDS: ReadonlySet<WidgetKind> = new Set(["animation", "slider"]);
+
+/** `plan` and `roadmap` are orientation/consent, not the teaching of a spatial
+ *  concept — placing them owes no figure, so the opening turn stays clean. */
+function widgetKindTeachesConcept(kind: WidgetKind): boolean {
+  return kind !== "plan" && kind !== "roadmap";
+}
+
+function blockSpecHasVisualRepresentation(block: BoardBlockSpec, equationSatisfies: boolean): boolean {
+  if (block.kind === "visualization") return true;
+  if (block.kind === "latex") return equationSatisfies;
+  return block.kind === "widget" && VISUAL_WIDGET_KINDS.has(block.intent.kind);
+}
+
+function turnHasVisualRepresentation(turn: TutorTurn, equationSatisfies: boolean): boolean {
+  return turn.boardOps.some((op) => {
+    switch (op.op) {
+      case "visualize":
+        return true;
+      case "write_latex":
+        return equationSatisfies;
+      case "place_widget":
+      case "update_widget":
+        return VISUAL_WIDGET_KINDS.has(op.intent.kind);
+      case "replace_block":
+      case "insert_after":
+        return blockSpecHasVisualRepresentation(op.block, equationSatisfies);
+      case "spawn_thread":
+        return op.initialBlocks.some((block) => blockSpecHasVisualRepresentation(block, equationSatisfies));
+      default:
+        return false;
+    }
+  });
+}
+
+function blockHasVisualRepresentation(
+  block: BoardDoc["blocks"][number],
+  equationSatisfies: boolean
+): boolean {
+  switch (block.kind) {
+    case "visualization":
+      return true;
+    case "latex":
+      return equationSatisfies;
+    case "widget":
+      return VISUAL_WIDGET_KINDS.has(block.intent.kind);
+    case "row":
+      return block.children.some((child) => blockHasVisualRepresentation(child, equationSatisfies));
+    default:
+      return false;
+  }
+}
+
+function boardHasVisualRepresentation(board: BoardDoc | undefined, equationSatisfies: boolean): boolean {
+  return Boolean(board?.blocks.some((block) => blockHasVisualRepresentation(block, equationSatisfies)));
+}
+
+/** Does this turn add content that teaches — the kind whose missing figure is a
+ *  real gap. Housekeeping (delete/revise/redraw) owes the learner nothing new. */
+function turnAddsTeachingContent(turn: TutorTurn): boolean {
+  return turn.boardOps.some((op) => {
+    switch (op.op) {
+      case "write_title":
+      case "write_text":
+      case "write_bullets":
+      case "write_callout":
+      case "write_latex":
+      case "visualize":
+        return true;
+      case "place_widget":
+      case "update_widget":
+        return widgetKindTeachesConcept(op.intent.kind);
+      case "replace_block":
+      case "insert_after":
+        return op.block.kind !== "widget" || widgetKindTeachesConcept(op.block.intent.kind);
+      case "spawn_thread":
+        return op.initialBlocks.some(
+          (block) => block.kind !== "widget" || widgetKindTeachesConcept(block.intent.kind)
+        );
+      default:
+        return false;
+    }
+  });
 }
 
 /**
@@ -2032,10 +2619,11 @@ export async function setSessionMasteryStage(
  * regression must never be harder than promoting, so a reported earlier stage is
  * honoured immediately and without evidence.
  *
- * @param ledgerEvidence Recorded evidence for the skill in focus. When empty —
- *   a session with no skill resolved, or an unwired call site — the gate falls
- *   back to the model's claim, so this function degrades to the old behaviour
- *   rather than freezing every learner at Encounter.
+ * Forward motion ALWAYS requires a satisfied stage-exit predicate over the
+ * ledger. An empty ledger is not a free pass: it is unsatisfied evidence, and
+ * the stage stays put. Call sites that have not wired evidence recording yet
+ * simply do not advance until they do — freezing is honest; inventing progress
+ * from narration is not.
  */
 export function resolveNextMasteryStage(
   current: MasteryStage,
@@ -2051,23 +2639,17 @@ export function resolveNextMasteryStage(
   const next = nextStage(current);
   if (!next) return null;
 
-  if (ledgerEvidence.length > 0) {
-    const gate = evaluateStageExit(current, ledgerEvidence);
-    if (!gate.satisfied) return null;
-    // The model's narration is kept as the human-readable reason, but the
-    // decision was the predicate's. When the model said nothing, the gate
-    // summary speaks for itself.
-    const narration = turn.stageAdvance?.evidence?.trim();
-    return {
-      stage: next,
-      evidence: narration ? `${gate.summary} — ${narration}` : gate.summary,
-    };
-  }
-
-  if (!turn.stageAdvance?.ready) return null;
-  const evidence = turn.stageAdvance.evidence.trim();
-  if (!evidence) return null;
-  return { stage: next, evidence };
+  // No claim-only path. Empty ledger → evaluateStageExit is unsatisfied → null.
+  const gate = evaluateStageExit(current, ledgerEvidence);
+  if (!gate.satisfied) return null;
+  // The model's narration is kept as the human-readable reason, but the
+  // decision was the predicate's. When the model said nothing, the gate
+  // summary speaks for itself.
+  const narration = turn.stageAdvance?.evidence?.trim();
+  return {
+    stage: next,
+    evidence: narration ? `${gate.summary} — ${narration}` : gate.summary,
+  };
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -2135,6 +2717,9 @@ export function buildTutorUserPrompt(params: {
     `CURRENT STAGE: ${stageSpec.ordinal}. ${stageSpec.label} — "${stageSpec.question}"\n` +
     `- Your role here: ${stageSpec.agentRole}. The learner's role: ${stageSpec.studentRole}.\n` +
     `- This stage's vocabulary: ${stageSpec.widgets.join(", ")}${stageSpec.visualizations.length ? ` (plus visualize: ${stageSpec.visualizations.join(", ")})` : ""}.\n` +
+    (stageSpec.visualizations.length
+      ? `- This stage is about a picture: draw the smallest relevant ${stageSpec.visualizations.join(" or ")} figure with visualize. A spatial idea taught only in prose and questions — slope, area, shape, motion — is an unfinished explanation.\n`
+      : "") +
     `- Exit condition: ${stageSpec.exitCondition}\n` +
     (params.masteryStageEvidence
       ? `- Evidence that carried the learner into this stage: ${params.masteryStageEvidence}\n`
@@ -2165,8 +2750,8 @@ export function buildTutorUserPrompt(params: {
       `CURRICULUM-LED TEACHING CONTRACT:\n` +
       `- Treat the selected scope as the core syllabus. Stay within its sequence, terminology, notation, assumptions, methods, and level; do not silently substitute a generic lesson.\n` +
       `- At the start of each selected section, state its learner-facing objective and identify the prerequisites supported by the evidence. Verify or remediate those prerequisites before advancing.\n` +
-      `- Progress across turns through: orientation and objectives → plain-language explanation → curriculum definitions and method → curriculum-faithful worked example → check for understanding → targeted practice → diagnosis and targeted remediation → a mastery check. Do not dump every phase into one reply; continue from the learner's current phase.\n` +
-      `- Teach definitions, procedures, examples, constraints, and common pitfalls that appear in the evidence. Cite the relevant E-handle for curriculum-grounded claims. After explanation or a worked example, ask one focused check; diagnose the response, remediate the specific gap, and give a short transfer problem.\n` +
+      `- Progress across turns through: orientation and objectives → plain-language explanation WITH the core figure/mechanism on the board → curriculum definitions and method → curriculum-faithful worked example → at most one focused check per new idea → targeted practice that changes the representation or transfer demand → diagnosis and targeted remediation → a mastery check. Do not dump every phase into one reply; continue from the learner's current phase.\n` +
+      `- Teach definitions, procedures, examples, constraints, and common pitfalls that appear in the evidence. Cite the relevant E-handle for curriculum-grounded claims. After explanation or a worked example, place at most one focused check for that idea; on a correct answer, advance the mechanism (new figure / deeper why), never another isomorphic quiz with swapped numbers. Diagnose misses, remediate the specific gap, then give a short transfer problem that is not a clone of the last item.\n` +
       `- Advance to the next selected section only after the learner meets a concrete mastery criterion: they can accurately explain the key idea or independently complete a representative check.\n` +
       `- Keep core instruction inside the selected range and order. If outside knowledge would genuinely help, label it explicitly as OPTIONAL ENRICHMENT, keep it brief, and never let it displace or contradict the curriculum.\n` +
       `- If evidence is partial or absent, say exactly what is unavailable. Do not pretend missing pages or facts were present; limit claims to the supplied metadata/evidence.`
@@ -2207,12 +2792,15 @@ export function buildTutorUserPrompt(params: {
   parts.push(
     `GLOBAL BEHAVIOR: The chalkboard is the primary teaching surface and interactive lesson. Do not teach, explain the lesson, or ask instructional/content questions in speech. Put teaching steps, Socratic questions, checks for understanding, examples, definitions, and practice prompts onto the chalkboard using board_ops. Speech must stay to a brief acknowledgement or transition (for example, “I put that on the board”). Only use speech for a direct learner clarification when no board content is needed. ` +
     `First decide whether changing the board is pedagogically necessary for this exact turn. Greetings, thanks, acknowledgements, social chat, navigation questions, and replies that are already clear in short speech MUST return board_ops exactly []. Do not create an equation, graph, diagram, chart, text block, callout, widget, or thread merely because a chalkboard is available. ` +
-    `THE LEARNER IS NEVER PASSIVE: the learner must always be holding a task. If your board_ops add only presentational content (roadmap, concept card, text, bullets, diagram, worked example) and nothing on the board is already awaiting their answer, you have explained AT the learner and stopped — pair it with the widget that hands the work back. Placing a roadmap alone is a forbidden turn: place it together with the question, scratchpad or reveal that opens its first step. Never close a turn with "let me know when you're ready" or "does that make sense?"; ask the question that starts the work instead. ` +
+    `THE LEARNER IS NEVER PASSIVE: the learner must always be holding a task. If your board_ops add only presentational content (roadmap, concept card, text, bullets, diagram, worked example) and nothing on the board is already awaiting their answer, you have explained AT the learner and stopped — pair it with the widget that hands the work back. Placing a roadmap alone is a forbidden turn: place it together with the question, scratchpad or reveal that opens its first step. When a goal is demonstrably complete, update_widget the EXISTING roadmap in that same turn (mark the finished step done and the next step current) while opening the next step's work — never a roadmap-only turn, never a second roadmap, never a turn that only retouches the roadmap. Never close a turn with "let me know when you're ready", "does that make sense?", "tell me what you already know", or "before we go on"; open the work or teach the next mechanism instead. ` +
     `ONE COMMITMENT PER CYCLE, NOT PER TURN: when an unanswered question, scratchpad or prediction is already on the board, do not add another. Answer what was asked, extend the explanation, and let the learner finish the task they are already in the middle of. A second demand stacked on an open one abandons the first. Never manufacture a filler question to satisfy the rule — a prompt attached to nothing teaches the learner that prompts can be skimmed past. ` +
+    `NO TEXT-ONLY DEAD ENDS (strictly forbidden): never halt on a phase title + prose with no graph, chart, animation, worked example, or continuation lane. Opening "Phase N · why …" requires the mechanism figure in the SAME turn (visualize / animation / slider / example), not handwriting alone. When the learner asks to continue or go into the core lesson, TEACH the real thing and how it works on the board — do not interview prior knowledge and do not stall in speech. ` +
+    `NO QUIZ LOOPS (strictly forbidden): never chain look-alike checks that only change numbers or labels for the same skill (e.g. repeated "height of the wave / value of sine at …" MCQs). After a resolved check, advance with the next mechanism figure or worked why; at most one focused check per new idea. Prefer presenting how it works over interrogating. ` +
     `When teaching IS happening, the study widgets are your teaching vocabulary, not a set of optional features. Prefer the widget that matches your pedagogical move over plain text: a check for understanding is a question widget, not a sentence; a worked example is an example widget with a reason on every step; a learner error is a mistake_check that diagnoses it; the learner's turn to work is a scratchpad. A turn that teaches with paragraphs where a widget exists for the move is a worse turn. ` +
-    `Use a board operation only when the learner explicitly requests a board rendering/edit or when a specific visual/formal representation materially improves understanding and cannot be conveyed as clearly in the spoken response alone. If the learner explicitly asks for a diagram, graph, plot, or structure, comply first with a best-effort board rendering and confirm what you drew instead of asking a question. ` +
+    `Use a board operation only when the learner explicitly requests a board rendering/edit or when a specific visual/formal representation materially improves understanding and cannot be conveyed as clearly in the spoken response alone. If the learner explicitly asks for a diagram, graph, plot, structure, to continue, or for the core lesson, comply first with a best-effort board rendering of the mechanism and confirm what you drew instead of asking a question. ` +
     `For every substantive explanation, layer simple plain-language intuition first, then precise terminology, assumptions, rigorous reasoning, and meaningful equations or worked steps; define jargon and connect formal details back to the intuitive idea. ` +
     `When a board representation is necessary, choose the smallest relevant set of equations, function graphs, data charts, or domain-faithful diagrams/scientific figures. Never add decorative, redundant, irrelevant, or semantically misleading visuals, and obey the enabled tool permissions. ` +
+    `When this stage's visualize vocabulary names a figure type, that figure is part of the explanation, not an optional extra: pair the question with the smallest relevant visualize (or an animation/slider widget that draws it) instead of describing the picture in words. ` +
     `DIAGNOSIS IS A HYPOTHESIS, NOT A LABEL. When you have an actual explanation for what you observed, put it in diagnosis.hypotheses with the kind that names the cause, because the cause determines the remedy: ` +
     HYPOTHESIS_KINDS.map((kind) => `${kind} — ${HYPOTHESIS_KIND_REMEDY[kind]}`).join(" ") +
     ` Every hypothesis MUST carry next_best_test: the specific observation that would confirm or refute it. A claim you cannot say how to test will be rejected. Propose a hypothesis only when you have seen something that supports it; a turn with no evidence for a cause should have no hypotheses. You do not decide whether a hypothesis is confirmed — repeated independent observations promote it, and the learner's own successful unaided work retires it. ` +
@@ -2239,7 +2827,7 @@ export function buildTutorUserPrompt(params: {
       `- write_latex: { "op", "tex": string, "caption"?: string }\n` +
       `- spawn_thread: { "op", "title": string, "reason": string, "initial_blocks": BoardBlockSpec[] } — creates a logged child board in Threads without leaving the current board. Use it only when a substantial, separable investigation would clutter or derail the current explanation; never spawn a thread for a routine answer. Create at most one per turn, keep title/reason learner-facing, and include at most ${MAX_THREAD_INITIAL_BLOCKS} useful starter blocks.\n` +
       `- place_widget: { "op", "intent": WidgetIntent } — appends a new study widget. This is how you teach: every widget below is a specific pedagogical move with its own required fields.\n` +
-      `- update_widget: { "op", targetAnchor?|targetIndex?|targetMatchText?, "intent": WidgetIntent } — reconfigures an existing widget in place, keeping the learner's answers and interaction state. Use it to mark the next roadmap step current, add a deeper hint level, or reveal a mistake_check correction after the learner has responded — never append a second copy of a widget you already placed.\n` +
+      `- update_widget: { "op", targetAnchor?|targetIndex?|targetMatchText?, "intent": WidgetIntent } — reconfigures an existing widget in place, keeping the learner's answers and interaction state. Use it to mark the next roadmap step current (same turn that opens that step's work), add a deeper hint level, or reveal a mistake_check correction after the learner has responded — never append a second copy of a widget you already placed. When CURRENT BOARD BLOCKS already lists a roadmap, update THAT anchor and keep its step ids; a second place_widget roadmap is a protocol violation and will be rewritten or dropped.\n` +
       `- redraw_block: { "op", targetAnchor?|targetIndex?|targetMatchText? } — force a block to re-render from scratch, keeping its content exactly as-is. Use this ONLY when the learner reports they cannot see something you placed ("the widget is blank", "the diagram didn't load", "I can't see the equation"). It repairs a block that failed to draw; it does not change what the block says. Acknowledge it plainly ("Redrawing that now") and, if it still does not appear after one redraw, place the content again in a different form rather than redrawing a second time.\n` +
       `WIDGET CATALOG — a widget "intent" is keyed on its "kind" field (visualization intents remain keyed on "type"). Graphs, geometry/points, and equations are NOT widgets: emit those through visualize as "function", "geometry", and "equation" intents.\n` +
       `${formatWidgetCatalog(params.permittedWidgetKinds)}\n` +
@@ -2312,7 +2900,8 @@ export function buildTutorUserPrompt(params: {
  */
 const MAX_SUMMARIZED_BOARD_BLOCKS = 40;
 
-function summarizeBoardBlocks(board: BoardDoc): string {
+/** Exported so tests can pin the board-summary contract without going through the full prompt. */
+export function summarizeBoardBlocks(board: BoardDoc): string {
   if (board.blocks.length === 0) return `- (board is empty)`;
   const hidden = Math.max(0, board.blocks.length - MAX_SUMMARIZED_BOARD_BLOCKS);
   const shown = hidden > 0 ? board.blocks.slice(-MAX_SUMMARIZED_BOARD_BLOCKS) : board.blocks;
@@ -2341,12 +2930,31 @@ function summarizeBoardBlocks(board: BoardDoc): string {
         case "widget": {
           const label = block.intent.title ?? WIDGET_LABEL[block.intent.kind];
           const interaction = summarizeWidgetInteraction(block.state);
-          return `${prefix} kind=widget (${block.intent.kind}): ${excerpt(label)}${interaction ? ` · learner: ${interaction}` : ""}`;
+          const roadmapDetail =
+            block.intent.kind === "roadmap" ? summarizeRoadmapSteps(block.intent) : "";
+          return `${prefix} kind=widget (${block.intent.kind}): ${excerpt(label)}${roadmapDetail}${interaction ? ` · learner: ${interaction}` : ""}`;
         }
         case "callout":
           return `${prefix} kind=callout: ${excerpt(block.text)}`;
-        case "row":
-          return `${prefix} kind=row: ${block.children.length} child block(s)`;
+        case "row": {
+          // Nested roadmaps (and other widgets) must stay visible so the model can
+          // target update_widget by anchor; findBoardRoadmap walks rows, and the
+          // prompt summary must match that visibility.
+          const childParts = block.children.map((child, childIndex) => {
+            if (child.kind === "widget" && child.intent.kind === "roadmap") {
+              const label =
+                child.intent.heading ?? child.intent.title ?? WIDGET_LABEL[child.intent.kind];
+              const roadmapDetail = summarizeRoadmapSteps(child.intent);
+              return `child[${childIndex}] anchor=${child.id} kind=widget (roadmap): ${excerpt(label)}${roadmapDetail}`;
+            }
+            if (child.kind === "widget") {
+              const label = child.intent.title ?? WIDGET_LABEL[child.intent.kind];
+              return `child[${childIndex}] anchor=${child.id} kind=widget (${child.intent.kind}): ${excerpt(label)}`;
+            }
+            return `child[${childIndex}] anchor=${child.id} kind=${child.kind}`;
+          });
+          return `${prefix} kind=row: ${block.children.length} child block(s)${childParts.length ? ` · ${childParts.join("; ")}` : ""}`;
+        }
       }
     })
     .join("\n");
@@ -2381,9 +2989,42 @@ function summarizeWidgetInteraction(state?: WidgetState): string {
   return parts.join(", ");
 }
 
+/**
+ * Roadmap step ids and states must be visible in the board summary: without them
+ * the model cannot target `update_widget` by the ids it authored, and under
+ * sampling it invents a second roadmap instead. Anchor is already on the line;
+ * this adds the step roster the update needs.
+ */
+export function summarizeRoadmapSteps(intent: RoadmapWidget): string {
+  if (!intent.steps.length) return "";
+  const heading = intent.heading ? ` "${excerpt(intent.heading)}"` : "";
+  const steps = intent.steps
+    .map((step) => `${step.id}:${step.state ?? "upcoming"}`)
+    .join(", ");
+  return `${heading} · steps=[${steps}]`;
+}
+
 /* ─────────────────────────────────────────────────────────────
    PUBLIC ENTRY POINT
    ───────────────────────────────────────────────────────────── */
+
+/**
+ * Which widget kinds this turn's catalog describes.
+ *
+ * Policy routes whitelist pedagogical moves — so a diagnostic route's catalog
+ * lists four kinds and the model simply never sees the rest. The designated
+ * session opening (greeting turn + onboarding reminder on record) is exempt:
+ * it is a product beat that must always be able to place the plan widget and
+ * the roadmap, whatever the route happens to warrant. `undefined` = full
+ * catalog. Exported for unit testing.
+ */
+export function resolveTurnWidgetPermit(
+  turnKind: "chat" | "greeting" | "widget" | undefined,
+  hasOnboarding: boolean,
+  policyPermitted: readonly WidgetKind[] | undefined
+): readonly WidgetKind[] | undefined {
+  return turnKind === "greeting" && hasOnboarding ? undefined : policyPermitted;
+}
 
 export interface TutorTurnRequest {
   sessionId: string;
@@ -2398,6 +3039,11 @@ export interface TutorTurnRequest {
    *  pace, and remarks. Omitted for restored sessions (already ran). */
   onboarding?: OnboardingAnswers;
   learnerMessage: string;
+  /** Distinguishes the session-opening greeting turn. Only a greeting with
+   *  onboarding answers on record is the DESIGNATED session opening: the turn
+   *  that must place the plan widget (zero→mastery route built on the five
+   *  intake answers) and the roadmap before any teaching. */
+  turnKind?: "chat" | "greeting" | "widget";
   attachments?: {
     name: string;
     kind: string;
@@ -2561,6 +3207,13 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   const learnerId = req.learnerId ?? DEFAULT_LEARNER_ID;
   const skillId = resolveTurnSkillId(req);
   let policyBrief: PolicyBrief | undefined;
+  // The designated session opening is a product beat, not a policy route: the
+  // intake-produced reminder is the design input, and the opening turn must
+  // place the plan widget + roadmap whatever the route whitelists would allow.
+  // A route-scoped catalog never contains either — the greeting then quietly
+  // renders "roadmap only" because the model never saw the plan exists.
+  const isSessionOpening = req.turnKind === "greeting" && Boolean(req.onboarding);
+
   let openingBrief = "";
   try {
     policyBrief = await buildPolicyBrief({
@@ -2578,6 +3231,14 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     }
   } catch (error) {
     console.warn("[tutor] policy engine unavailable; continuing without it", error);
+  }
+
+  if (isSessionOpening) {
+    openingBrief = [
+      "SESSION OPENING — binding:",
+      "The intake answers in the development reminder are the design input for this session. Your board_ops open with the plan widget FIRST — the route from where the learner said they stand to mastery of this concept, each phase carrying the one or two lines of what it covers — then the roadmap for orientation. Place no teaching content: lesson work begins only when the learner agrees to the plan (their \"Start learning\" click is your signal). Your speech text is the greeting and nothing else.",
+      openingBrief,
+    ].filter(Boolean).join("\n\n");
   }
 
   const knowledgeNodes = await resolveTutorKnowledgeNodes(req.boundNodes ?? [], studio);
@@ -2637,7 +3298,11 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     masteryStage: policyBrief?.state.stage ?? masteryStage.stage,
     masteryStageEvidence: masteryStage.evidence,
     policyBrief: policyBrief?.prompt,
-    permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
+    permittedWidgetKinds: resolveTurnWidgetPermit(
+      req.turnKind,
+      Boolean(req.onboarding),
+      policyBrief?.move.permittedWidgetKinds
+    ),
     openingBrief,
     learnerSummary,
     curriculumScope,
@@ -2676,17 +3341,91 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
       }
     },
   });
+  // Record what the learner actually did this turn BEFORE the stage gate and the
+  // roadmap integrity pass run. Both decisions read the ledger: a turn that
+  // failed to complete never happened as far as the ledger is concerned, and a
+  // roadmap that advances on unrecorded work would be a second, weaker
+  // promotion path beside the predicates.
+  let ledgerEvidence: LearningEvidenceEvent[] = [];
+  let turnEvidenceId: string | undefined;
+  try {
+    if (policyBrief && !awaitingFirstAttempt && policyBrief.attempt.madeAttempt) {
+      const observation = await recordTutorObservation({
+        learnerId,
+        sessionId: req.sessionId,
+        skillIds: [skillId],
+        taskId: `${req.sessionId}:${loadedHistory.length}`,
+        // An obligation is owed against a specific family, so the evidence must
+        // be filed under that same family or the debt never clears: a due
+        // review is settled by matching (skill, taskFamily), and evidence
+        // landing under a route-derived name settles nothing. The review would
+        // come due again next session, and the learner would be asked the same
+        // question forever while their answers piled up out of the scheduler's
+        // sight.
+        taskFamily:
+          policyBrief.move.taskFamily ??
+          routeTaskFamily(skillId, policyBrief.move.route, loadedHistory.length),
+        evidenceType: policyBrief.move.requiredEvidence[0] ?? "explanation",
+        response: req.learnerMessage,
+        correctness: correctnessFromDiagnosis(rawResult.value),
+        supportLevel: policyBrief.support.granted,
+        hintExposure: policyBrief.support.granted,
+        contextVariant: policyBrief.move.contextVariant,
+        evaluatorConfidence: rawResult.value.diagnosis ? 70 : 50,
+      });
+      turnEvidenceId = observation.evidenceId;
+    }
+    ledgerEvidence = await getSkillEvidence(skillId, learnerId);
+  } catch (error) {
+    console.warn("[tutor] could not record turn evidence", error);
+  }
+
+  // Stage movement is resolved from the evidence ledger, never from a bare
+  // assertion: forward motion must satisfy the stage's predicate and advances
+  // exactly one stage, while an observed regression is honoured immediately.
+  // Resolved here so roadmap integrity can see whether a goal was demonstrably
+  // completed — the same gate, not a parallel one.
+  const resolvedStage = resolveNextMasteryStage(masteryStage.stage, rawResult.value, ledgerEvidence);
+  const advancedTo =
+    resolvedStage &&
+    MASTERY_STAGES.indexOf(resolvedStage.stage) > MASTERY_STAGES.indexOf(masteryStage.stage)
+      ? resolvedStage.stage
+      : null;
+  // On regression resolvedStage.stage sits behind masteryStage; advancedTo stays
+  // null (forward-only) but liveStage must still be the earlier rung so the
+  // roadmap clamp can pull steps back instead of advertising withdrawn progress.
+  const regressTo =
+    resolvedStage &&
+    MASTERY_STAGES.indexOf(resolvedStage.stage) < MASTERY_STAGES.indexOf(masteryStage.stage)
+      ? resolvedStage.stage
+      : null;
+
   // Ceiling enforcement runs BEFORE the agency check, so that a turn whose only
   // learner-facing element was an over-supportive widget is caught by the
-  // never-passive net rather than shipping as a bare explanation.
-  const policedTurn = enforceLearnerAgency(
-    enforceSupportCeiling(
-      enforceTutorBoardNecessity(
-        enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
-        req.learnerMessage
+  // never-passive net rather than shipping as a bare explanation. Roadmap
+  // progress sits with those filters: it may rewrite place→update and inject a
+  // progress update clamped to the demonstrated stage, but never fabricates the
+  // next-step teaching widget. The show-don't-just-tell backstop runs last: it
+  // only ever appends speech, and it must see the turn after the other filters
+  // have decided what survived.
+  const turnStage = policyBrief?.state.stage ?? masteryStage.stage;
+  const roadmapLiveStage = advancedTo ?? regressTo ?? turnStage;
+  const policedTurn = enforceVisualExplanation(
+    enforceLearnerAgency(
+      enforceRoadmapProgress(
+        enforceSupportCeiling(
+          enforceTutorBoardNecessity(
+            enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
+            req.learnerMessage
+          ),
+          policyBrief?.support.granted ?? 3
+        ),
+        req.board,
+        { advancedTo, liveStage: roadmapLiveStage }
       ),
-      policyBrief?.support.granted ?? 3
+      req.board
     ),
+    turnStage,
     req.board
   );
 
@@ -2719,45 +3458,6 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
   }
 
-  // Record what the learner actually did this turn, then let the predicates
-  // decide the stage. Writing evidence AFTER the model call is deliberate: a
-  // turn that failed to complete never happened as far as the ledger is
-  // concerned, and a ledger that records unseen instruction is worse than no
-  // ledger at all.
-  let ledgerEvidence: LearningEvidenceEvent[] = [];
-  let turnEvidenceId: string | undefined;
-  try {
-    if (policyBrief && !awaitingFirstAttempt && policyBrief.attempt.madeAttempt) {
-      const observation = await recordTutorObservation({
-        learnerId,
-        sessionId: req.sessionId,
-        skillIds: [skillId],
-        taskId: `${req.sessionId}:${loadedHistory.length}`,
-        // An obligation is owed against a specific family, so the evidence must
-        // be filed under that same family or the debt never clears: a due
-        // review is settled by matching (skill, taskFamily), and evidence
-        // landing under a route-derived name settles nothing. The review would
-        // come due again next session, and the learner would be asked the same
-        // question forever while their answers piled up out of the scheduler's
-        // sight.
-        taskFamily:
-          policyBrief.move.taskFamily ??
-          routeTaskFamily(skillId, policyBrief.move.route, loadedHistory.length),
-        evidenceType: policyBrief.move.requiredEvidence[0] ?? "explanation",
-        response: req.learnerMessage,
-        correctness: correctnessFromDiagnosis(result.value),
-        supportLevel: policyBrief.support.granted,
-        hintExposure: policyBrief.support.granted,
-        contextVariant: policyBrief.move.contextVariant,
-        evaluatorConfidence: result.value.diagnosis ? 70 : 50,
-      });
-      turnEvidenceId = observation.evidenceId;
-    }
-    ledgerEvidence = await getSkillEvidence(skillId, learnerId);
-  } catch (error) {
-    console.warn("[tutor] could not record turn evidence", error);
-  }
-
   // Record the contract this turn's board activity is placed under, so that a
   // widget the learner answers later resolves to a named task family, context
   // variant and support ceiling rather than being filed as an anonymous click.
@@ -2786,10 +3486,6 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     evidenceIds: turnEvidenceId ? [turnEvidenceId] : [],
   });
 
-  // Stage movement is resolved from the evidence ledger, never from a bare
-  // assertion: forward motion must satisfy the stage's predicate and advances
-  // exactly one stage, while an observed regression is honoured immediately.
-  const resolvedStage = resolveNextMasteryStage(masteryStage.stage, result.value, ledgerEvidence);
   if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
     await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
   }
@@ -2842,71 +3538,166 @@ export async function testTutorStudioPrompt(
    ───────────────────────────────────────────────────────────── */
 
 export interface GeneratedOnboarding {
-  /** Short opener the agent writes before the questions. */
-  intro: string;
-  questions: OnboardingQuestion[];
-  /** The counsellor's own invitation to answer, replacing what used to be a
-   *  fixed app-authored sign-off. Optional: an older cached payload has none,
-   *  and the UI simply shows nothing rather than substituting a canned line. */
-  closing?: string;
-  /** What the counsellor says the moment the learner replies, while their
-   *  materials are prepared. Must read correctly whether they answered
+  /** The counsellor's own chat note, posted as it prepares the form. Never
+   *  app-authored — a fixed sentence here read the same in every session. */
+  notification: string;
+  /** The `create_forms` tool payload: the card the learner opens and fills. */
+  form: OnboardingForm;
+  /** What the counsellor says the moment the form is submitted, while the
+   *  materials are prepared. Must read correctly whether the learner answered
    *  everything or skipped it all. */
   handoff?: string;
 }
 
-function validateOnboardingPayload(payload: unknown): ValidationResult<GeneratedOnboarding> {
+/**
+ * Validate the counsellor's response to the onboarding prompt: a chat
+ * `notification` plus exactly one `create_forms` tool call carrying the five
+ * intake questions. Exported so the contract is unit-testable without a model.
+ */
+export function validateCreateFormsPayload(payload: unknown): ValidationResult<GeneratedOnboarding> {
   const errors: string[] = [];
   const rec = asRecord(payload, "root", errors);
   if (!rec) return invalid(...errors);
 
-  const intro = asNonEmptyString(rec.intro, "root.intro", errors);
-  const rawQuestions = asArray(rec.questions, "root.questions", errors);
-  if (!intro || !rawQuestions) return invalid(...errors);
+  const notification = asNonEmptyString(rec.notification, "root.notification", errors);
 
-  if (rawQuestions.length < MIN_ONBOARDING_QUESTIONS || rawQuestions.length > MAX_ONBOARDING_QUESTIONS) {
-    errors.push(
-      `root.questions must contain between ${MIN_ONBOARDING_QUESTIONS} and ${MAX_ONBOARDING_QUESTIONS} questions (got ${rawQuestions.length})`
-    );
-    return invalid(...errors);
+  const toolCall = asRecord(rec.tool_call, "root.tool_call", errors);
+  let form: OnboardingForm | null = null;
+  if (toolCall) {
+    const name = asNonEmptyString(toolCall.name, "root.tool_call.name", errors);
+    if (name && name !== CREATE_FORMS_TOOL) {
+      errors.push(`root.tool_call.name must be "${CREATE_FORMS_TOOL}" (got "${name}")`);
+    }
+    const args = asRecord(toolCall.arguments, "root.tool_call.arguments", errors);
+    if (name && args) {
+      const rawQuestions = asArray(args.questions, "root.tool_call.arguments.questions", errors);
+      if (rawQuestions) {
+        if (rawQuestions.length < MIN_ONBOARDING_QUESTIONS || rawQuestions.length > MAX_ONBOARDING_QUESTIONS) {
+          errors.push(
+            `root.tool_call.arguments.questions must contain between ${MIN_ONBOARDING_QUESTIONS} and ${MAX_ONBOARDING_QUESTIONS} questions (got ${rawQuestions.length})`
+          );
+        }
+        const questions: OnboardingQuestion[] = [];
+        rawQuestions.forEach((entry, i) => {
+          const path = `root.tool_call.arguments.questions[${i}]`;
+          // Accept a bare string (a free-text question) or
+          // {question, kind, options}. Anything else is a schema error the
+          // repair loop reports back to the model.
+          if (typeof entry === "string") {
+            const text = entry.trim();
+            if (!text) errors.push(`${path} must be a non-empty question`);
+            else questions.push({ id: `q${i + 1}`, question: text, kind: "free" });
+            return;
+          }
+          const obj = asRecord(entry, path, errors);
+          if (!obj) return;
+          const text = asNonEmptyString(obj.question, `${path}.question`, errors);
+          if (!text) return;
+
+          // Options imply a choice question even when the kind field is
+          // missing; an explicit "free" kind with options is contradictory.
+          const rawOptions = obj.options;
+          const hasOptions = Array.isArray(rawOptions);
+          let kind: OnboardingQuestionKind | undefined = obj.kind as OnboardingQuestionKind | undefined;
+          if (kind !== undefined && kind !== "free" && kind !== "choice") {
+            errors.push(`${path}.kind must be "free" or "choice" (got "${String(obj.kind)}")`);
+            return;
+          }
+          if (kind === undefined) kind = hasOptions ? "choice" : "free";
+
+          let options: string[] | undefined;
+          if (kind === "choice") {
+            const list = asArray(rawOptions, `${path}.options`, errors);
+            if (!list) return;
+            options = [];
+            const seen = new Set<string>();
+            list.forEach((option, j) => {
+              const label = asNonEmptyString(option, `${path}.options[${j}]`, errors);
+              if (!label) return;
+              const trimmed = label.trim();
+              if (seen.has(trimmed.toLowerCase())) {
+                errors.push(`${path}.options[${j}] duplicates another option`);
+                return;
+              }
+              seen.add(trimmed.toLowerCase());
+              options!.push(trimmed);
+            });
+            if (options.length < 2 || options.length > 6) {
+              errors.push(`${path}.options must list 2–6 options (got ${options.length})`);
+            }
+          } else if (hasOptions) {
+            errors.push(`${path} is a free-text question, so it must not carry options`);
+          }
+          // onlyIf: a constraint against an earlier question's answer, so a
+          // probe that cannot apply (e.g. "which part feels shakiest?" asked of
+          // someone who has never met the concept at all) simply never shows.
+          let onlyIf: OnboardingQuestion["onlyIf"];
+          if (obj.onlyIf !== undefined) {
+            const gate = asRecord(obj.onlyIf, `${path}.onlyIf`, errors);
+            if (gate) {
+              const gateId = asNonEmptyString(gate.questionId, `${path}.onlyIf.questionId`, errors);
+              const rawAnyOf = asArray(gate.anyOf, `${path}.onlyIf.anyOf`, errors);
+              const gateIndex = gateId && /^q(\d+)$/.test(gateId) ? Number(gateId.slice(1)) - 1 : -1;
+              const target = gateIndex >= 0 && gateIndex < i ? questions[gateIndex] : undefined;
+              if (!gateId || !target) {
+                errors.push(`${path}.onlyIf.questionId must reference an earlier question (got "${String(gateId)}")`);
+              } else if (target.kind !== "choice" || !target.options?.length) {
+                errors.push(`${path}.onlyIf can only gate on a choice question's selected option`);
+              } else if (rawAnyOf) {
+                const labels: string[] = [];
+                rawAnyOf.forEach((entry, j) => {
+                  const label = asNonEmptyString(entry, `${path}.onlyIf.anyOf[${j}]`, errors);
+                  if (label) labels.push(label.trim());
+                });
+                if (labels.length === 0) {
+                  errors.push(`${path}.onlyIf.anyOf needs at least one option label`);
+                } else {
+                  const optionSet = new Set(target.options.map((option) => option.toLowerCase()));
+                  const stray = labels.filter((label) => !optionSet.has(label.toLowerCase()));
+                  if (stray.length > 0) {
+                    errors.push(`${path}.onlyIf.anyOf must name options of ${gateId} (stray: ${stray.join(", ")})`);
+                  } else {
+                    // Store the labels as the earlier question spells them, so a
+                    // casing drift can't make a constraint unmatchable.
+                    onlyIf = {
+                      questionId: gateId,
+                      anyOf: labels.map((label) => target.options!.find((option) => option.toLowerCase() === label.toLowerCase()) ?? label),
+                    };
+                  }
+                }
+              }
+            }
+          }
+
+          questions.push({ id: `q${i + 1}`, question: text.trim(), kind, options, onlyIf });
+        });
+        const title = typeof args.title === "string" && args.title.trim() ? args.title.trim() : undefined;
+        const invitation = typeof args.invitation === "string" && args.invitation.trim() ? args.invitation.trim() : undefined;
+        form = { title, invitation, questions };
+      }
+    }
   }
 
-  const questions: OnboardingQuestion[] = [];
-  rawQuestions.forEach((entry, i) => {
-    const path = `root.questions[${i}]`;
-    // Accept a bare string or {question}. Anything else is a schema error the
-    // repair loop reports back to the model.
-    if (typeof entry === "string") {
-      const text = entry.trim();
-      if (!text) errors.push(`${path} must be a non-empty question`);
-      else questions.push({ id: `q${i + 1}`, question: text });
-      return;
-    }
-    const obj = asRecord(entry, path, errors);
-    if (!obj) return;
-    const text = asNonEmptyString(obj.question, `${path}.question`, errors);
-    if (text) questions.push({ id: `q${i + 1}`, question: text.trim() });
-  });
-
-  // closing/handoff are optional so a model that omits them degrades to silence
-  // rather than failing the whole interview — but when present they must be
-  // real sentences, not empty strings that would render as a blank line.
-  const closing = typeof rec.closing === "string" && rec.closing.trim() ? rec.closing.trim() : undefined;
+  // handoff is optional so a model that omits it degrades to silence rather
+  // than failing the whole intake — but when present it must be a real
+  // sentence, not an empty string that would render as a blank line.
   const handoff = typeof rec.handoff === "string" && rec.handoff.trim() ? rec.handoff.trim() : undefined;
 
-  if (errors.length > 0) return invalid(...errors);
-  return { ok: true, value: { intro, questions, closing, handoff } };
+  if (errors.length > 0 || !notification || !form) return invalid(...errors);
+  return { ok: true, value: { notification: notification.trim(), form, handoff } };
 }
 
 /**
- * Ask the tutor agent to write this session's onboarding interview.
+ * Ask the tutor agent to prepare this session's onboarding intake.
  *
- * The questions are generated per session against the concept the learner
- * picked and, when the curriculum node has been transcribed, the real evidence
- * excerpts for it — so the interview probes that specific material rather than
- * reading from a fixed script. Throws `AgentRuntimeError` when the tutor role is
- * unbound or the model cannot produce a valid interview; the caller surfaces
- * that instead of substituting canned questions.
+ * The agent answers with its own chat `notification` and a `create_forms` tool
+ * call whose five questions the chat renders as a fill-in form card — written
+ * per session against the concept the learner picked and, when the curriculum
+ * node has been transcribed, the real evidence excerpts for it — so the intake
+ * probes that specific material rather than reading from a fixed script.
+ * Throws `AgentRuntimeError` when the tutor role is unbound or the model
+ * cannot produce a valid call; the caller surfaces that instead of
+ * substituting canned questions.
  */
 export async function generateOnboardingQuestions(req: {
   concept: string;
@@ -2936,19 +3727,27 @@ export async function generateOnboardingQuestions(req: {
   const system =
     `You are the learner's study counsellor. Before a study session begins you sit down with them and find out who you are ` +
     `about to teach — their footing on this concept, what they expect to find hard, and how they want to work — so the tutor ` +
-    `can calibrate to this person rather than teaching a generic lesson.\n\n` +
+    `can build the syllabus that fits this person rather than teaching a generic lesson.\n\n` +
+    `You conduct the intake by calling your \`${CREATE_FORMS_TOOL}\` tool: it renders a fill-in form card ` +
+    `inside the chat, so the learner answers by opening the form and typing into fields or picking options ` +
+    `instead of writing numbered lines of reply.\n\n` +
     `Rules:\n` +
     `- Ask AT MOST ${MAX_ONBOARDING_QUESTIONS} questions, and no fewer than ${MIN_ONBOARDING_QUESTIONS}. Ask fewer when fewer will do; do not pad to reach the maximum.\n` +
     `- Probe what actually matters for teaching this material: current grasp, which sub-parts they expect to struggle with, prior background the concept depends on, pace/deadline pressure, and how they want to be taught.\n` +
     `- Ask about the learner, never quiz them on the content — this is calibration, not assessment.\n` +
-    `- Each question must be answerable in one short line, since the learner replies with one line per question.\n` +
-    `- Be specific to the concept. Do not emit generic filler that would fit any subject.\n` +
+    `- Pick the answer format that fits each question: kind "choice" when two to six options genuinely cover the space (each a short phrase, ordered sensibly), kind "free" when the honest answer is a line of the learner's own words. A good intake mixes both.\n` +
+    `- Respect constraints: a follow-up probe must make sense to the particular learner reading it. When a question only applies given a certain earlier answer — e.g. "which part feels shakiest?" means nothing to someone who just said they have never met the concept at all — gate it with onlyIf on that earlier choice question and the option labels under which it applies, rather than asking it unconditionally.\n` +
+    `- Free-text questions must be answerable in one short line.\n` +
+    `- Be specific to the concept. Do not emit generic filler that would fit any subject, and do not use the same option list twice.\n` +
     `- Do not number the questions; numbering is added by the app.\n` +
-    `- Write as a counsellor talking to a person, not a form being filled in.\n\n` +
-    `Return JSON only: {"intro": string, "questions": [{"question": string}, ...], "closing": string, "handoff": string}.\n` +
-    `- "intro": one or two sentences in your own voice, welcoming this learner to THIS concept and saying why you are asking.\n` +
-    `- "closing": one sentence inviting them to answer, and making clear they may skip any or all of the questions. Your words, not a fixed formula.\n` +
-    `- "handoff": one sentence you will say the moment they reply, while their materials are being prepared. It must work whether they answered every question or skipped them all. Do not promise anything specific about what the board will contain.\n` +
+    `- Write as a counsellor preparing a form for a person, not a clerk printing paperwork.\n\n` +
+    `Return JSON only:\n` +
+    `{"notification": string, "tool_call": {"name": "${CREATE_FORMS_TOOL}", "arguments": {"title": string, "invitation": string, "questions": [{"question": string, "kind": "free" | "choice", "options"?: string[], "onlyIf"?: {"questionId": string, "anyOf": string[]}}, ...]}}, "handoff": string}.\n` +
+    `- "notification": one or two sentences in your own voice, posted in the chat as you run — welcome this learner to THIS concept and tell them you are putting your ${MAX_ONBOARDING_QUESTIONS} intake questions into a small form they can open right in the chat, so it takes a minute and they can skip anything they like. Your words, never a fixed formula.\n` +
+    `- "title": two to six words naming this intake, specific to the concept.\n` +
+    `- "invitation": one sentence shown inside the form, inviting them to answer and making clear they may skip any or all of the questions.\n` +
+    `- "onlyIf": ids are positional — the first question is q1, the second q2, and a gate may only reference an earlier one.\n` +
+    `- "handoff": one sentence you will say the moment they submit the form, while their materials are being prepared. It must work whether they answered every question or skipped them all. Do not promise anything specific about what the board will contain.\n` +
     `No prose outside the JSON, no code fences.`;
 
   const user =
@@ -2964,7 +3763,7 @@ export async function generateOnboardingQuestions(req: {
     schemaVersion: ONBOARDING_SCHEMA_VERSION,
     temperature: 0.6,
     signal: req.signal,
-    validate: validateOnboardingPayload,
+    validate: validateCreateFormsPayload,
   });
 
   return result.value;

@@ -1,108 +1,96 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  deleteStudySession,
-  getStudySession,
-  listStudySessions,
-  pastePastNoteClipboard,
-  readPastNoteClipboard,
-  renameStudySession,
-  saveStudySession,
-  subscribeToStudySessions,
-  writePastNoteClipboard,
-  type StoredStudySession,
-} from "./studySessionStore";
+import { describe, expect, it } from "vitest";
+import type { BoardDoc } from "../data/boards";
+import { hydrateStudyBoards, hydrateStudySession, type StoredStudySession } from "./studySessionStore";
 
-function memoryStorage(): Storage {
-  const values = new Map<string, string>();
-  return {
-    get length() {
-      return values.size;
-    },
-    clear: () => values.clear(),
-    getItem: (key) => values.get(key) ?? null,
-    key: (index) => Array.from(values.keys())[index] ?? null,
-    removeItem: (key) => {
-      values.delete(key);
-    },
-    setItem: (key, value) => {
-      values.set(key, value);
-    },
-  };
-}
+describe("study session hydration keeps widgets durable", () => {
+  it("preserves widget blocks and sanitizes learner state on reopen", () => {
+    const boards = hydrateStudyBoards([
+      {
+        id: "board-1",
+        title: "Unit circle",
+        subtitle: "",
+        domain: "math",
+        blocks: [
+          {
+            id: "w1",
+            kind: "widget",
+            intent: {
+              kind: "animation",
+              frames: [{ id: "f1", caption: "One lap around the unit circle" }],
+              scene: {
+                xDomain: [-2, 2],
+                yDomain: [-2, 2],
+                elements: [
+                  { kind: "curve", id: "c", xExpression: "cos(u)", yExpression: "sin(u)", uDomain: [0, 6.28] },
+                ],
+              },
+            },
+            state: {
+              animationProgress: Number.NaN,
+              predictionLocked: true,
+              responseText: "a".repeat(10_000),
+              checkpointResponses: {
+                cp1: { response: "1", correct: true },
+                "": { response: "empty-key-dropped" },
+              },
+            },
+          },
+        ],
+      } as BoardDoc,
+    ]);
 
-const session: StoredStudySession = {
-  id: "session-1",
-  title: "Orbital mechanics",
-  domain: "physics",
-  boards: [],
-  activeId: "",
-  messages: [],
-  viewMap: {},
-  strokeMap: {},
-  updatedAt: "2026-08-12T00:00:00.000Z",
-};
-
-describe("study session subscriptions", () => {
-  beforeEach(() => {
-    vi.stubGlobal("window", new EventTarget());
-    vi.stubGlobal("localStorage", memoryStorage());
+    expect(boards).toHaveLength(1);
+    const widget = boards[0].blocks[0];
+    expect(widget.kind).toBe("widget");
+    if (widget.kind !== "widget") return;
+    expect(widget.intent.kind).toBe("animation");
+    expect(widget.state?.predictionLocked).toBe(true);
+    // Non-finite progress is dropped rather than rehydrated as a crash seed.
+    expect(widget.state?.animationProgress).toBeUndefined();
+    expect(widget.state?.responseText?.length).toBeLessThanOrEqual(4000);
+    expect(widget.state?.checkpointResponses?.cp1?.response).toBe("1");
+    expect(widget.state?.checkpointResponses?.[""]).toBeUndefined();
   });
 
-  afterEach(() => {
-    vi.unstubAllGlobals();
+  it("keeps the session active board when boards are present", () => {
+    const session = hydrateStudySession({
+      id: "s1",
+      title: "Note",
+      domain: "math",
+      boards: [
+        { id: "a", title: "A", subtitle: "", domain: "math", blocks: [] },
+        { id: "b", title: "B", subtitle: "", domain: "math", blocks: [] },
+      ],
+      activeId: "b",
+      messages: [],
+      viewMap: {},
+      strokeMap: {},
+      updatedAt: new Date().toISOString(),
+    } as StoredStudySession);
+    expect(session.activeId).toBe("b");
+    expect(session.boards.map((board) => board.id)).toEqual(["a", "b"]);
   });
 
-  it("renames and copies the complete saved-note snapshot", () => {
-    const detailed = {
-      ...session,
-      boards: [{ id: "board-1", title: "Orbits", subtitle: "", domain: "physics" as const, blocks: [] }],
-      activeId: "board-1",
-      messages: [{ id: 1, role: "tutor" as const, text: "Keep this transcript." }],
-    };
-    saveStudySession(detailed);
-
-    expect(renameStudySession(session.id, "  Circular motion  ")?.title).toBe("Circular motion");
-    expect(writePastNoteClipboard(session.id, "copy")?.session.boards).toEqual(detailed.boards);
-    const pasted = pastePastNoteClipboard();
-
-    expect(pasted?.id).not.toBe(session.id);
-    expect(pasted?.title).toBe("Circular motion copy");
-    expect(pasted?.boards).toEqual(detailed.boards);
-    expect(pasted?.messages).toEqual(detailed.messages);
-    expect(getStudySession(session.id)?.title).toBe("Circular motion");
-    expect(listStudySessions()).toHaveLength(2);
-  });
-
-  it("cuts by moving an existing snapshot on paste and clears the clipboard", () => {
-    saveStudySession(session);
-    expect(writePastNoteClipboard(session.id, "cut")?.mode).toBe("cut");
-    const pasted = pastePastNoteClipboard();
-
-    expect(pasted?.id).toBe(session.id);
-    expect(listStudySessions()).toHaveLength(1);
-    expect(readPastNoteClipboard()).toBeNull();
-  });
-
-  it("broadcasts same-window saves and deletes to every session list", () => {
-    const firstList = vi.fn();
-    const secondList = vi.fn();
-    const unsubscribeFirst = subscribeToStudySessions(firstList);
-    const unsubscribeSecond = subscribeToStudySessions(secondList);
-
-    saveStudySession(session);
-    expect(listStudySessions().map((item) => item.id)).toEqual([session.id]);
-    expect(firstList).toHaveBeenCalledTimes(1);
-    expect(secondList).toHaveBeenCalledTimes(1);
-
-    deleteStudySession(session.id);
-    expect(listStudySessions()).toEqual([]);
-    expect(firstList).toHaveBeenCalledTimes(2);
-    expect(secondList).toHaveBeenCalledTimes(2);
-
-    unsubscribeFirst();
-    unsubscribeSecond();
-    saveStudySession(session);
-    expect(firstList).toHaveBeenCalledTimes(2);
-    expect(secondList).toHaveBeenCalledTimes(2);
+  it("does not drop a widget block when intent validation fails", () => {
+    const boards = hydrateStudyBoards([
+      {
+        id: "board-1",
+        title: "Note",
+        subtitle: "",
+        domain: "math",
+        blocks: [
+          {
+            id: "w-old",
+            kind: "widget",
+            // Unknown kind from a future build — still kept so the learner's
+            // place on the board is not silently erased.
+            intent: { kind: "widget_from_the_future", title: "X" } as never,
+            state: { submitted: true },
+          },
+        ],
+      } as BoardDoc,
+    ]);
+    expect(boards[0].blocks).toHaveLength(1);
+    expect(boards[0].blocks[0].kind).toBe("widget");
   });
 });

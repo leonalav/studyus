@@ -37,10 +37,16 @@ import {
   type TutorTurn,
   enforceLearnerAgency,
   turnLeavesLearnerSomethingToDo,
+  enforceVisualExplanation,
+  enforceRoadmapProgress,
+  findBoardRoadmap,
+  buildRoadmapIntentForStage,
+  summarizeBoardBlocks,
 } from "./tutor";
 import { DEFAULT_TUTOR } from "./preferences";
 import { bindModelRole, defaultCapabilities } from "./llm";
 import type { VisualizationIntent } from "./visualization/types";
+import type { RoadmapWidget } from "./widgets/types";
 
 const EVIDENCE = new Set(["E1", "E2", "E3"]);
 
@@ -989,11 +995,13 @@ describe("Guide to Mastery stage persistence", () => {
 });
 
 describe("Guide to Mastery stage advancement", () => {
-  it("advances exactly one stage, and only with evidence", () => {
+  it("does not advance on a bare model claim when the ledger is empty", () => {
+    // The empty-ledger claim path was the bypass: ready + any sentence advanced
+    // one stage with no recorded evidence. Advancement is ledger-gated only.
     expect(resolveNextMasteryStage("encounter", {
       stage: "encounter",
       stageAdvance: { ready: true, evidence: "Described the tangent-line picture in their own words." },
-    })).toEqual({ stage: "understand", evidence: "Described the tangent-line picture in their own words." });
+    })).toBeNull();
 
     // No advancement claimed.
     expect(resolveNextMasteryStage("encounter", { stage: "encounter" })).toBeNull();
@@ -1003,12 +1011,98 @@ describe("Guide to Mastery stage advancement", () => {
     })).toBeNull();
   });
 
-  it("refuses to skip stages no matter what the model reports", () => {
-    // The model claims it is already at Master. It still only moves one rung.
+  it("advances exactly one stage when the ledger satisfies the exit predicate", () => {
+    const ledger = [
+      {
+        evidenceId: "e1",
+        learnerId: "L",
+        skillIds: ["derivatives"],
+        taskId: "t1",
+        taskFamily: "family_a",
+        contextVariant: "same" as const,
+        evidenceType: "prediction" as const,
+        response: "I think the slope gets steeper",
+        correctness: "correct" as const,
+        rubricCriterionIds: [],
+        supportLevel: 0 as const,
+        hintExposure: 0 as const,
+        delayed: false,
+        source: "tutor_turn" as const,
+        timestamp: new Date().toISOString(),
+      },
+      {
+        evidenceId: "e2",
+        learnerId: "L",
+        skillIds: ["derivatives"],
+        taskId: "t2",
+        taskFamily: "family_b",
+        contextVariant: "same" as const,
+        evidenceType: "observation" as const,
+        response: "the secant approaches the tangent",
+        correctness: "correct" as const,
+        rubricCriterionIds: [],
+        supportLevel: 0 as const,
+        hintExposure: 0 as const,
+        delayed: false,
+        source: "tutor_turn" as const,
+        timestamp: new Date().toISOString(),
+      },
+    ];
+    const next = resolveNextMasteryStage(
+      "encounter",
+      {
+        stage: "encounter",
+        stageAdvance: { ready: true, evidence: "Committed a prediction and read the result." },
+      },
+      ledger
+    );
+    expect(next?.stage).toBe("understand");
+    expect(next?.evidence).toMatch(/Encounter satisfied/);
+  });
+
+  it("refuses to skip stages even when the ledger would allow the next rung", () => {
+    // Satisfying Encounter still only moves one rung, regardless of the stage
+    // the model reports.
+    const ledger = [
+      {
+        evidenceId: "e1",
+        learnerId: "L",
+        skillIds: ["derivatives"],
+        taskId: "t1",
+        taskFamily: "family_a",
+        contextVariant: "same" as const,
+        evidenceType: "prediction" as const,
+        response: "prediction",
+        correctness: "correct" as const,
+        rubricCriterionIds: [],
+        supportLevel: 0 as const,
+        hintExposure: 0 as const,
+        delayed: false,
+        source: "tutor_turn" as const,
+        timestamp: new Date().toISOString(),
+      },
+      {
+        evidenceId: "e2",
+        learnerId: "L",
+        skillIds: ["derivatives"],
+        taskId: "t2",
+        taskFamily: "family_b",
+        contextVariant: "same" as const,
+        evidenceType: "observation" as const,
+        response: "observation",
+        correctness: "correct" as const,
+        rubricCriterionIds: [],
+        supportLevel: 0 as const,
+        hintExposure: 0 as const,
+        delayed: false,
+        source: "tutor_turn" as const,
+        timestamp: new Date().toISOString(),
+      },
+    ];
     expect(resolveNextMasteryStage("encounter", {
       stage: "master",
       stageAdvance: { ready: true, evidence: "They seem to have it." },
-    })?.stage).toBe("understand");
+    }, ledger)?.stage).toBe("understand");
   });
 
   it("cannot advance past the final stage", () => {
@@ -1109,8 +1203,10 @@ describe("the learner is never passive", () => {
   it("hands the work back in speech when the agent forgot to", () => {
     const fixed = enforceLearnerAgency(turn([roadmap]));
     expect(fixed.speech).toContain("Here is the plan.");
-    // The nudge must be answerable, not another "does that make sense?".
-    expect(fixed.speech).toMatch(/tell me what you already know|ask me the first thing/i);
+    // Must open a continuation lane into real teaching — never another prior-knowledge interview.
+    expect(fixed.speech).toMatch(/continue/i);
+    expect(fixed.speech).toMatch(/core figure|mechanism|board/i);
+    expect(fixed.speech).not.toMatch(/tell me what you already know|before we go on/i);
   });
 
   it("never fabricates a board op the agent did not author", () => {
@@ -1130,5 +1226,531 @@ describe("the learner is never passive", () => {
     // A greeting or clarification has no board ops and owes no task.
     const speechOnly = turn([], "Yes, that link is in Threads.");
     expect(enforceLearnerAgency(speechOnly)).toBe(speechOnly);
+  });
+});
+
+/**
+ * The counterweight to the never-passive rule: the stage vocabulary names a
+ * *picture* (function/geometry/equation), and a board that only ever asks
+ * questions about a spatial idea is an unfinished explanation. Enforced at
+ * runtime the same way the agency rule is — but speech-only, never fabricating
+ * a figure the agent did not author.
+ */
+describe("show, don't just tell — the missing-figure backstop", () => {
+  const question = {
+    op: "place_widget" as const,
+    intent: {
+      kind: "question" as const,
+      format: "multiple_choice" as const,
+      prompt: "Why do the slices over- or under-shoot?",
+      options: [
+        { id: "a", label: "They follow the curve's corners", correct: true },
+        { id: "b", label: "They ignore the curve" },
+      ],
+    },
+  };
+  const graph = {
+    op: "visualize" as const,
+    intent: {
+      type: "function" as const,
+      title: "y = x^2",
+      displayMode: "graph" as const,
+      domainX: [-2, 2] as [number, number],
+      expressions: [{ id: "f", expression: "x^2", label: "f(x)" }],
+    },
+  };
+  const latex = { op: "write_latex" as const, tex: "\\sum_{i=1}^{n} f(x_i)\\Delta x", caption: "Riemann sum" };
+
+  const turn = (boardOps: unknown[], speech = "Here's a check.") =>
+    ({ speech, boardOps, evidenceRefs: [] }) as unknown as Parameters<typeof enforceVisualExplanation>[0];
+  const board = (blocks: unknown[]) =>
+    ({ id: "b1", title: "t", subtitle: "", domain: "math", blocks }) as unknown as Parameters<typeof enforceVisualExplanation>[2];
+
+  it("nudges a question-only turn in a stage whose vocabulary is a picture", () => {
+    const fixed = enforceVisualExplanation(turn([question]), "encounter");
+    expect(fixed.speech).toMatch(/core picture|graph, diagram or animation|continue/i);
+    expect(fixed.speech).not.toMatch(/ask me to put it on the board/i);
+  });
+
+  it("never fabricates a figure — the board ops are untouched", () => {
+    const fixed = enforceVisualExplanation(turn([question]), "encounter");
+    expect(fixed.boardOps).toHaveLength(1);
+    expect(fixed.boardOps[0]).toEqual(question);
+  });
+
+  it("leaves a compliant turn with a figure untouched", () => {
+    const compliant = turn([graph, question]);
+    expect(enforceVisualExplanation(compliant, "encounter")).toBe(compliant);
+  });
+
+  it("stays silent once any figure already exists on the board", () => {
+    const withFigure = board([{ id: "v1", kind: "visualization", intent: graph.intent }]);
+    const fixed = enforceVisualExplanation(turn([question]), "encounter", withFigure);
+    expect(fixed.speech).toBe("Here's a check.");
+  });
+
+  it("an equation only satisfies a stage whose vocabulary is 'equation'", () => {
+    // Understand asks for the *equation* — a Σ is enough there.
+    const satisfied = turn([latex, question]);
+    expect(enforceVisualExplanation(satisfied, "understand")).toBe(satisfied);
+    // Encounter asks for a *picture* — a lone Σ is not one, so the nudge stays.
+    const nudged = enforceVisualExplanation(turn([latex, question]), "encounter");
+    expect(nudged.speech).toMatch(/core picture|graph, diagram or animation|continue/i);
+  });
+
+  it("does not nag stages with no visual vocabulary", () => {
+    for (const stage of ["construct", "master"] as const) {
+      const fixed = enforceVisualExplanation(turn([question]), stage);
+      expect(fixed.speech).toBe("Here's a check.");
+    }
+  });
+
+  it("does not nag housekeeping-only turns, even in a visual stage", () => {
+    const tidy = turn([{ op: "revise_text", targetIndex: 0, find: "a", replace: "b" }]);
+    expect(enforceVisualExplanation(tidy, "encounter").speech).toBe("Here's a check.");
+  });
+
+  it("does not nag the session-opening plan/roadmap beat", () => {
+    const opening = turn([
+      { op: "place_widget", intent: { kind: "plan", heading: "Limits", steps: [{ id: "s1", label: "Meet the idea" }, { id: "s2", label: "Defend it" }] } },
+      { op: "place_widget", intent: { kind: "roadmap", heading: "Today", steps: [{ id: "r1", label: "Start", state: "current" }] } },
+    ]);
+    expect(enforceVisualExplanation(opening, "encounter").speech).toBe("Here's a check.");
+  });
+
+  it("leaves speech-only turns alone", () => {
+    const speechOnly = turn([], "That link is in Threads.");
+    expect(enforceVisualExplanation(speechOnly, "encounter")).toBe(speechOnly);
+  });
+});
+
+/**
+ * When a learner demonstrably completes a goal (ledger predicates open the next
+ * mastery stage), the existing roadmap on the board must advance with the lesson.
+ * A second roadmap, a roadmap-only turn, or a silent promotion of later steps are
+ * all failures of the same contract: the board is the map of where the learner is.
+ */
+describe("roadmap advances with demonstrated goals", () => {
+  const roadmapSteps = [
+    { id: "encounter", label: "Encounter", state: "done" as const },
+    { id: "understand", label: "Understand", state: "current" as const },
+    { id: "construct", label: "Construct", state: "upcoming" as const },
+    { id: "apply", label: "Apply", state: "upcoming" as const },
+  ];
+
+  const boardWithRoadmap = {
+    id: "b1",
+    title: "Derivatives",
+    subtitle: "",
+    domain: "math" as const,
+    blocks: [
+      {
+        id: "agent-roadmap-1",
+        kind: "widget" as const,
+        intent: {
+          kind: "roadmap" as const,
+          heading: "Today's path",
+          steps: roadmapSteps,
+        },
+      },
+      {
+        id: "q1",
+        kind: "widget" as const,
+        intent: {
+          kind: "question" as const,
+          format: "short_answer" as const,
+          prompt: "Why does the limit appear?",
+          acceptedAnswers: ["rate of change"],
+        },
+        state: { submitted: true, correct: true, responseText: "rate of change" },
+      },
+    ],
+  };
+
+  const question = {
+    op: "place_widget" as const,
+    intent: {
+      kind: "question" as const,
+      format: "multiple_choice" as const,
+      prompt: "Build the difference quotient",
+      options: [
+        { id: "a", label: "Write the definition", correct: true },
+        { id: "b", label: "Guess the answer", misconception: "skips construction" },
+      ],
+    },
+  };
+
+  const turn = (boardOps: unknown[], speech = "Onward.") =>
+    ({ speech, boardOps, evidenceRefs: [], stage: "construct" }) as unknown as TutorTurn;
+
+  it("surfaces the roadmap anchor, step ids, and states in the board summary", () => {
+    const summary = summarizeBoardBlocks(boardWithRoadmap as never);
+    expect(summary).toMatch(/anchor=agent-roadmap-1/);
+    expect(summary).toMatch(/kind=widget \(roadmap\)/);
+    expect(summary).toMatch(/encounter:done/);
+    expect(summary).toMatch(/understand:current/);
+    expect(summary).toMatch(/construct:upcoming/);
+  });
+
+  it("finds the existing roadmap on the board", () => {
+    const found = findBoardRoadmap(boardWithRoadmap as never);
+    expect(found?.anchor).toBe("agent-roadmap-1");
+    expect(found?.index).toBe(0);
+    expect(found?.intent.steps.map((s) => s.id)).toEqual([
+      "encounter",
+      "understand",
+      "construct",
+      "apply",
+    ]);
+  });
+
+  it("builds a roadmap intent that marks completed stages done and the live stage current", () => {
+    const intent = buildRoadmapIntentForStage(
+      {
+        kind: "roadmap",
+        heading: "Today's path",
+        steps: roadmapSteps,
+      },
+      "construct"
+    );
+    expect(intent.steps.find((s) => s.id === "understand")?.state).toBe("done");
+    expect(intent.steps.find((s) => s.id === "construct")?.state).toBe("current");
+    expect(intent.steps.find((s) => s.id === "apply")?.state).toBe("upcoming");
+    // Never invent a weaker promotion: steps beyond the demonstrated stage stay upcoming.
+    expect(intent.steps.every((s) => s.state !== "done" || ["encounter", "understand"].includes(s.id))).toBe(true);
+  });
+
+  it("rewrites a duplicate place_widget roadmap into update_widget on the existing anchor", () => {
+    const duplicatePlace = {
+      op: "place_widget" as const,
+      intent: {
+        kind: "roadmap" as const,
+        heading: "Today's path",
+        steps: [
+          { id: "encounter", label: "Encounter", state: "done" as const },
+          { id: "understand", label: "Understand", state: "done" as const },
+          { id: "construct", label: "Construct", state: "current" as const },
+          { id: "apply", label: "Apply", state: "upcoming" as const },
+        ],
+      },
+    };
+    const fixed = enforceRoadmapProgress(turn([duplicatePlace, question]), boardWithRoadmap as never, {
+      advancedTo: "construct",
+    });
+    const roadmapOps = fixed.boardOps.filter(
+      (op) =>
+        (op.op === "place_widget" || op.op === "update_widget") &&
+        op.intent.kind === "roadmap"
+    );
+    expect(roadmapOps).toHaveLength(1);
+    expect(roadmapOps[0].op).toBe("update_widget");
+    if (roadmapOps[0].op === "update_widget") {
+      expect(roadmapOps[0].targetAnchor).toBe("agent-roadmap-1");
+      const intent = roadmapOps[0].intent as RoadmapWidget;
+      expect(intent.steps.find((s) => s.id === "construct")?.state).toBe("current");
+    }
+  });
+
+  it("injects an update_widget when the stage advanced and the model forgot the roadmap", () => {
+    const fixed = enforceRoadmapProgress(turn([question]), boardWithRoadmap as never, {
+      advancedTo: "construct",
+    });
+    const update = fixed.boardOps.find(
+      (op) => op.op === "update_widget" && op.intent.kind === "roadmap"
+    );
+    expect(update).toBeDefined();
+    if (update && update.op === "update_widget") {
+      expect(update.targetAnchor).toBe("agent-roadmap-1");
+      const intent = update.intent as RoadmapWidget;
+      expect(intent.steps.find((s) => s.id === "understand")?.state).toBe("done");
+      expect(intent.steps.find((s) => s.id === "construct")?.state).toBe("current");
+    }
+    // Still opens the next step in the same turn — never a roadmap-only turn.
+    expect(fixed.boardOps.some((op) => op.op === "place_widget" && op.intent.kind === "question")).toBe(true);
+  });
+
+  it("does not invent roadmap progress when the stage did not advance", () => {
+    const fixed = enforceRoadmapProgress(turn([question]), boardWithRoadmap as never, {
+      advancedTo: null,
+    });
+    expect(fixed.boardOps.every((op) => op.op !== "update_widget" || op.intent.kind !== "roadmap")).toBe(true);
+  });
+
+  it("refuses unsupported step promotion beyond the demonstrated stage", () => {
+    // Model tries to mark Apply done while only Construct was demonstrated.
+    const overreach = {
+      op: "update_widget" as const,
+      targetAnchor: "agent-roadmap-1",
+      intent: {
+        kind: "roadmap" as const,
+        heading: "Today's path",
+        steps: [
+          { id: "encounter", label: "Encounter", state: "done" as const },
+          { id: "understand", label: "Understand", state: "done" as const },
+          { id: "construct", label: "Construct", state: "done" as const },
+          { id: "apply", label: "Apply", state: "done" as const },
+        ],
+      },
+    };
+    const fixed = enforceRoadmapProgress(turn([overreach, question]), boardWithRoadmap as never, {
+      advancedTo: "construct",
+    });
+    const update = fixed.boardOps.find(
+      (op) => op.op === "update_widget" && op.intent.kind === "roadmap"
+    );
+    expect(update).toBeDefined();
+    if (update && update.op === "update_widget") {
+      const intent = update.intent as RoadmapWidget;
+      expect(intent.steps.find((s) => s.id === "construct")?.state).toBe("current");
+      expect(intent.steps.find((s) => s.id === "apply")?.state).toBe("upcoming");
+      expect(intent.steps.filter((s) => s.state === "done").map((s) => s.id)).toEqual([
+        "encounter",
+        "understand",
+      ]);
+    }
+  });
+
+  it("drops a roadmap-only follow-up that neither advances a step nor opens work", () => {
+    // A second place of a roadmap with no teaching content is the forbidden turn.
+    const onlyRoadmap = {
+      op: "place_widget" as const,
+      intent: {
+        kind: "roadmap" as const,
+        heading: "Another map",
+        steps: [{ id: "x", label: "X", state: "current" as const }],
+      },
+    };
+    const fixed = enforceRoadmapProgress(turn([onlyRoadmap]), boardWithRoadmap as never, {
+      advancedTo: null,
+    });
+    // Existing roadmap means a fresh place is not allowed; without advancement
+    // there is nothing to update either — ops must not leave a duplicate map.
+    expect(
+      fixed.boardOps.filter(
+        (op) =>
+          (op.op === "place_widget" || op.op === "update_widget") &&
+          op.intent.kind === "roadmap"
+      )
+    ).toHaveLength(0);
+  });
+
+  it("heals the map on an empty turn when the stage advanced (no sticky desync)", () => {
+    // Stage can persist without teaching ops; the board map must still move.
+    const fixed = enforceRoadmapProgress(turn([]), boardWithRoadmap as never, {
+      advancedTo: "construct",
+    });
+    expect(fixed.boardOps).toHaveLength(1);
+    const update = fixed.boardOps[0];
+    expect(update.op).toBe("update_widget");
+    if (update.op === "update_widget") {
+      expect(update.targetAnchor).toBe("agent-roadmap-1");
+      const intent = update.intent as RoadmapWidget;
+      expect(intent.steps.find((s) => s.id === "construct")?.state).toBe("current");
+      expect(intent.steps.find((s) => s.id === "understand")?.state).toBe("done");
+    }
+  });
+
+  it("keeps a roadmap-only update_widget when it is a real stage heal", () => {
+    const onlyUpdate = {
+      op: "update_widget" as const,
+      targetAnchor: "agent-roadmap-1",
+      intent: {
+        kind: "roadmap" as const,
+        heading: "Today's path",
+        steps: roadmapSteps.map((s) =>
+          s.id === "construct" ? { ...s, state: "current" as const } : s.id === "understand" ? { ...s, state: "done" as const } : s
+        ),
+      },
+    };
+    const fixed = enforceRoadmapProgress(turn([onlyUpdate]), boardWithRoadmap as never, {
+      advancedTo: "construct",
+    });
+    expect(fixed.boardOps).toHaveLength(1);
+    const update = fixed.boardOps[0];
+    expect(update.op).toBe("update_widget");
+    if (update.op === "update_widget") {
+      const intent = update.intent as RoadmapWidget;
+      expect(intent.steps.find((s) => s.id === "construct")?.state).toBe("current");
+    }
+  });
+
+  it("drops an idle roadmap-only update when the map already matches the live stage", () => {
+    // Board already has understand current; liveStage stays understand — no heal.
+    const idle = {
+      op: "update_widget" as const,
+      targetAnchor: "agent-roadmap-1",
+      intent: {
+        kind: "roadmap" as const,
+        heading: "Today's path",
+        steps: roadmapSteps,
+      },
+    };
+    const fixed = enforceRoadmapProgress(turn([idle]), boardWithRoadmap as never, {
+      advancedTo: null,
+      liveStage: "understand",
+    });
+    expect(fixed.boardOps).toHaveLength(0);
+  });
+
+  it("rewrites insert_after / replace_block second maps onto the existing anchor", () => {
+    const insertMap = {
+      op: "insert_after" as const,
+      targetAnchor: "q1",
+      block: {
+        kind: "widget" as const,
+        intent: {
+          kind: "roadmap" as const,
+          heading: "Sneaky second map",
+          steps: [{ id: "encounter", label: "Encounter", state: "current" as const }],
+        },
+      },
+    };
+    const fixed = enforceRoadmapProgress(turn([insertMap, question]), boardWithRoadmap as never, {
+      advancedTo: "construct",
+    });
+    expect(fixed.boardOps.some((op) => op.op === "insert_after")).toBe(false);
+    const update = fixed.boardOps.find(
+      (op) => op.op === "update_widget" && op.intent.kind === "roadmap"
+    );
+    expect(update).toBeDefined();
+    if (update && update.op === "update_widget") {
+      expect(update.targetAnchor).toBe("agent-roadmap-1");
+    }
+  });
+
+  it("strips roadmap blocks from spawn_thread when a board map already exists", () => {
+    const thread = {
+      op: "spawn_thread" as const,
+      title: "Aside",
+      reason: "detour",
+      initialBlocks: [
+        {
+          kind: "widget" as const,
+          intent: {
+            kind: "roadmap" as const,
+            heading: "Thread map",
+            steps: [{ id: "x", label: "X", state: "current" as const }],
+          },
+        },
+        { kind: "text" as const, text: "A real aside." },
+      ],
+    };
+    const fixed = enforceRoadmapProgress(turn([thread]), boardWithRoadmap as never, {
+      advancedTo: null,
+    });
+    const spawn = fixed.boardOps.find((op) => op.op === "spawn_thread");
+    expect(spawn).toBeDefined();
+    if (spawn && spawn.op === "spawn_thread") {
+      expect(spawn.initialBlocks.every((b) => b.kind !== "widget" || b.intent.kind !== "roadmap")).toBe(true);
+      expect(spawn.initialBlocks.some((b) => b.kind === "text")).toBe(true);
+    }
+    expect(
+      fixed.boardOps.filter(
+        (op) =>
+          (op.op === "place_widget" || op.op === "update_widget") &&
+          op.intent.kind === "roadmap"
+      )
+    ).toHaveLength(0);
+  });
+
+  it("pulls roadmap steps back on regression via liveStage clamp", () => {
+    // Board shows construct current / earlier done; live stage is understand.
+    const overreach = {
+      op: "update_widget" as const,
+      targetAnchor: "agent-roadmap-1",
+      intent: {
+        kind: "roadmap" as const,
+        heading: "Today's path",
+        steps: [
+          { id: "encounter", label: "Encounter", state: "done" as const },
+          { id: "understand", label: "Understand", state: "done" as const },
+          { id: "construct", label: "Construct", state: "current" as const },
+          { id: "apply", label: "Apply", state: "upcoming" as const },
+        ],
+      },
+    };
+    const fixed = enforceRoadmapProgress(turn([overreach, question]), boardWithRoadmap as never, {
+      advancedTo: null,
+      liveStage: "understand",
+    });
+    const update = fixed.boardOps.find(
+      (op) => op.op === "update_widget" && op.intent.kind === "roadmap"
+    );
+    expect(update).toBeDefined();
+    if (update && update.op === "update_widget") {
+      const intent = update.intent as RoadmapWidget;
+      expect(intent.steps.find((s) => s.id === "understand")?.state).toBe("current");
+      expect(intent.steps.find((s) => s.id === "construct")?.state).toBe("upcoming");
+      expect(intent.steps.find((s) => s.id === "encounter")?.state).toBe("done");
+    }
+  });
+
+  it("heals the map on regression even when the turn has no roadmap op", () => {
+    // Teaching-only turn + regressTo must pull the pointer back without waiting
+    // for a coincidental model update_widget.
+    const fixed = enforceRoadmapProgress(turn([question]), boardWithRoadmap as never, {
+      advancedTo: null,
+      liveStage: "encounter",
+    });
+    const update = fixed.boardOps.find(
+      (op) => op.op === "update_widget" && op.intent.kind === "roadmap"
+    );
+    expect(update).toBeDefined();
+    if (update && update.op === "update_widget") {
+      expect(update.targetAnchor).toBe("agent-roadmap-1");
+      const intent = update.intent as RoadmapWidget;
+      expect(intent.steps.find((s) => s.id === "encounter")?.state).toBe("current");
+      expect(intent.steps.find((s) => s.id === "understand")?.state).toBe("upcoming");
+    }
+    expect(fixed.boardOps.some((op) => op.op === "place_widget" && op.intent.kind === "question")).toBe(true);
+  });
+
+  it("surfaces a nested-in-row roadmap anchor and steps in the board summary", () => {
+    const nested = {
+      id: "b-nested",
+      title: "Nested",
+      subtitle: "",
+      domain: "math" as const,
+      blocks: [
+        {
+          id: "row-1",
+          kind: "row" as const,
+          children: [
+            {
+              id: "nested-roadmap",
+              kind: "widget" as const,
+              intent: {
+                kind: "roadmap" as const,
+                heading: "Path",
+                steps: roadmapSteps,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const summary = summarizeBoardBlocks(nested as never);
+    expect(summary).toMatch(/anchor=nested-roadmap/);
+    expect(summary).toMatch(/kind=widget \(roadmap\)/);
+    expect(summary).toMatch(/understand:current/);
+    expect(findBoardRoadmap(nested as never)?.anchor).toBe("nested-roadmap");
+  });
+
+  it("does not fuzzy-map free-form step ids onto the mastery ladder", () => {
+    // "application".includes("apply") used to mark custom steps done when the
+    // ledger reached Apply. Exact id/label match only — substring includes are out.
+    const custom = {
+      kind: "roadmap" as const,
+      heading: "Lesson path",
+      steps: [
+        { id: "application", label: "Application problems", state: "upcoming" as const },
+        { id: "warmup", label: "Warm up", state: "current" as const },
+      ],
+    };
+    const intent = buildRoadmapIntentForStage(custom, "apply");
+    // Neither free-form step is a ladder stage, so neither is marked done from
+    // the live stage. (The single-current pointer may still pick one current.)
+    expect(intent.steps.every((s) => s.state !== "done")).toBe(true);
+    expect(intent.steps.filter((s) => s.state === "current")).toHaveLength(1);
   });
 });

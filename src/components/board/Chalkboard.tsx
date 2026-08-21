@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { Minus, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Minus, Plus } from "lucide-react";
 import type { Block, BoardDoc } from "../../data/boards";
 import { DOMAIN_META } from "../../data/boards";
 import { Latex, ChalkStrong } from "./Visuals";
@@ -13,6 +13,13 @@ import {
   groupIdOf,
   type ClusterMember,
 } from "../../lib/widgets/cluster";
+import {
+  DEFAULT_BOARD_PAGE_SIZE,
+  clampPageSize,
+  pageCountFor,
+  pageIndexOf,
+  pageSlice,
+} from "../../lib/boardPagination";
 import { ErrorBoundary } from "../ErrorBoundary";
 
 export interface BoardTheme {
@@ -92,6 +99,18 @@ interface Props {
   onWidgetStateChange?: (blockId: string, state: WidgetState) => void;
   /** Render the canonical board without mutation, pan, zoom, or selection UI. */
   readOnly?: boolean;
+  /** Turn the board into pages instead of one endless vertical stream.
+   *  Ignored when `readOnly` — Past Notes measures the full content height
+   *  to drive its own scroll controls, and thread thumbnails want the whole
+   *  board, so a snapshot always renders complete. */
+  paginate?: boolean;
+  /** Top-level blocks per page. Ignored unless `paginate`. */
+  pageSize?: number;
+  /** Reports the active page (0-based) so the owner can key per-page state.
+   *  Today that is the annotation ink, which is drawn in viewport space and
+   *  therefore belongs to a page rather than to the board. Must be stable
+   *  (useCallback) — it is in the page-change effect's dependency array. */
+  onPageChange?: (page: number) => void;
 }
 
 export interface Stroke {
@@ -114,6 +133,8 @@ export interface BoardView {
 const MIN_BOARD_ZOOM = 0.4;
 const MAX_BOARD_ZOOM = 2.2;
 const BOARD_ZOOM_STEP = 0.15;
+/** The camera a board opens with, and the camera a page turn returns to. */
+const DEFAULT_BOARD_VIEW: BoardView = { x: 48, y: 36, s: 1 };
 
 export function Chalkboard({
   board,
@@ -135,10 +156,18 @@ export function Chalkboard({
   onStrokesChange,
   onBlockStateChange,
   onWidgetStateChange,
+  paginate = false,
+  pageSize = DEFAULT_BOARD_PAGE_SIZE,
+  onPageChange,
   readOnly = false,
 }: Props) {
-  const [view, setView] = useState<BoardView>(initialView ?? { x: 48, y: 36, s: 1 });
+  const [view, setView] = useState<BoardView>(initialView ?? DEFAULT_BOARD_VIEW);
   const [revealed, setRevealed] = useState(writing ? 0 : board.blocks.length);
+  /** null means "follow the page the tutor is writing on". A number pins
+   *  the learner to a page they deliberately turned back to. Seeded exactly
+   *  like `revealed` above: a board being written follows the pen, a
+   *  restored board opens at the beginning. */
+  const [pinnedPage, setPinnedPage] = useState<number | null>(writing ? null : 0);
 
   /**
    * Cluster progress per widget block.
@@ -189,6 +218,32 @@ export function Chalkboard({
   const [askOpen, setAskOpen] = useState(false);
   const [askText, setAskText] = useState("");
 
+  const paginated = paginate && !readOnly;
+  const effectivePageSize = clampPageSize(pageSize);
+  // Pages are cut from what has been REVEALED, not from board.blocks. A turn
+  // that streams in 40 blocks would otherwise announce "Page 1 of 5" with
+  // four blank pages for the ~25s the 620ms reveal ticker needs to catch up.
+  const pageCount = paginated ? pageCountFor(revealed, effectivePageSize) : 1;
+  // Derived, never stored. Reverting a message shrinks `revealed` (see the
+  // clamp effect below), and a STORED page number would survive that shrink
+  // and strand the learner on a blank page that looks like the lesson was
+  // deleted. Clamping at read time makes that state unrepresentable.
+  //
+  // Follow target and writing caret share one index. `revealed` is the NEXT
+  // block to appear; when it lands exactly on a page boundary (e.g. 8 with
+  // pageSize 8) pageIndexOf(revealed) points at the still-empty next page
+  // while pageCount still describes only the filled pages. Using the last
+  // revealed block (revealed - 1) for both camera and caret keeps the pen on
+  // the page the learner is watching until the next block actually lands.
+  const followPage = paginated
+    ? pageIndexOf(Math.max(0, revealed > 0 ? revealed - 1 : 0), effectivePageSize)
+    : 0;
+  const activePage = paginated
+    ? Math.min(pinnedPage ?? followPage, Math.max(0, pageCount - 1))
+    : 0;
+  const pageCountRef = useRef(pageCount);
+  pageCountRef.current = pageCount;
+
   const wrapRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
   const viewRef = useRef(view);
@@ -210,8 +265,21 @@ export function Chalkboard({
   }, [board.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    setPinnedPage(writing ? null : 0);
+  }, [board.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     setRevealed((current) => Math.min(current, board.blocks.length));
   }, [board.id, board.blocks.length]);
+
+  // Sitting on the final page IS following. This one line covers three
+  // cases: a one-page board that grows while the learner watches, a pin
+  // that the board caught up to, and a pin left dangling past the end when
+  // a revert shrank the board.
+  useEffect(() => {
+    if (!paginated) return;
+    setPinnedPage((current) => (current !== null && current >= pageCount - 1 ? null : current));
+  }, [paginated, pageCount]);
 
   // Keep one ticker alive for the board identity. Tutor operations can arrive
   // faster than the reveal cadence without repeatedly cancelling the timer.
@@ -223,10 +291,40 @@ export function Chalkboard({
   }, [board.id]);
 
   useEffect(() => {
-    setView(initialView ?? { x: 48, y: 36, s: 1 });
+    setView(initialView ?? DEFAULT_BOARD_VIEW);
     setSel(null);
     setAskOpen(false);
   }, [board.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A page turn is a change of what is on screen, so it gets the same
+  // treatment a board switch gets: the selection popover holds pixel
+  // coordinates for blocks this turn just unmounted, and the vertical pan
+  // is an offset INTO the previous page's content — keeping it would land
+  // the learner on blank chalkboard below the new page. Zoom and horizontal
+  // pan are a reading preference and survive.
+  //
+  // Skip the first subscription for a given board: remounting (or first paint)
+  // must not wipe a restored in-page y. Only a real page *change* resets y.
+  const prevPageForPanRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!paginated) {
+      prevPageForPanRef.current = null;
+      return;
+    }
+    const prev = prevPageForPanRef.current;
+    prevPageForPanRef.current = activePage;
+    onPageChange?.(activePage);
+    if (prev === null || prev === activePage) return;
+    setSel(null);
+    setAskOpen(false);
+    setView((current) => (current.y === DEFAULT_BOARD_VIEW.y ? current : { ...current, y: DEFAULT_BOARD_VIEW.y }));
+  }, [activePage, paginated, onPageChange]);
+
+  // Board identity change: clear the pan-guard so the next page effect does
+  // not treat the restored page as a "turn" and zero a saved y.
+  useEffect(() => {
+    prevPageForPanRef.current = null;
+  }, [board.id]);
 
   // Read-only snapshots may provide a controlled camera (for example, Past
   // Notes' up/down controls). Keep live boards uncontrolled so their normal
@@ -320,6 +418,15 @@ export function Chalkboard({
     });
   }, []);
 
+  const goToPage = useCallback((target: number) => {
+    const count = pageCountRef.current;
+    const next = Math.min(Math.max(0, target), Math.max(0, count - 1));
+    // Landing on the final page releases the pin: there is nowhere further
+    // to page, so the learner is watching the end of the board and new
+    // blocks should carry them forward rather than leave them one behind.
+    setPinnedPage(next >= count - 1 ? null : next);
+  }, []);
+
   const checkSelection = useCallback(() => {
     if (readOnly || annotating) return;
     const s = window.getSelection();
@@ -341,6 +448,25 @@ export function Chalkboard({
     document.addEventListener("mouseup", h);
     return () => document.removeEventListener("mouseup", h);
   }, [checkSelection, readOnly]);
+
+  // PageUp/PageDown are the only keys free on this surface: App.tsx owns
+  // ⌘K/⌘, and every Arrow/Escape binding in the app is modal-scoped. They
+  // are still native caret movement inside a textarea and native value
+  // movement on a focused range input, so an activeElement guard is not
+  // optional.
+  useEffect(() => {
+    if (!paginated) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "PageUp" && event.key !== "PageDown") return;
+      if (askOpen) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName))) return;
+      event.preventDefault();
+      goToPage(activePage + (event.key === "PageDown" ? 1 : -1));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paginated, askOpen, activePage, goToPage]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokes = useRef<Stroke[]>([]);
@@ -432,6 +558,14 @@ export function Chalkboard({
 
   const gridSize = theme.id === "blueprint" ? 28 : 22;
 
+  const { start: pageStart, end: pageEnd } = paginated
+    ? pageSlice(revealed, activePage, effectivePageSize)
+    : { start: 0, end: revealed };
+  // `revealed` is the index of the NEXT block to appear. Camera and caret both
+  // use followPage (last revealed block's page) so the pen does not blink off
+  // for one ticker tick when revealed lands exactly on a page boundary.
+  const writingOnThisPage = !paginated || followPage === activePage;
+
   return (
     <div
       ref={wrapRef}
@@ -481,7 +615,7 @@ export function Chalkboard({
               echo the learner's prompt or even the session title onto the board
               before any content exists. */}
 
-          {board.blocks.slice(0, revealed).map((b, i) => (
+          {board.blocks.slice(pageStart, pageEnd).map((b, i) => (
             <div
               key={b.id}
               data-block
@@ -506,7 +640,7 @@ export function Chalkboard({
             </div>
           ))}
 
-          {writing && revealed < board.blocks.length && (
+          {writing && revealed < board.blocks.length && writingOnThisPage && (
             <div className="flex items-center gap-2" style={{ color: accent }}>
               <span className="h-4 w-[3px] animate-pulse rounded-full" style={{ background: accent }} />
               <span className="font-mono text-[11px] opacity-70">writing…</span>
@@ -633,8 +767,53 @@ export function Chalkboard({
         </button>
       </div>
 
-      <div className="pointer-events-none absolute bottom-3 left-[138px] rounded-md bg-black/40 px-2 py-1 font-mono text-[9.5px] text-white/55 backdrop-blur-sm">
-        drag empty space to pan · ⌘/ctrl + scroll to zoom
+      {/* Rendered only past the first page, so an empty or short board keeps
+          the plain chalkboard rather than gaining a "Page 1 of 1" shell. */}
+      {paginated && pageCount > 1 && (
+        <div
+          data-nopan
+          className="absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-center overflow-hidden rounded-lg border border-white/15 bg-[#171819]/88 text-white shadow-[0_8px_24px_rgba(0,0,0,0.3)] backdrop-blur-md"
+          role="group"
+          aria-label="Board pages"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => goToPage(activePage - 1)}
+            disabled={activePage <= 0}
+            className="grid h-8 w-8 place-items-center transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:text-white/20"
+            aria-label="Previous page"
+            title="Previous page (Page Up)"
+          >
+            <ChevronLeft size={15} strokeWidth={2.2} />
+          </button>
+          <output
+            className="min-w-[92px] border-x border-white/10 px-2 text-center font-mono text-[10px] text-white/70"
+            aria-live="polite"
+            aria-label={`Page ${activePage + 1} of ${pageCount}`}
+          >
+            Page {activePage + 1} of {pageCount}
+          </output>
+          <button
+            type="button"
+            onClick={() => goToPage(activePage + 1)}
+            disabled={activePage >= pageCount - 1}
+            className="relative grid h-8 w-8 place-items-center transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:text-white/20"
+            aria-label="Next page"
+            title="Next page (Page Down)"
+          >
+            <ChevronRight size={15} strokeWidth={2.2} />
+            {/* The learner paged back and the tutor is now writing ahead of
+                them. Without this the board looks idle from where they sit. */}
+            {writing && pinnedPage !== null && activePage < pageCount - 1 && (
+              <span className="absolute right-1 top-1 h-1.5 w-1.5 animate-pulse rounded-full" style={{ background: accent }} />
+            )}
+          </button>
+        </div>
+      )}
+
+      <div className="pointer-events-none absolute bottom-3 left-[138px] max-[900px]:hidden rounded-md bg-black/40 px-2 py-1 font-mono text-[9.5px] text-white/55 backdrop-blur-sm">
+        drag empty space to pan · ⌘/ctrl + scroll to zoom{paginated && pageCount > 1 ? " · page up/down to turn" : ""}
       </div>
       <div className="pointer-events-none absolute bottom-3 right-3 max-w-[34%] truncate rounded-md bg-black/40 px-2 py-1 text-right font-mono text-[9.5px] text-white/55 backdrop-blur-sm" title={board.title}>
         {board.title}
@@ -756,7 +935,11 @@ const BlockView = memo(function BlockView({
           className="max-w-[420px] rounded-lg border-2 border-dashed px-4 py-2.5"
           style={{ borderColor: `${accent}88`, fontSize: 18 * scale }}
         >
-          <ChalkStrong>{block.text}</ChalkStrong>
+          {/* The dashed box is already the highlight — the TEXT stays chalk and
+              only its own **strong** parts go amber. Amber is the bold stand-in
+              for the handwriting fonts (they have no bold cut); painting a
+              whole explanation amber devalued it into pure noise. */}
+          {renderTextWithStrong(block.text)}
         </div>
       );
     case "row":
