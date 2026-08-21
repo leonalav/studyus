@@ -38,10 +38,13 @@ import {
   enforceLearnerAgency,
   turnLeavesLearnerSomethingToDo,
   enforceVisualExplanation,
+<<<<<<< HEAD
   enforceRoadmapProgress,
   findBoardRoadmap,
   buildRoadmapIntentForStage,
   summarizeBoardBlocks,
+=======
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 } from "./tutor";
 import { DEFAULT_TUTOR } from "./preferences";
 import { bindModelRole, defaultCapabilities } from "./llm";
@@ -1268,8 +1271,12 @@ describe("show, don't just tell — the missing-figure backstop", () => {
 
   it("nudges a question-only turn in a stage whose vocabulary is a picture", () => {
     const fixed = enforceVisualExplanation(turn([question]), "encounter");
+<<<<<<< HEAD
     expect(fixed.speech).toMatch(/core picture|graph, diagram or animation|continue/i);
     expect(fixed.speech).not.toMatch(/ask me to put it on the board/i);
+=======
+    expect(fixed.speech).toMatch(/clearer seen than read|graph, diagram or equation/i);
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
   });
 
   it("never fabricates a figure — the board ops are untouched", () => {
@@ -1295,7 +1302,11 @@ describe("show, don't just tell — the missing-figure backstop", () => {
     expect(enforceVisualExplanation(satisfied, "understand")).toBe(satisfied);
     // Encounter asks for a *picture* — a lone Σ is not one, so the nudge stays.
     const nudged = enforceVisualExplanation(turn([latex, question]), "encounter");
+<<<<<<< HEAD
     expect(nudged.speech).toMatch(/core picture|graph, diagram or animation|continue/i);
+=======
+    expect(nudged.speech).toMatch(/graph, diagram or equation/i);
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
   });
 
   it("does not nag stages with no visual vocabulary", () => {
@@ -1323,6 +1334,7 @@ describe("show, don't just tell — the missing-figure backstop", () => {
     expect(enforceVisualExplanation(speechOnly, "encounter")).toBe(speechOnly);
   });
 });
+<<<<<<< HEAD
 
 /**
  * When a learner demonstrably completes a goal (ledger predicates open the next
@@ -1754,3 +1766,5 @@ describe("roadmap advances with demonstrated goals", () => {
     expect(intent.steps.filter((s) => s.state === "current")).toHaveLength(1);
   });
 });
+=======
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61

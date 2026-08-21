@@ -17,7 +17,11 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { renderMath } from "../../lib/latex/render";
 import { generateAxisTicks } from "./Visuals";
+<<<<<<< HEAD
 import { gradeAnswerableWidget, MAX_RECTS, sanitizeWidgetState } from "../../lib/widgets/validate";
+=======
+import { gradeAnswerableWidget, MAX_RECTS } from "../../lib/widgets/validate";
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 import {
   WIDGET_LABEL,
   type WidgetIntent,
@@ -1099,6 +1103,7 @@ function polylineLength(pts: readonly [number, number][]): number {
 
 /* ── 7a · Scene figure — the composed animation stage ── */
 
+<<<<<<< HEAD
 /**
  * Animation stages used to paint into a short wide strip (220×126) with
  * independent x/y scales and `preserveAspectRatio="none"`. That made unit
@@ -1161,6 +1166,12 @@ function projectInFrame(frame: SceneFrame, x: number, y: number): [number, numbe
     frame.originY + frame.plotH - (y - frame.y0) * frame.unit,
   ];
 }
+=======
+/** Fixed canvas for the scene stage, matching the motion scene's box so an
+ *  animation's layout never shifts when it swaps a moving point for a scene. */
+const SCENE_W = 220;
+const SCENE_H = 126;
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 
 const SCENE_ACCENT_COLORS: Record<string, string> = {
   amber: "#fde68a",
@@ -1210,12 +1221,22 @@ function SceneFigure({
   const t = Math.min(1, Math.max(0, progress));
   const [x0, x1] = scene.xDomain;
   const [y0, y1] = scene.yDomain;
+<<<<<<< HEAD
   const frame = fitSceneFrame(x0, x1, y0, y1);
   const { W: SCENE_W, H: SCENE_H, padL, padT } = frame;
 
   const px = (x: number) => projectInFrame(frame, x, y0)[0];
   const py = (y: number) => projectInFrame(frame, x0, y)[1];
   const project = (x: number, y: number): [number, number] => projectInFrame(frame, x, y);
+=======
+  const spanX = x1 - x0;
+  const spanY = y1 - y0;
+  const padL = 26, padR = 10, padT = 8, padB = 16;
+
+  const px = (x: number) => padL + ((x - x0) / spanX) * (SCENE_W - padL - padR);
+  const py = (y: number) => SCENE_H - padB - ((y - y0) / spanY) * (SCENE_H - padT - padB);
+  const project = (x: number, y: number): [number, number] => [px(x), py(y)];
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 
   /** Evaluate an expression with the playhead, data-x and curve-u in scope. */
   const evalExpr = (expression: string, x = 0, u = 0) => evaluateReadout(expression, { t, x, u });
@@ -1244,10 +1265,13 @@ function SceneFigure({
   const yTicks = generateAxisTicks(y0, y1, 3);
   const xAxisY = y0 <= 0 && y1 >= 0 ? py(0) : null;
   const yAxisX = x0 <= 0 && x1 >= 0 ? px(0) : null;
+<<<<<<< HEAD
   const plotTop = frame.originY;
   const plotBottom = frame.originY + frame.plotH;
   const plotLeft = frame.originX;
   const plotRight = frame.originX + frame.plotW;
+=======
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 
   const nodes: React.ReactNode[] = [];
 
@@ -1256,10 +1280,17 @@ function SceneFigure({
   for (const value of xTicks) {
     const x = px(value);
     if (gridOn) {
+<<<<<<< HEAD
       nodes.push(<line key={`gx-${value}`} x1={x} y1={plotTop} x2={x} y2={plotBottom} stroke={`${chalk}14`} strokeWidth={0.6} />);
     }
     nodes.push(
       <text key={`tx-${value}`} x={x} y={SCENE_H - 6} textAnchor="middle" fontSize={7} fill={chalk} opacity={0.5} fontFamily="monospace">
+=======
+      nodes.push(<line key={`gx-${value}`} x1={x} y1={0} x2={x} y2={SCENE_H - padB} stroke={`${chalk}14`} strokeWidth={0.6} />);
+    }
+    nodes.push(
+      <text key={`tx-${value}`} x={x} y={SCENE_H - 4} textAnchor="middle" fontSize={5.5} fill={chalk} opacity={0.5} fontFamily="monospace">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
         {sceneFormat(value)}
       </text>
     );
@@ -1267,15 +1298,23 @@ function SceneFigure({
   for (const value of yTicks) {
     const y = py(value);
     if (gridOn) {
+<<<<<<< HEAD
       nodes.push(<line key={`gy-${value}`} x1={plotLeft} y1={y} x2={plotRight} y2={y} stroke={`${chalk}14`} strokeWidth={0.6} />);
     }
     nodes.push(
       <text key={`ty-${value}`} x={padL - 4} y={y + 2.5} textAnchor="end" fontSize={7} fill={chalk} opacity={0.5} fontFamily="monospace">
+=======
+      nodes.push(<line key={`gy-${value}`} x1={padL} y1={y} x2={SCENE_W - padR} y2={y} stroke={`${chalk}14`} strokeWidth={0.6} />);
+    }
+    nodes.push(
+      <text key={`ty-${value}`} x={padL - 3} y={y + 2} textAnchor="end" fontSize={5.5} fill={chalk} opacity={0.5} fontFamily="monospace">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
         {sceneFormat(value)}
       </text>
     );
   }
   if (xAxisY !== null) {
+<<<<<<< HEAD
     nodes.push(<line key="axis-x" x1={plotLeft} y1={xAxisY} x2={plotRight} y2={xAxisY} stroke={`${chalk}3d`} strokeWidth={0.9} />);
   }
   if (yAxisX !== null) {
@@ -1284,25 +1323,44 @@ function SceneFigure({
   if (scene.xLabel) {
     nodes.push(
       <text key="xlabel" x={plotRight} y={SCENE_H - 6} textAnchor="end" fontSize={7.5} fill={chalk} opacity={0.7} fontFamily="monospace">
+=======
+    nodes.push(<line key="axis-x" x1={padL} y1={xAxisY} x2={SCENE_W - padR} y2={xAxisY} stroke={`${chalk}3d`} strokeWidth={0.9} />);
+  }
+  if (yAxisX !== null) {
+    nodes.push(<line key="axis-y" x1={yAxisX} y1={0} x2={yAxisX} y2={SCENE_H - padB} stroke={`${chalk}3d`} strokeWidth={0.9} />);
+  }
+  if (scene.xLabel) {
+    nodes.push(
+      <text key="xlabel" x={SCENE_W - padR} y={SCENE_H - 4} textAnchor="end" fontSize={6} fill={chalk} opacity={0.7} fontFamily="monospace">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
         {scene.xLabel}
       </text>
     );
   }
   if (scene.yLabel) {
     nodes.push(
+<<<<<<< HEAD
       <text key="ylabel" x={padL - 3} y={padT + 8} textAnchor="end" fontSize={7.5} fill={chalk} opacity={0.7} fontFamily="monospace">
+=======
+      <text key="ylabel" x={padL - 2} y={padT + 6} textAnchor="end" fontSize={6} fill={chalk} opacity={0.7} fontFamily="monospace">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
         {scene.yLabel}
       </text>
     );
   }
 
   // Elements paint in author order, so later elements sit over earlier ones.
+<<<<<<< HEAD
   // Skip unreadable entries instead of throwing — a restored scene can carry a
   // nullish or half-written primitive without losing the rest of the figure.
   scene.elements.forEach((element: AnimationSceneElement, elementIndex: number) => {
     if (!element || typeof element !== "object" || !("kind" in element)) return;
     const color = sceneColor("accent" in element ? element.accent : undefined, chalk, accent);
     const elementKey = typeof element.id === "string" && element.id.length > 0 ? element.id : `el-${elementIndex}`;
+=======
+  scene.elements.forEach((element: AnimationSceneElement) => {
+    const color = sceneColor("accent" in element ? element.accent : undefined, chalk, accent);
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 
     switch (element.kind) {
       case "curve": {
@@ -1323,7 +1381,11 @@ function SceneFigure({
         const length = polylineLength(pts);
         nodes.push(
           <polyline
+<<<<<<< HEAD
             key={elementKey}
+=======
+            key={element.id}
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
             points={pts.map(([x, y]) => `${x},${y}`).join(" ")}
             fill="none"
             stroke={color}
@@ -1350,6 +1412,7 @@ function SceneFigure({
           }
           if (pts.length >= 2) {
             nodes.push(
+<<<<<<< HEAD
               <polyline key={`${elementKey}-trace`} points={pts.map(([x, y]) => `${x},${y}`).join(" ")} fill="none" stroke={color} strokeWidth={1.6} />
             );
           }
@@ -1359,6 +1422,17 @@ function SceneFigure({
         if (label) {
           nodes.push(
             <text key={`${elementKey}-label`} x={at[0] + 5} y={at[1] - 4} fontSize={6} fill={color} fontFamily="monospace">
+=======
+              <polyline key={`${element.id}-trace`} points={pts.map(([x, y]) => `${x},${y}`).join(" ")} fill="none" stroke={color} strokeWidth={1.6} />
+            );
+          }
+        }
+        nodes.push(<circle key={element.id} cx={at[0]} cy={at[1]} r={4} fill={color} />);
+        const label = labelText(element.label);
+        if (label) {
+          nodes.push(
+            <text key={`${element.id}-label`} x={at[0] + 5} y={at[1] - 4} fontSize={6} fill={color} fontFamily="monospace">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
               {label}
             </text>
           );
@@ -1370,7 +1444,11 @@ function SceneFigure({
         const to = pointAt(element.to);
         if (!from || !to) break;
         nodes.push(
+<<<<<<< HEAD
           <line key={elementKey} x1={from[0]} y1={from[1]} x2={to[0]} y2={to[1]} stroke={color} strokeWidth={1.4} strokeDasharray={sceneDash(element.style)} />
+=======
+          <line key={element.id} x1={from[0]} y1={from[1]} x2={to[0]} y2={to[1]} stroke={color} strokeWidth={1.4} strokeDasharray={sceneDash(element.style)} />
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
         );
         break;
       }
@@ -1398,7 +1476,11 @@ function SceneFigure({
           const rectY = Math.min(topY, bottomY);
           const rectH = Math.abs(bottomY - topY);
           nodes.push(
+<<<<<<< HEAD
             <rect key={`${elementKey}-${i}`} x={rectX} y={rectY} width={rectW} height={rectH} fill={`${fill}33`} stroke={stroke} strokeWidth={0.7} />
+=======
+            <rect key={`${element.id}-${i}`} x={rectX} y={rectY} width={rectW} height={rectH} fill={`${fill}33`} stroke={stroke} strokeWidth={0.7} />
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
           );
         }
         break;
@@ -1420,7 +1502,11 @@ function SceneFigure({
         }
         if (top.length < 2) break;
         const pts = [...top, ...bottom.reverse()].map(([x, y]) => `${x},${y}`).join(" ");
+<<<<<<< HEAD
         nodes.push(<polygon key={elementKey} points={pts} fill={`${color}30`} stroke="none" />);
+=======
+        nodes.push(<polygon key={element.id} points={pts} fill={`${color}30`} stroke="none" />);
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
         break;
       }
       case "arrow": {
@@ -1431,10 +1517,17 @@ function SceneFigure({
         const [tx, ty] = to;
         const angle = Math.atan2(ty - fy, tx - fx);
         const head = 4;
+<<<<<<< HEAD
         nodes.push(<line key={`${elementKey}-shaft`} x1={fx} y1={fy} x2={tx} y2={ty} stroke={color} strokeWidth={1.3} />);
         nodes.push(
           <line
             key={`${elementKey}-head-a`}
+=======
+        nodes.push(<line key={`${element.id}-shaft`} x1={fx} y1={fy} x2={tx} y2={ty} stroke={color} strokeWidth={1.3} />);
+        nodes.push(
+          <line
+            key={`${element.id}-head-a`}
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
             x1={tx} y1={ty}
             x2={tx - head * Math.cos(angle - Math.PI / 6)} y2={ty - head * Math.sin(angle - Math.PI / 6)}
             stroke={color} strokeWidth={1.3} strokeLinecap="round"
@@ -1442,7 +1535,11 @@ function SceneFigure({
         );
         nodes.push(
           <line
+<<<<<<< HEAD
             key={`${elementKey}-head-b`}
+=======
+            key={`${element.id}-head-b`}
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
             x1={tx} y1={ty}
             x2={tx - head * Math.cos(angle + Math.PI / 6)} y2={ty - head * Math.sin(angle + Math.PI / 6)}
             stroke={color} strokeWidth={1.3} strokeLinecap="round"
@@ -1451,7 +1548,11 @@ function SceneFigure({
         const label = labelText(element.label);
         if (label) {
           nodes.push(
+<<<<<<< HEAD
             <text key={`${elementKey}-label`} x={(fx + tx) / 2} y={(fy + ty) / 2 - 3} textAnchor="middle" fontSize={6} fill={color} fontFamily="monospace">
+=======
+            <text key={`${element.id}-label`} x={(fx + tx) / 2} y={(fy + ty) / 2 - 3} textAnchor="middle" fontSize={6} fill={color} fontFamily="monospace">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
               {label}
             </text>
           );
@@ -1467,7 +1568,11 @@ function SceneFigure({
         const oy = element.offset?.y ?? 0;
         const anchor = element.anchor ?? "start";
         nodes.push(
+<<<<<<< HEAD
           <text key={elementKey} x={at[0] + ox} y={at[1] + oy} textAnchor={anchor} fontSize={6} fill={color} opacity={0.9} fontFamily="monospace">
+=======
+          <text key={element.id} x={at[0] + ox} y={at[1] + oy} textAnchor={anchor} fontSize={6} fill={color} opacity={0.9} fontFamily="monospace">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
             {text}
           </text>
         );
@@ -1477,12 +1582,16 @@ function SceneFigure({
   });
 
   return (
+<<<<<<< HEAD
     <svg
       viewBox={`0 0 ${SCENE_W} ${SCENE_H}`}
       className="block h-auto w-full"
       preserveAspectRatio="xMidYMid meet"
       data-scene-frame={`${SCENE_W}x${SCENE_H}`}
     >
+=======
+    <svg viewBox={`0 0 ${SCENE_W} ${SCENE_H}`} className="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
       {nodes}
     </svg>
   );
@@ -1661,6 +1770,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
     const zMin = Math.min(...zs), zMax = Math.max(...zs);
 
     if (!is3d) {
+<<<<<<< HEAD
       // Pad the data extents a touch so the moving point and guide never sit
       // on the frame edge, then fit isotropically so a unit circle stays round.
       const padDataX = Math.max(0.15, (xMax - xMin) * 0.08);
@@ -1682,6 +1792,23 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
         plotRight: frame.originX + frame.plotW,
         plotTop: frame.originY,
         plotBottom: frame.originY + frame.plotH,
+=======
+      const W = 220, H = 126, padL = 24, padR = 8, padT = 6, padB = 13;
+      const spanX = Math.max(1e-6, xMax - xMin);
+      const spanY = Math.max(1e-6, yMax - yMin);
+      const project = ([x, y]: [number, number, number]): [number, number] => [
+        padL + ((x - xMin) / spanX) * (W - padL - padR),
+        H - padB - ((y - yMin) / spanY) * (H - padT - padB),
+      ];
+      const xTicks = generateAxisTicks(xMin, xMax, 4);
+      const yTicks = generateAxisTicks(yMin, yMax, 3);
+      const xAxisY = yMin <= 0 && yMax >= 0 ? project([0, 0, 0])[1] : null;
+      const yAxisX = xMin <= 0 && xMax >= 0 ? project([0, 0, 0])[0] : null;
+      return {
+        kind: "2d" as const,
+        W,
+        H,
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
         pts: pathPts.map(project),
         guide: guidePts.map(project),
         xTicks: xTicks.map((value) => ({ value, x: project([value, 0, 0])[0] })),
@@ -1714,6 +1841,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
     const sys = corners.map((c) => c[1]);
     const sMinX = Math.min(...sxs), sMaxX = Math.max(...sxs);
     const sMinY = Math.min(...sys), sMaxY = Math.max(...sys);
+<<<<<<< HEAD
     // Keep isometric extents on a shared unit so the floor parallelogram is
     // not squashed when the host is wider than tall.
     const spanSX = Math.max(1e-6, sMaxX - sMinX);
@@ -1727,6 +1855,14 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
     const project = (p: [number, number, number]): [number, number] => {
       const [sx, sy] = isoRaw(p);
       return [pad + (sx - sMinX) * unit, pad + (sy - sMinY) * unit];
+=======
+    const W = 220, H = 146, pad = 12;
+    const spanSX = Math.max(1e-6, sMaxX - sMinX);
+    const spanSY = Math.max(1e-6, sMaxY - sMinY);
+    const project = (p: [number, number, number]): [number, number] => {
+      const [sx, sy] = isoRaw(p);
+      return [pad + ((sx - sMinX) / spanSX) * (W - 2 * pad), pad + ((sy - sMinY) / spanSY) * (H - 2 * pad)];
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
     };
     // Floor grid: the parallelogram rim plus two interior lines per direction.
     const floorFrame = [
@@ -1756,17 +1892,26 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
 
   // The playhead position is EASED time → eased distance: linear reads as a
   // ticker, smooth reads as moving. Checkpoints stay on raw time, so easing
+<<<<<<< HEAD
   // never shifts when a halt lands. Unknown easing from an older build falls
   // back to smooth rather than throwing on a missing table entry.
   const ease = MOTION_EASING[intent.motion?.easing ?? "smooth"] ?? MOTION_EASING.smooth;
   const easedProgress = ease(safeProgress);
+=======
+  // never shifts when a halt lands.
+  const easedProgress = MOTION_EASING[intent.motion?.easing ?? "smooth"](Math.min(1, Math.max(0, progress)));
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
   const headIndex = scene ? Math.min(scene.pts.length - 1, Math.round(easedProgress * (scene.pts.length - 1))) : 0;
   const head = scene?.pts[headIndex];
 
   // The guide graph writes itself on during the opening 18% of playback —
   // Manim's Create — then lives as the solid reference the motion rides.
   const guideWriteOn = intent.motion?.guideWriteOn !== false;
+<<<<<<< HEAD
   const guideReveal = Math.min(1, safeProgress / 0.18);
+=======
+  const guideReveal = Math.min(1, progress / 0.18);
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 
   return (
     <div>
@@ -1791,6 +1936,7 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
 
       <div
         className="relative mb-2 overflow-hidden rounded"
+<<<<<<< HEAD
         style={{ background: "rgba(0,0,0,0.18)" }}
         data-motion-scene={intent.scene ? "scene" : scene ? scene.kind : undefined}
       >
@@ -1803,27 +1949,51 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
             preserveAspectRatio="xMidYMid meet"
             data-scene-frame={`${scene.W}x${scene.H}`}
           >
+=======
+        style={{ background: "rgba(0,0,0,0.18)", height: intent.scene ? SCENE_H : scene ? scene.H : 62 }}
+        data-motion-scene={intent.scene ? "scene" : scene ? scene.kind : undefined}
+      >
+        {intent.scene ? (
+          <SceneFigure scene={intent.scene} progress={progress} chalk={chalk} accent={accent} />
+        ) : scene ? (
+          <svg viewBox={`0 0 ${scene.W} ${scene.H}`} className="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
             {scene.kind === "2d" ? (
               <>
                 {/* coordinate frame: faint tick grid, slightly stronger axes */}
                 {scene.xTicks.map((tick) => (
                   <g key={`x-${tick.value}`}>
+<<<<<<< HEAD
                     <line x1={tick.x} y1={scene.plotTop} x2={tick.x} y2={scene.plotBottom} stroke={`${chalk}14`} strokeWidth={0.6} />
                     <text x={tick.x} y={scene.H - 6} textAnchor="middle" fontSize={7} fill={chalk} opacity={0.5} fontFamily="monospace">
+=======
+                    <line x1={tick.x} y1={0} x2={tick.x} y2={scene.H - 13} stroke={`${chalk}14`} strokeWidth={0.6} />
+                    <text x={tick.x} y={scene.H - 4} textAnchor="middle" fontSize={5.5} fill={chalk} opacity={0.5} fontFamily="monospace">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
                       {tick.value}
                     </text>
                   </g>
                 ))}
                 {scene.yTicks.map((tick) => (
                   <g key={`y-${tick.value}`}>
+<<<<<<< HEAD
                     <line x1={scene.plotLeft} y1={tick.y} x2={scene.plotRight} y2={tick.y} stroke={`${chalk}14`} strokeWidth={0.6} />
                     <text x={scene.padL - 4} y={tick.y + 2.5} textAnchor="end" fontSize={7} fill={chalk} opacity={0.5} fontFamily="monospace">
+=======
+                    <line x1={24} y1={tick.y} x2={scene.W - 8} y2={tick.y} stroke={`${chalk}14`} strokeWidth={0.6} />
+                    <text x={21} y={tick.y + 2} textAnchor="end" fontSize={5.5} fill={chalk} opacity={0.5} fontFamily="monospace">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
                       {tick.value}
                     </text>
                   </g>
                 ))}
+<<<<<<< HEAD
                 {scene.xAxisY !== null ? <line x1={scene.plotLeft} y1={scene.xAxisY} x2={scene.plotRight} y2={scene.xAxisY} stroke={`${chalk}3d`} strokeWidth={0.9} /> : null}
                 {scene.yAxisX !== null ? <line x1={scene.yAxisX} y1={scene.plotTop} x2={scene.yAxisX} y2={scene.plotBottom} stroke={`${chalk}3d`} strokeWidth={0.9} /> : null}
+=======
+                {scene.xAxisY !== null ? <line x1={24} y1={scene.xAxisY} x2={scene.W - 8} y2={scene.xAxisY} stroke={`${chalk}3d`} strokeWidth={0.9} /> : null}
+                {scene.yAxisX !== null ? <line x1={scene.yAxisX} y1={0} x2={scene.yAxisX} y2={scene.H - 13} stroke={`${chalk}3d`} strokeWidth={0.9} /> : null}
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
               </>
             ) : (
               <>
@@ -2006,8 +2176,13 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
           display-math descenders so the linked-representation chips can no
           longer collide with them. */}
       <div className="mt-2 space-y-1.5 pb-1">
+<<<<<<< HEAD
         <p className="m-0 text-[10.5px] leading-relaxed opacity-80">{frame?.caption ?? ""}</p>
         {frame?.latex ? <TexBlock tex={frame.latex} color={chalk} size={16} /> : null}
+=======
+        <p className="m-0 text-[10.5px] leading-relaxed opacity-80">{frame.caption}</p>
+        {frame.latex ? <TexBlock tex={frame.latex} color={chalk} size={16} /> : null}
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
       </div>
 
       {/* Representations held in sync, so the same change is read two ways. */}

@@ -494,10 +494,15 @@ describe("WidgetSurface — animation as prediction, not video", () => {
     const html = live(onGraph, { predictionLocked: true });
     expect(html).toContain('data-motion-scene="2d"');
     // Tick grid labels are the give-away that a coordinate plane rendered.
+<<<<<<< HEAD
     const tinyTicks = html.match(/font-size="7"/g) ?? [];
     expect(tinyTicks.length).toBeGreaterThan(0);
     // Isotropic frame + meet (not stretch) so curves keep true proportions.
     expect(html).toContain('preserveAspectRatio="xMidYMid meet"');
+=======
+    const tinyTicks = html.match(/font-size="5.5"/g) ?? [];
+    expect(tinyTicks.length).toBeGreaterThan(0);
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
     // The guide curve renders solid; the live path stays dashed.
     expect(html).toMatch(/<polyline[^>]*stroke-dasharray="3 5"/);
     const polylines = html.match(/<polyline/g) ?? [];
@@ -636,6 +641,7 @@ describe("WidgetSurface — animation scene, a figure composed not a preset", ()
     // the body degrades to the dot — no throw, no blank board.
     expect(() => live(broken)).not.toThrow();
   });
+<<<<<<< HEAD
 
   it("keeps a unit circle round — isotropic frame, no SVG stretch", () => {
     // Regression for the squashed ellipse: independent x/y scales +
@@ -681,6 +687,8 @@ describe("WidgetSurface — animation scene, a figure composed not a preset", ()
     // And both axes use enough pixels that the circle is not a tiny strip.
     expect(Math.min(w, h)).toBeGreaterThan(250);
   });
+=======
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 });
 
 /**

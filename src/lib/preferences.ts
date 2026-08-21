@@ -1,5 +1,8 @@
 import { ensureStudyusModels } from "./studyusModels";
+<<<<<<< HEAD
 import { DEFAULT_BOARD_PAGE_SIZE, MAX_BOARD_PAGE_SIZE, MIN_BOARD_PAGE_SIZE } from "./boardPagination";
+=======
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 export const PREFERENCES_STORAGE_KEY = "studyus.preferences.v2";
 /** The v1 bucket. Read once on upgrade (the only semantic change being the
  *  default UI font), then retired. */

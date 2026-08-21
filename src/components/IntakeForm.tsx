@@ -87,6 +87,7 @@ export function IntakeFormSheet({
   onClose: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+<<<<<<< HEAD
   // Keep the latest closer without re-binding Escape (or resetting scroll) when
   // the parent passes a fresh onClose identity on every draft keystroke.
   const onCloseRef = useRef(onClose);
@@ -110,6 +111,19 @@ export function IntakeFormSheet({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [open]);
+=======
+
+  // Freshly opened editable sheets start at the top; Escape always closes.
+  useEffect(() => {
+    if (!open) return;
+    scrollRef.current?.scrollTo({ top: 0 });
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 
   if (!open) return null;
 
@@ -132,6 +146,7 @@ export function IntakeFormSheet({
         role="dialog"
         aria-modal="true"
         aria-label={form.title ?? "Intake form"}
+<<<<<<< HEAD
         // One viewport cap (backdrop already has p-4). min-h-0 lets this node
         // shrink as a centered flex child; h-fit keeps short forms content-sized
         // (no mid-sheet footer / dead zone). Grid rows pin header + footer and
@@ -143,6 +158,13 @@ export function IntakeFormSheet({
       >
         {/* header — row 1, intrinsic height */}
         <div className="border-b border-white/8 px-4 pb-3 pt-3.5">
+=======
+        className="anim-msg relative flex w-[min(348px,94vw)] max-h-[86vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
+        style={{ maxHeight: "calc(100dvh - 2rem)" }}
+      >
+        {/* header */}
+        <div className="shrink-0 border-b border-white/8 px-4 pb-3 pt-3.5">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
@@ -151,7 +173,11 @@ export function IntakeFormSheet({
                   {answered}/{total}
                 </span>
               </div>
+<<<<<<< HEAD
               <h2 className="mt-1 break-words text-[15.5px] font-medium leading-snug text-fg">
+=======
+              <h2 className="mt-1 text-[15.5px] font-medium leading-snug text-fg">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
                 {form.title ?? "Intake form"}
               </h2>
             </div>
@@ -168,8 +194,13 @@ export function IntakeFormSheet({
           )}
         </div>
 
+<<<<<<< HEAD
         {/* questions — row 2 scrolls under the pinned footer */}
         <div ref={scrollRef} className="min-h-0 space-y-3 overflow-y-auto overscroll-contain px-4 py-3">
+=======
+        {/* questions — gated ones join once their constraint answer lands */}
+        <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
           {visible.map((q, index) => (
             <QuestionBlock
               key={q.id}
@@ -182,8 +213,13 @@ export function IntakeFormSheet({
           ))}
         </div>
 
+<<<<<<< HEAD
         {/* footer — row 3, always after the scrollport, never over content */}
         <div className="flex items-center justify-between gap-2 border-t border-white/8 bg-panel px-4 py-3">
+=======
+        {/* footer */}
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-white/8 px-4 py-3">
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
           {readOnly ? (
             <button
               onClick={onClose}

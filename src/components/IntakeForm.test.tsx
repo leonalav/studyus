@@ -84,6 +84,7 @@ describe("IntakeFormSheet — the floating portrait form", () => {
     const html = sheet();
     expect(html).toContain('role="dialog"');
     expect(html).toContain('aria-modal="true"');
+<<<<<<< HEAD
     // Width is parent-bounded (backdrop p-4), never viewport-relative 94vw.
     expect(html).toContain("w-full");
     expect(html).toContain("max-w-[348px]");
@@ -172,6 +173,16 @@ describe("IntakeFormSheet — the floating portrait form", () => {
     // Scroll reset must not re-run when only onClose identity changes.
     expect(src).not.toMatch(/}, \[open, onClose\]\)/);
     expect(src).toMatch(/}, \[open\]\);/);
+=======
+    expect(html).toContain("w-[min(348px,94vw)]");
+    // The dialog is viewport-capped (86vh class + 100dvh inline), and the
+    // header/body/footer are locked so the footer can never pin over content:
+    // the body scrolls (min-h-0) and the footer is a fixed flex row (shrink-0).
+    expect(html).toContain("max-h-[86vh]");
+    expect(html).toContain("calc(100dvh - 2rem)");
+    expect(html).toContain("min-h-0 flex-1 space-y-3 overflow-y-auto");
+    expect(html).toContain("shrink-0 items-center justify-between gap-2 border-t");
+>>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
   });
 
   it("renders every question with free-text and multiple-choice inputs", () => {
