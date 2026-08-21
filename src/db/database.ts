@@ -700,6 +700,44 @@ function runMigrations(db: Database) {
     db.run("COMMIT;");
   }
 
+  if (currentVersion < 8) {
+    db.run("BEGIN TRANSACTION;");
+
+    // ── Onboarding entry signals ──
+    //
+    // A learner's declared footing informs the very first route into a skill,
+    // but it is not observed performance. Keeping it out of learning_evidence
+    // and skill_state preserves the ledger's rebuildability and prevents a
+    // self-report from ever satisfying a mastery predicate.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS learner_entry_signals (
+        learner_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        skill_id TEXT NOT NULL,
+        familiarity TEXT NOT NULL CHECK (familiarity IN ('new', 'shaky', 'confident')),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (learner_id, session_id, skill_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_learner_entry_signals_lookup
+        ON learner_entry_signals(learner_id, session_id, skill_id);
+    `);
+
+    const v8Now = new Date().toISOString();
+    db.run(
+      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
+      [
+        8,
+        "Persist policy-only onboarding familiarity for first-contact entry routing",
+        v8Now,
+        "Rule: learner_entry_signals is non-evidence intake. It may select only an empty Encounter entry route and must never change mastery dimensions, stage predicates, review scheduling, or reconstruction debt.",
+      ]
+    );
+
+    db.run("PRAGMA user_version = 8;");
+    db.run("COMMIT;");
+  }
+
   // No legacy assessment fixtures are seeded in production. A fresh profile
   // starts with no forms/attempts so AvailableTests shows its empty state
   // (see plan §3 / verification: "Fresh profile shows no … seeded recent

@@ -41,6 +41,25 @@ describe("buildTutorUserPrompt — visualization protocol (regression: circle-vs
     expect(prompt).not.toMatch(/plot_2d|plot_3d|draw_diagram/);
   });
 
+  it("carries the presentation-first policy move into the tutor prompt", () => {
+    const prompt = buildTutorUserPrompt({
+      ...baseParams,
+      policyBrief: [
+        "MOVE: direct_instruction",
+        "COLD-START EXCEPTION — teach intuition, the core representation, terminology, and one canonical worked example before requesting learner work.",
+        "The exposition is not evidence; return to one focused prediction or observation afterward.",
+      ].join("\n"),
+      presentationFirst: true,
+      permittedWidgetKinds: ["concept_card", "example", "annotation", "animation", "slider", "comparison"],
+    });
+
+    expect(prompt).toMatch(/MOVE: direct_instruction/);
+    expect(prompt).toMatch(/COLD-START EXCEPTION/);
+    expect(prompt).toMatch(/PRESENTATION-FIRST EXCEPTION/);
+    expect(prompt).toMatch(/canonical worked example/);
+    expect(prompt).toMatch(/not evidence/);
+  });
+
   it("documents notebook-style edit operations with anchors and diff-style revision", () => {
     expect(prompt).toMatch(/targetAnchor/);
     expect(prompt).toMatch(/targetMatchText/);
@@ -312,6 +331,7 @@ describe("session opening — the plan widget is always placeable", () => {
     expect(resolveTurnWidgetPermit("greeting", true, ["question"])).toBeUndefined();
     // Only that specific turn is exempt: everything else keeps the route permit.
     expect(resolveTurnWidgetPermit("greeting", false, ["question"])).toEqual(["question"]);
+    expect(resolveTurnWidgetPermit("plan_start", true, ["question"])).toBeUndefined();
     expect(resolveTurnWidgetPermit("chat", true, ["question"])).toEqual(["question"]);
     expect(resolveTurnWidgetPermit("widget", true, ["question"])).toEqual(["question"]);
     expect(resolveTurnWidgetPermit(undefined, true, ["question"])).toEqual(["question"]);

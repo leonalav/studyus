@@ -4,6 +4,7 @@ import {
   completeReview,
   contradictHypothesis,
   disputeHypothesis,
+  getEntrySignal,
   getDueReviews,
   getEvidenceByIds,
   getHypotheses,
@@ -13,6 +14,7 @@ import {
   normalizeSkillId,
   recordEvidence,
   scheduleReview,
+  upsertEntrySignal,
   upsertHypothesis,
 } from "./store";
 import type { LearningEvidenceInput } from "./types";
@@ -60,7 +62,24 @@ describe("normalizeSkillId", () => {
   });
 });
 
-describe("recordEvidence", () => {
+describe("policy-only onboarding entry signals", () => {
+  it("persists a canonical familiarity without creating evidence or skill state", async () => {
+    const learnerId = "entry-signal-learner";
+    const sessionId = "entry-signal-session";
+    await upsertEntrySignal({
+      learnerId,
+      sessionId,
+      skillId: " Chain Rule ",
+      familiarity: "shaky",
+    });
+
+    expect(await getEntrySignal(sessionId, "chain_rule", learnerId)).toBe("shaky");
+    expect(await getSkillEvidence("chain_rule", learnerId)).toEqual([]);
+    expect(await getSkillState("chain_rule", learnerId)).toBeUndefined();
+  });
+});
+
+describe("the evidence ledger", () => {
   beforeEach(async () => {
     await getDb();
   });

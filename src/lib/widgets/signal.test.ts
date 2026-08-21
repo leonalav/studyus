@@ -289,6 +289,8 @@ describe("exploration widgets signal only when the agent asked for a response", 
     expect(message).toContain("1. Pictures before letters");
     expect(message).toContain("2. Defend a claim");
     expect(message).toMatch(/go-ahead/);
+    expect(message).toMatch(/Choose the next valid move from the deterministic learning policy/);
+    expect(message).not.toContain("Begin at the first phase now");
 
     // An edit is part of the contract, not the tutor's private proposal.
     const edited = buildWidgetSignalMessage(

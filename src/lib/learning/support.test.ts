@@ -134,7 +134,14 @@ describe("decideSupport — the ladder", () => {
 });
 
 describe("RESPONSE_ROUTING_TABLE — resolving ask-vs-tell", () => {
-  it("puts direct answers to factual questions ahead of the attempt requirement", () => {
+  it("does not let the generic no-evidence rule override direct instruction", () => {
+    const row = RESPONSE_ROUTING_TABLE[0];
+    expect(row.condition).toMatch(/direct_instruction/i);
+    expect(row.action).toMatch(/intuition.*worked example/i);
+    expect(row.action).not.toMatch(/ask for learner work before teaching/i);
+  });
+
+  it("keeps factual questions ahead of blocked-task repair", () => {
     // The old prompt held both 'require an attempt first' and 'default to
     // direct help' with no way to tell which applied. Order resolves it.
     const factual = RESPONSE_ROUTING_TABLE.findIndex((row) => /factual question/i.test(row.condition));

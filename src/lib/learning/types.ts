@@ -45,6 +45,7 @@ import type { WidgetKind } from "../widgets/types";
 export const ACTIVITY_MODES = [
   "diagnostic",
   "explore",
+  "instruction",
   "guided_practice",
   "independent_practice",
   "transfer",
@@ -453,6 +454,7 @@ export interface ReviewTask {
  */
 export const LEARNING_ROUTES = [
   "diagnostic_probe",
+  "direct_instruction",
   "prediction",
   "contrast_case",
   "prerequisite_repair",
@@ -465,9 +467,23 @@ export const LEARNING_ROUTES = [
 
 export type LearningRoute = typeof LEARNING_ROUTES[number];
 
+/**
+ * The learner's onboarding self-report before any evidence exists. This is an
+ * entry-routing input only: it never contributes to mastery, stage gates,
+ * reviews, or reconstruction debt.
+ */
+export const SELF_REPORTED_FAMILIARITIES = ["new", "shaky", "confident"] as const;
+export type SelfReportedFamiliarity = typeof SELF_REPORTED_FAMILIARITIES[number];
+
+export function isSelfReportedFamiliarity(value: unknown): value is SelfReportedFamiliarity {
+  return typeof value === "string" && (SELF_REPORTED_FAMILIARITIES as readonly string[]).includes(value);
+}
+
 export const LEARNING_ROUTE_INSTRUCTION: Record<LearningRoute, string> = {
   diagnostic_probe:
     "You do not yet know where the learner actually is. Ask the one question whose answer discriminates between the competing explanations. Do not teach first — a probe that follows an explanation measures your explanation, not their knowledge.",
+  direct_instruction:
+    "This is genuine first contact. Teach a connected mini-sequence before asking for learner work: give the intuition, put the core representation or mechanism on the board, define the essential terminology, and show one canonical worked example. The presentation itself is not an attempt or mastery evidence. Do not add a check until that bounded sequence is complete; then hand the learner one focused observation or prediction.",
   prediction:
     "Make the learner commit to an outcome BEFORE anything is revealed. Lock the prediction, then show the result. An unlocked prediction produces no evidence, and revealing first destroys the only chance to get it.",
   contrast_case:

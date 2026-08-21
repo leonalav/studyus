@@ -38,13 +38,10 @@ import {
   enforceLearnerAgency,
   turnLeavesLearnerSomethingToDo,
   enforceVisualExplanation,
-<<<<<<< HEAD
   enforceRoadmapProgress,
   findBoardRoadmap,
   buildRoadmapIntentForStage,
   summarizeBoardBlocks,
-=======
->>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
 } from "./tutor";
 import { DEFAULT_TUTOR } from "./preferences";
 import { bindModelRole, defaultCapabilities } from "./llm";
@@ -674,6 +671,152 @@ describe("Tutor Studio runtime policy", () => {
     expect(rowCounts()).toEqual(before);
   });
 
+  it("keeps an onboarding greeting planning-only until the learner starts the plan", async () => {
+    const db = await getDb();
+    const learnerId = "greeting-planning-only";
+    const sessionId = "greeting-planning-only-session";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        speech: "Here is the route we can take.",
+        board_ops: [],
+        evidence_refs: [],
+        diagnosis: {
+          misconceptions: ["Treats the plan as proof of understanding"],
+          weak_criteria: [],
+          hint_dependence: "none",
+          calibration: "accurate",
+          hypotheses: [{
+            kind: "misconception",
+            statement: "Treats the plan as proof of understanding",
+            next_best_test: "Ask for a first worked response after the plan starts.",
+          }],
+        },
+      }) } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await askTutorTurn({
+      sessionId,
+      sessionTitle: "Cold limits",
+      domain: "math",
+      learnerId,
+      learnerMessage: "Please make my plan.",
+      turnKind: "greeting",
+      onboarding: {
+        concept: "Limits",
+        answers: [{ question: "Where are you with limits?", answer: "Brand new" }],
+        selfReportedFamiliarity: "new",
+      },
+      endpoint: {
+        role: "tutor",
+        provider: "custom",
+        baseUrl: "https://model.example/v1",
+        modelId: "greeting-test-model",
+        apiKey: "",
+        capabilities: defaultCapabilities(),
+      },
+    });
+
+    expect(Number(db.exec(
+      "SELECT COUNT(*) FROM learning_activities WHERE learner_id = ? AND session_id = ?;",
+      [learnerId, sessionId]
+    )[0]?.values[0]?.[0] ?? 0)).toBe(0);
+    expect(Number(db.exec(
+      "SELECT COUNT(*) FROM learning_evidence WHERE learner_id = ?;",
+      [learnerId]
+    )[0]?.values[0]?.[0] ?? 0)).toBe(0);
+    expect(getTutorSessionLearnerSummary(sessionId)).toBe("Session memory: no observations recorded yet.");
+    expect(Number(db.exec(
+      "SELECT COUNT(*) FROM learner_hypotheses WHERE learner_id = ?;",
+      [learnerId]
+    )[0]?.values[0]?.[0] ?? 0)).toBe(0);
+    expect(Number(db.exec(
+      "SELECT COUNT(*) FROM learner_model_entries WHERE learner_id = ?;",
+      [learnerId]
+    )[0]?.values[0]?.[0] ?? 0)).toBe(0);
+    expect(String(db.exec(
+      "SELECT familiarity FROM learner_entry_signals WHERE learner_id = ? AND session_id = ?;",
+      [learnerId, sessionId]
+    )[0]?.values[0]?.[0] ?? "")).toBe("new");
+  });
+
+  it("creates a plan-start activity without treating agreement as diagnostic evidence", async () => {
+    const db = await getDb();
+    const learnerId = "plan-start-not-evidence";
+    const sessionId = "plan-start-not-evidence-session";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        speech: "The plan is ready.",
+        board_ops: [],
+        evidence_refs: [],
+        requested_level: 3,
+        diagnosis: {
+          misconceptions: ["Confuses agreement with a diagnostic response"],
+          weak_criteria: [],
+          hint_dependence: "none",
+          calibration: "accurate",
+          hypotheses: [{
+            kind: "misconception",
+            statement: "Confuses agreement with a diagnostic response",
+            next_best_test: "Ask one diagnostic question after the plan begins.",
+          }],
+        },
+      }) } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const request = {
+      sessionId,
+      sessionTitle: "Cold limits",
+      domain: "math" as const,
+      learnerId,
+      onboarding: {
+        concept: "Limits",
+        answers: [{ question: "Where are you with limits?", answer: "A little shaky" }],
+        selfReportedFamiliarity: "shaky" as const,
+      },
+      endpoint: {
+        role: "tutor" as const,
+        provider: "custom" as const,
+        baseUrl: "https://model.example/v1",
+        modelId: "plan-start-test-model",
+        apiKey: "",
+        capabilities: defaultCapabilities(),
+      },
+    };
+
+    await askTutorTurn({
+      ...request,
+      learnerMessage: "Please make my plan.",
+      turnKind: "greeting",
+    });
+    await askTutorTurn({
+      ...request,
+      learnerMessage: "[This is my go-ahead: teach toward this route.]",
+      turnKind: "plan_start",
+    });
+
+    expect(String(db.exec(
+      "SELECT route FROM learning_activities WHERE learner_id = ? AND session_id = ?;",
+      [learnerId, sessionId]
+    )[0]?.values[0]?.[0] ?? "")).toBe("diagnostic_probe");
+    expect(Number(db.exec(
+      "SELECT COUNT(*) FROM learning_evidence WHERE learner_id = ?;",
+      [learnerId]
+    )[0]?.values[0]?.[0] ?? 0)).toBe(0);
+    expect(Number(db.exec(
+      "SELECT COUNT(*) FROM skill_state WHERE learner_id = ?;",
+      [learnerId]
+    )[0]?.values[0]?.[0] ?? 0)).toBe(0);
+    expect(Number(db.exec(
+      "SELECT hint_level FROM chalkboard_sessions WHERE id = ?;",
+      [sessionId]
+    )[0]?.values[0]?.[0] ?? -1)).toBe(0);
+    expect(getTutorSessionLearnerSummary(sessionId)).toBe("Session memory: no observations recorded yet.");
+    expect(Number(db.exec(
+      "SELECT COUNT(*) FROM learner_hypotheses WHERE learner_id = ?;",
+      [learnerId]
+    )[0]?.values[0]?.[0] ?? 0)).toBe(0);
+  });
+
   it("enforces the Tutor Studio response ceiling over a larger endpoint limit", async () => {
     let requestBody: any;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
@@ -1271,12 +1414,8 @@ describe("show, don't just tell — the missing-figure backstop", () => {
 
   it("nudges a question-only turn in a stage whose vocabulary is a picture", () => {
     const fixed = enforceVisualExplanation(turn([question]), "encounter");
-<<<<<<< HEAD
     expect(fixed.speech).toMatch(/core picture|graph, diagram or animation|continue/i);
     expect(fixed.speech).not.toMatch(/ask me to put it on the board/i);
-=======
-    expect(fixed.speech).toMatch(/clearer seen than read|graph, diagram or equation/i);
->>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
   });
 
   it("never fabricates a figure — the board ops are untouched", () => {
@@ -1302,11 +1441,7 @@ describe("show, don't just tell — the missing-figure backstop", () => {
     expect(enforceVisualExplanation(satisfied, "understand")).toBe(satisfied);
     // Encounter asks for a *picture* — a lone Σ is not one, so the nudge stays.
     const nudged = enforceVisualExplanation(turn([latex, question]), "encounter");
-<<<<<<< HEAD
     expect(nudged.speech).toMatch(/core picture|graph, diagram or animation|continue/i);
-=======
-    expect(nudged.speech).toMatch(/graph, diagram or equation/i);
->>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
   });
 
   it("does not nag stages with no visual vocabulary", () => {
@@ -1334,14 +1469,7 @@ describe("show, don't just tell — the missing-figure backstop", () => {
     expect(enforceVisualExplanation(speechOnly, "encounter")).toBe(speechOnly);
   });
 });
-<<<<<<< HEAD
 
-/**
- * When a learner demonstrably completes a goal (ledger predicates open the next
- * mastery stage), the existing roadmap on the board must advance with the lesson.
- * A second roadmap, a roadmap-only turn, or a silent promotion of later steps are
- * all failures of the same contract: the board is the map of where the learner is.
- */
 describe("roadmap advances with demonstrated goals", () => {
   const roadmapSteps = [
     { id: "encounter", label: "Encounter", state: "done" as const },
@@ -1766,5 +1894,3 @@ describe("roadmap advances with demonstrated goals", () => {
     expect(intent.steps.filter((s) => s.state === "current")).toHaveLength(1);
   });
 });
-=======
->>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61

@@ -55,6 +55,7 @@ import {
  */
 const ROUTE_WIDGETS: Record<LearningRoute, WidgetKind[]> = {
   diagnostic_probe: ["question", "mistake_check", "comparison", "scratchpad"],
+  direct_instruction: ["concept_card", "example", "annotation", "animation", "slider", "comparison"],
   prediction: ["animation", "slider", "question", "comparison"],
   contrast_case: ["comparison", "mistake_check", "example", "question", "animation"],
   prerequisite_repair: ["concept_card", "example", "question", "hint", "animation", "slider"],
@@ -76,6 +77,7 @@ const UNAIDED_ROUTES = new Set<LearningRoute>([
 /** The mode each route is conducted in. */
 const ROUTE_MODE: Record<LearningRoute, ActivityMode> = {
   diagnostic_probe: "diagnostic",
+  direct_instruction: "instruction",
   prediction: "explore",
   contrast_case: "repair",
   prerequisite_repair: "repair",
@@ -89,6 +91,7 @@ const ROUTE_MODE: Record<LearningRoute, ActivityMode> = {
 /** The evidence each route must produce to have been worth making. */
 const ROUTE_EVIDENCE: Record<LearningRoute, EvidenceType[]> = {
   diagnostic_probe: ["selection", "explanation"],
+  direct_instruction: [],
   prediction: ["prediction", "observation"],
   contrast_case: ["selection", "explanation"],
   prerequisite_repair: ["procedure", "explanation"],
@@ -108,6 +111,7 @@ const ROUTE_EVIDENCE: Record<LearningRoute, EvidenceType[]> = {
  */
 const ROUTE_CEILING: Record<LearningRoute, SupportLevel> = {
   diagnostic_probe: 0,
+  direct_instruction: 3,
   prediction: 0,
   contrast_case: 1,
   prerequisite_repair: 3,
@@ -201,6 +205,11 @@ export interface PlanInput {
   /** True when the learner explicitly asked for a visualization this turn.
    *  Read only to satisfy the request within policy, never to skip the move. */
   explicitVisualizationRequest?: boolean;
+  /** True only for a confirmed first-contact cold start. */
+  needsIntroduction?: boolean;
+  /** Deterministic non-evidence entry route from validated onboarding. Applied
+   *  only to a normal empty Encounter after higher-priority policy checks. */
+  encounterEntryRoute?: "direct_instruction" | "diagnostic_probe" | "prediction";
 }
 
 /**
@@ -332,7 +341,14 @@ export function planNextMove(input: PlanInput): NextLearningMove {
   }
 
   // 5 ── Normal progression: aim at the evidence the current stage still lacks.
-  return planForStage(stage, state, events, signals);
+  return planForStage(
+    stage,
+    state,
+    events,
+    signals,
+    input.needsIntroduction === true,
+    input.encounterEntryRoute
+  );
 }
 
 /**
@@ -347,7 +363,9 @@ function planForStage(
   stage: MasteryStage,
   state: SkillState,
   events: LearningEvidenceEvent[],
-  signals: PolicySignals
+  signals: PolicySignals,
+  needsIntroduction = false,
+  encounterEntryRoute?: "direct_instruction" | "diagnostic_probe" | "prediction"
 ): NextLearningMove {
   const gate = evaluateStageExit(stage, events);
   const missing = gate.missing[0] ?? "";
@@ -355,9 +373,11 @@ function planForStage(
   const route: LearningRoute = (() => {
     switch (stage) {
       case "encounter":
-        // Prediction is the only move that produces encounter evidence, because
-        // encounter evidence IS a committed prediction followed by observation.
-        return "prediction";
+        // A genuinely cold learner needs a bounded explanation before the
+        // prediction/observation gate becomes meaningful. A validated intake
+        // signal chooses only this initial route; once introduced, Encounter
+        // remains measured by the existing prediction route.
+        return encounterEntryRoute ?? (needsIntroduction ? "direct_instruction" : "prediction");
       case "understand":
         // Understanding is demonstrated by explanation. If the learner has
         // never attempted one, ask for one; if they attempted and missed,
@@ -502,9 +522,15 @@ export function formatMoveDirective(move: NextLearningMove): string {
     );
   }
   lines.push("");
-  lines.push(
-    `EVIDENCE THIS TURN MUST PRODUCE: ${move.requiredEvidence.join(" or ")}. If the turn ends without the learner having produced one of these, the turn accomplished nothing measurable.`
-  );
+  if (move.route === "direct_instruction") {
+    lines.push(
+      "THIS IS A PRESENTATION-FIRST MOVE: the explanation, representation, terminology, and canonical worked example are intentional teaching, not learner-earned support. Do not record the learner's opening request as evidence, do not claim mastery, and do not force a filler question before the bounded sequence is complete. After the sequence, hand back one focused prediction or observation under a new evidence-producing move."
+    );
+  } else {
+    lines.push(
+      `EVIDENCE THIS TURN MUST PRODUCE: ${move.requiredEvidence.join(" or ")}. If the turn ends without the learner having produced one of these, the turn accomplished nothing measurable.`
+    );
+  }
   lines.push(
     `Permitted widget kinds for this move: ${move.permittedWidgetKinds.join(", ")}. Others are off-policy for this route.`
   );

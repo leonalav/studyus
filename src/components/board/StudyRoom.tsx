@@ -63,7 +63,7 @@ import {
 /** What produced this turn. Distinguishes the opening greeting (retryable when
  *  an unmount kills it) and a widget answer (retryable, and shown in the
  *  transcript as the learner's action) from a typed chat message. */
-type TurnKind = "chat" | "greeting" | "widget";
+type TurnKind = "chat" | "greeting" | "widget" | "plan_start";
 
 interface Props {
   initialBoard: BoardDoc;
@@ -646,7 +646,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
             // applies, but shown as the learner's own board action rather than a
             // chat message they did not type.
             void handleSendRef.current?.(signal.message, undefined, false, {
-              kind: "widget",
+              kind: widget.intent.kind === "plan" ? "plan_start" : "widget",
               displayText: signal.displayText,
               signalKey: blockId,
             });
@@ -996,7 +996,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           }
           // A widget answer that never reached the tutor must be allowed to
           // retry, or the learner is left staring at an answered widget.
-          if (turnKind === "widget" && options?.signalKey) {
+          if ((turnKind === "widget" || turnKind === "plan_start") && options?.signalKey) {
             signalledWidgets.current.delete(options.signalKey);
           }
           if (activityTurnRef.current === activityTurn) {

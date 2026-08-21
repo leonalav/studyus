@@ -316,6 +316,99 @@ describe("planNextMove — the ceiling and the widget permission list", () => {
   });
 });
 
+describe("direct_instruction — the bounded cold-start route", () => {
+  it("teaches before asking for learner work only when the neighborhood is confirmed cold", () => {
+    const move = planNextMove({
+      state: state({ stage: "encounter", totalEvidenceCount: 0 }),
+      events: [],
+      needsIntroduction: true,
+    });
+
+    expect(move.route).toBe("direct_instruction");
+    expect(move.mode).toBe("instruction");
+    expect(move.requiredEvidence).toEqual([]);
+    expect(move.supportCeiling).toBe(3);
+    expect(move.permittedWidgetKinds).toEqual([
+      "concept_card",
+      "example",
+      "annotation",
+      "animation",
+      "slider",
+      "comparison",
+    ]);
+  });
+
+  it("keeps Encounter as prediction when the learner is already informed", () => {
+    const move = planNextMove({
+      state: state({ stage: "encounter", totalEvidenceCount: 0 }),
+      events: [],
+      needsIntroduction: false,
+    });
+
+    expect(move.route).toBe("prediction");
+    expect(move.requiredEvidence).toEqual(["prediction", "observation"]);
+    expect(move.supportCeiling).toBe(0);
+  });
+
+  it("does not let the direct route weaken unaided measurement routes", () => {
+    const instruction = planNextMove({
+      state: state({ stage: "encounter", totalEvidenceCount: 0 }),
+      events: [],
+      needsIntroduction: true,
+    });
+    const prediction = planNextMove({
+      state: state({ stage: "encounter", totalEvidenceCount: 0 }),
+      events: [],
+      needsIntroduction: false,
+    });
+
+    expect(instruction.route).toBe("direct_instruction");
+    expect(instruction.supportCeiling).toBe(3);
+    expect(prediction.route).toBe("prediction");
+    expect(prediction.supportCeiling).toBe(0);
+  });
+
+  it("uses the validated onboarding entry route only for an empty Encounter", () => {
+    expect(planNextMove({
+      state: state({ stage: "encounter", totalEvidenceCount: 0 }),
+      events: [],
+      encounterEntryRoute: "direct_instruction",
+    }).route).toBe("direct_instruction");
+    expect(planNextMove({
+      state: state({ stage: "encounter", totalEvidenceCount: 0 }),
+      events: [],
+      encounterEntryRoute: "diagnostic_probe",
+    }).route).toBe("diagnostic_probe");
+    expect(planNextMove({
+      state: state({ stage: "encounter", totalEvidenceCount: 0 }),
+      events: [],
+      encounterEntryRoute: "prediction",
+    }).route).toBe("prediction");
+  });
+
+  it("does not let an onboarding entry route outrank retrieval or reconstruction", () => {
+    expect(planNextMove({
+      state: state({ stage: "encounter", reconstructionDueTaskFamily: "chain" }),
+      events: [],
+      dueReviews: [review()],
+      encounterEntryRoute: "direct_instruction",
+    }).route).toBe("due_retrieval");
+    expect(planNextMove({
+      state: state({ stage: "encounter", reconstructionDueTaskFamily: "chain" }),
+      events: [],
+      encounterEntryRoute: "direct_instruction",
+    }).route).toBe("independent_practice");
+  });
+
+  it("does not apply the onboarding entry route after Encounter", () => {
+    const move = planNextMove({
+      state: state({ stage: "understand", totalEvidenceCount: 0 }),
+      events: [],
+      encounterEntryRoute: "direct_instruction",
+    });
+    expect(move.route).not.toBe("direct_instruction");
+  });
+});
 describe("formatMoveDirective", () => {
   it("names the move, the ceiling, and the evidence without naming renderers", () => {
     const move = planNextMove({ state: state({ stage: "apply" }), events: [ev()] });

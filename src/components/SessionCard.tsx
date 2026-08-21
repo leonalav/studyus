@@ -20,6 +20,7 @@ import {
   CREATE_FORMS_TOOL,
   renderOnboardingReply,
   visibleOnboardingQuestions,
+  deriveSelfReportedFamiliarity,
   type Intent,
   type OnboardingAnswers,
   type OnboardingForm,
@@ -309,6 +310,7 @@ export function SessionCard({
         question: q.question,
         answer: resolvable.has(q.id) ? (formDraft[q.id] ?? "").trim() : "",
       })),
+      selfReportedFamiliarity: deriveSelfReportedFamiliarity(intakeForm, formDraft),
     };
     setSubmittedAnswers({ ...formDraft });
     setFormOpen(false);

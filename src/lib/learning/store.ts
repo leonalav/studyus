@@ -25,6 +25,7 @@ import {
   isEvidenceType,
   isHypothesisKind,
   isRetrievalType,
+  isSelfReportedFamiliarity,
   coerceSupportLevel,
   type LearnerHypothesis,
   type LearningActivityContract,
@@ -32,6 +33,7 @@ import {
   type LearningEvidenceInput,
   type ReviewTask,
   type ReviewTaskState,
+  type SelfReportedFamiliarity,
   type SkillNode,
   type SkillState,
 } from "./types";
@@ -680,6 +682,50 @@ async function applyHypothesisConsequences(event: LearningEvidenceEvent): Promis
 }
 
 /* ─────────────────────────────────────────────────────────────
+   Policy-only onboarding entry signals
+   ───────────────────────────────────────────────────────────── */
+
+export async function upsertEntrySignal(params: {
+  learnerId?: string;
+  sessionId: string;
+  skillId: string;
+  familiarity: SelfReportedFamiliarity;
+}): Promise<void> {
+  const sessionId = params.sessionId.trim();
+  if (!sessionId || !isSelfReportedFamiliarity(params.familiarity)) return;
+  const db = await getDb();
+  db.run(
+    `INSERT OR REPLACE INTO learner_entry_signals (
+      learner_id, session_id, skill_id, familiarity, created_at
+    ) VALUES (?, ?, ?, ?, ?);`,
+    [
+      params.learnerId ?? DEFAULT_LEARNER_ID,
+      sessionId,
+      normalizeSkillId(params.skillId),
+      params.familiarity,
+      nowIso(),
+    ]
+  );
+  saveDbSync();
+}
+
+export async function getEntrySignal(
+  sessionId: string | undefined,
+  skillId: string,
+  learnerId = DEFAULT_LEARNER_ID
+): Promise<SelfReportedFamiliarity | undefined> {
+  if (!sessionId?.trim()) return undefined;
+  const db = await getDb();
+  const res = db.exec(
+    `SELECT familiarity FROM learner_entry_signals
+     WHERE learner_id = ? AND session_id = ? AND skill_id = ? LIMIT 1;`,
+    [learnerId, sessionId.trim(), normalizeSkillId(skillId)]
+  );
+  const familiarity = res[0]?.values?.[0]?.[0];
+  return isSelfReportedFamiliarity(familiarity) ? familiarity : undefined;
+}
+
+/* ─────────────────────────────────────────────────────────────
    Activity contracts
    ───────────────────────────────────────────────────────────── */
 
@@ -816,6 +862,26 @@ export async function getLatestSessionActivity(
   );
   const id = res[0]?.values?.[0]?.[0];
   return id ? getActivityContract(String(id)) : undefined;
+}
+
+/** Whether this learner/session has already received direct instruction for a skill. */
+export async function hasDirectInstructionActivity(
+  learnerId: string,
+  sessionId: string | undefined,
+  skillId: string
+): Promise<boolean> {
+  if (!sessionId?.trim()) return false;
+  const db = await getDb();
+  const res = db.exec(
+    `SELECT target_skill_ids FROM learning_activities
+     WHERE learner_id = ? AND session_id = ? AND route = 'direct_instruction'
+     ORDER BY created_at DESC;`,
+    [learnerId, sessionId.trim()]
+  );
+  const normalized = normalizeSkillId(skillId);
+  return (res[0]?.values ?? []).some((row) =>
+    parseList(row[0]).some((target) => normalizeSkillId(target) === normalized)
+  );
 }
 
 /* ─────────────────────────────────────────────────────────────

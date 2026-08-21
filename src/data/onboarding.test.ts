@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildOnboardingReminder,
+  deriveSelfReportedFamiliarity,
   renderOnboardingReply,
   visibleOnboardingQuestions,
 } from "./tutor";
@@ -12,10 +13,28 @@ const questions: OnboardingQuestion[] = [
     question: "Have you met limits before today?",
     kind: "choice",
     options: ["Brand new", "Seen them once", "Comfortable with them"],
+    familiarityOptions: [
+      { option: "Brand new", familiarity: "new" },
+      { option: "Seen them once", familiarity: "shaky" },
+      { option: "Comfortable with them", familiarity: "confident" },
+    ],
   },
   { id: "q2", question: "Which part do you expect to trip you up?", kind: "free", onlyIf: { questionId: "q1", anyOf: ["Seen them once", "Comfortable with them"] } },
   { id: "q3", question: "Is there a deadline pushing this?", kind: "free" },
 ];
+
+describe("onboarding familiarity derivation", () => {
+  it("maps only the validated footing choice, case-insensitively", () => {
+    expect(deriveSelfReportedFamiliarity({ questions }, { q1: " brand new " })).toBe("new");
+    expect(deriveSelfReportedFamiliarity({ questions }, { q1: "SEEN THEM ONCE" })).toBe("shaky");
+    expect(deriveSelfReportedFamiliarity({ questions }, { q1: "Comfortable with them" })).toBe("confident");
+  });
+
+  it("returns no signal for a skipped footing answer or free text", () => {
+    expect(deriveSelfReportedFamiliarity({ questions }, {})).toBeUndefined();
+    expect(deriveSelfReportedFamiliarity({ questions }, { q3: "I feel confident" })).toBeUndefined();
+  });
+});
 
 describe("question constraints (onlyIf gates)", () => {
   it("hides a gated question until its constraint answer lands", () => {

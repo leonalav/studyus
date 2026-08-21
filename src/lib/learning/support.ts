@@ -261,6 +261,11 @@ function buildInstruction(
  */
 export const RESPONSE_ROUTING_TABLE = [
   {
+    condition: "The selected move is direct_instruction for a confirmed cold start.",
+    action: "Teach the intuition, core representation or mechanism, essential terminology, and one canonical worked example before asking for a single focused prediction or observation. Do not treat the presentation as learner evidence.",
+    reason: "A first-contact learner needs a usable mental model before an Encounter prediction can be meaningful; this exception is bounded to the explicit instructional route.",
+  },
+  {
     condition: "The learner asks a factual question with no task in play (a definition, a fact, notation, what a symbol means).",
     action: "Answer it directly and briefly. Then return to the current move.",
     reason: "Interrogating someone who asked what a symbol means is not rigour, it is friction.",
@@ -286,9 +291,9 @@ export const RESPONSE_ROUTING_TABLE = [
     reason: "These moves exist to measure unaided performance; helping deletes the measurement.",
   },
   {
-    condition: "The learner has produced no evidence at all on this skill.",
+    condition: "The selected move is diagnostic_probe or prediction and the learner has produced no evidence at all on this skill.",
     action: "Probe or predict before teaching.",
-    reason: "Teaching before you know where they are means teaching to an imagined learner.",
+    reason: "Teaching before you know where they are means teaching to an imagined learner, except when the policy has explicitly selected the bounded direct-instruction route.",
   },
   {
     condition: "None of the above.",

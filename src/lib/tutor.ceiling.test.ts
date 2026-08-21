@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { enforceLearnerAgency, enforceSupportCeiling, type BoardOp, type TutorTurn } from "./tutor";
 import type { BoardDoc } from "../data/boards";
-import type { WidgetIntent } from "./widgets/types";
+import type { WidgetIntent, WidgetKind } from "./widgets/types";
 
 /**
  * The support ceiling is stated in the prompt and the model usually respects
@@ -55,7 +55,38 @@ const question: WidgetIntent = {
 };
 
 describe("Support ceiling enforcement", () => {
-  it("strips a hint entirely under an unaided ceiling", () => {
+  it("preserves the permitted direct-instruction presentation vocabulary", () => {
+    const allowed: WidgetKind[] = ["concept_card", "example", "annotation"];
+    const result = enforceSupportCeiling(
+      turn([
+        { op: "place_widget", intent: { kind: "concept_card", term: "Limit", definition: "A value approached by a function." } },
+        { op: "place_widget", intent: example },
+        { op: "place_widget", intent: question },
+        {
+          op: "spawn_thread",
+          title: "Instruction",
+          reason: "A bounded explanation",
+          initialBlocks: [
+            { kind: "widget", intent: example },
+            { kind: "widget", intent: question },
+          ],
+        },
+      ]),
+      0,
+      { route: "direct_instruction", permittedWidgetKinds: allowed }
+    );
+
+    expect(result.boardOps).toHaveLength(3);
+    expect(result.boardOps.some((op) => op.op === "place_widget" && op.intent.kind === "question")).toBe(false);
+    const thread = result.boardOps.find((op) => op.op === "spawn_thread");
+    expect(thread?.op).toBe("spawn_thread");
+    if (thread?.op === "spawn_thread") {
+      expect(thread.initialBlocks).toHaveLength(1);
+      expect(thread.initialBlocks[0].kind).toBe("widget");
+    }
+  });
+
+  it("removes a hint entirely at ceiling 0", () => {
     const result = enforceSupportCeiling(turn([{ op: "place_widget", intent: hint([1, 2, 3]) }]), 0);
     expect(result.boardOps).toHaveLength(0);
   });

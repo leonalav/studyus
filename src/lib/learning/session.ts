@@ -28,9 +28,11 @@ import {
 import {
   DEFAULT_LEARNER_ID,
   getDueReviews,
+  getEntrySignal,
   getHypotheses,
   getSkillEvidence,
   getSkillState,
+  hasDirectInstructionActivity,
   normalizeSkillId,
   rebuildSkillState,
 } from "./store";
@@ -46,6 +48,7 @@ import {
   type SkillNode,
   type SkillState,
   type LearningRoute,
+  type SelfReportedFamiliarity,
 } from "./types";
 import { getSkillNodes, recordActivityContract } from "./store";
 
@@ -66,6 +69,7 @@ export interface PolicyBrief {
 
 export interface PolicyBriefInput {
   learnerId?: string;
+  sessionId?: string;
   /** The skill in focus this turn, however the caller resolved it. */
   skillId: string;
   /** The learner's message, read for attempt and help-seeking signals. */
@@ -113,6 +117,19 @@ export async function buildPolicyBrief(input: PolicyBriefInput): Promise<PolicyB
     } satisfies SkillState);
 
   const weakPrerequisites = await findWeakPrerequisites(learnerId, skillId, nodes);
+  const needsIntroduction = await detectColdStart({
+    learnerId,
+    sessionId: input.sessionId,
+    skillId,
+    events,
+    nodes,
+  });
+
+  const persistedEntryFamiliarity =
+    events.length === 0 && state.stage === "encounter"
+      ? await getEntrySignal(input.sessionId, skillId, learnerId)
+      : undefined;
+  const encounterEntryRoute = familiarityEntryRoute(persistedEntryFamiliarity);
 
   const move = planNextMove({
     state,
@@ -120,6 +137,8 @@ export async function buildPolicyBrief(input: PolicyBriefInput): Promise<PolicyB
     dueReviews,
     hypotheses: hypotheses.filter((hypothesis) => !hypothesis.learnerDisputed),
     weakPrerequisites,
+    needsIntroduction,
+    encounterEntryRoute,
   });
 
   const attempt = readAttemptSignal(input.learnerMessage, {
@@ -173,9 +192,38 @@ async function findWeakPrerequisites(
   return out;
 }
 
+function familiarityEntryRoute(
+  familiarity: SelfReportedFamiliarity | undefined
+): "direct_instruction" | "diagnostic_probe" | "prediction" | undefined {
+  switch (familiarity) {
+    case "new": return "direct_instruction";
+    case "shaky": return "diagnostic_probe";
+    case "confident": return "prediction";
+    default: return undefined;
+  }
+}
+
+async function detectColdStart(params: {
+  learnerId: string;
+  sessionId?: string;
+  skillId: string;
+  events: LearningEvidenceEvent[];
+  nodes: SkillNode[];
+}): Promise<boolean> {
+  if (params.events.length > 0) return false;
+  if (await hasDirectInstructionActivity(params.learnerId, params.sessionId, params.skillId)) return false;
+  if (params.nodes.length === 0) return true;
+
+  const graph = buildSkillGraph(params.nodes);
+  const nearby = prerequisiteChain(graph, params.skillId, 4);
+  for (const nearbySkillId of nearby) {
+    const nearbyState = await getSkillState(nearbySkillId, params.learnerId);
+    if (nearbyState && nearbyState.totalEvidenceCount > 0) return false;
+  }
+  return true;
+}
+
 /**
- * Render the brief as the prompt block the tutor receives.
- *
  * Structured as: where the learner actually is → what the gate still needs →
  * what move to make → how much help is allowed → how to route this specific
  * message. The model is given the reasoning, not just the verdict, because a
@@ -214,6 +262,12 @@ export function formatPolicyBrief(params: {
   );
 
   sections.push(formatMoveDirective(move));
+
+  if (move.route === "direct_instruction") {
+    sections.push(
+      "COLD-START EXCEPTION — this is the bounded presentation-first opening for a genuinely cold skill neighborhood. Teach the connected mini-sequence before requesting learner work. The exposition is not evidence, does not advance the stage, and must not create reconstruction debt. The next move must return to an evidence-producing prediction or observation."
+    );
+  }
 
   if (support.instruction) {
     sections.push(`SUPPORT DECISION FOR THIS TURN\n${support.instruction}`);
@@ -300,6 +354,7 @@ export async function buildSessionOpeningBrief(
  * should produce evidence with no contract rather than evidence with a
  * contract nothing recorded.
  */
+
 /**
  * The task family for a move that carries no obligation family of its own.
  *

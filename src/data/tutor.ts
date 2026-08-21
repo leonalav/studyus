@@ -11,6 +11,8 @@
  * turn via `buildOnboardingReminder` (see `src/lib/tutor.ts`).
  */
 
+import type { SelfReportedFamiliarity } from "../lib/learning/types";
+
 export type Intent = "greet" | "explain" | "practice" | "quiz";
 
 /** Minimal Subject type for backward compat with SessionCard/SubjectIcon. */
@@ -52,6 +54,12 @@ export const CREATE_FORMS_TOOL = "create_forms";
 /** Answer format the counsellor picks per question in its create_forms call. */
 export type OnboardingQuestionKind = "free" | "choice";
 
+/** One answer label's deterministic policy meaning on the footing question. */
+export interface OnboardingFamiliarityOption {
+  option: string;
+  familiarity: SelfReportedFamiliarity;
+}
+
 /** One question the tutor agent generated for this session's concept. */
 export interface OnboardingQuestion {
   /** Stable id within the interview, used to pair answers back to questions. */
@@ -63,6 +71,9 @@ export interface OnboardingQuestion {
   kind?: OnboardingQuestionKind;
   /** Two to six options when kind is "choice"; absent on "free" questions. */
   options?: string[];
+  /** Exactly one footing question maps each visible option to a canonical,
+   *  non-evidence entry-routing signal. */
+  familiarityOptions?: OnboardingFamiliarityOption[];
   /** Ask this question only when an earlier question landed on one of these
    *  answers. Constraints keep the intake honest: probing which part feels
    *  shakiest is meaningless for a learner who has never met the concept at
@@ -109,6 +120,22 @@ export interface OnboardingAnswers {
   /** The concept the interview was generated for. */
   concept: string;
   answers: OnboardingAnswer[];
+  /** Learner-declared footing derived only from the validated choice mapping.
+   *  It informs the first empty Encounter route; it is not mastery evidence. */
+  selfReportedFamiliarity?: SelfReportedFamiliarity;
+}
+
+/** Derive the policy-only footing signal without interpreting free text. */
+export function deriveSelfReportedFamiliarity(
+  form: OnboardingForm,
+  answers: Record<string, string>
+): SelfReportedFamiliarity | undefined {
+  const footing = form.questions.find((question) => question.familiarityOptions?.length);
+  if (!footing) return undefined;
+  const selected = (answers[footing.id] ?? "").trim().toLowerCase();
+  return footing.familiarityOptions?.find(
+    ({ option }) => option.trim().toLowerCase() === selected
+  )?.familiarity;
 }
 
 /**

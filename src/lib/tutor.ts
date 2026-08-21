@@ -57,13 +57,14 @@ import {
   type OnboardingForm,
   type OnboardingQuestion,
   type OnboardingQuestionKind,
+  type OnboardingFamiliarityOption,
 } from "../data/tutor";
 import { DOMAIN_META, type Domain, type BoardDoc } from "../data/boards";
 import type { MathNode, FunctionNode, OperatorNode, SymbolNode } from "mathjs";
 import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
 import type { RoadmapStep, RoadmapWidget, WidgetIntent, WidgetKind, WidgetState } from "./widgets/types";
-import type { SupportLevel } from "./learning/types";
+import type { SupportLevel, LearningRoute, SelfReportedFamiliarity } from "./learning/types";
 import { WIDGET_LABEL, isActionableWidget } from "./widgets/types";
 import { validateWidgetIntent } from "./widgets/validate";
 import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
@@ -78,7 +79,8 @@ import {
 } from "./learning/session";
 import { groundMasteryCards } from "./learning/masteryCard";
 import { recordTutorObservation } from "./learning/bridge";
-import { getSkillEvidence, upsertHypothesis, DEFAULT_LEARNER_ID } from "./learning/store";
+import { getSkillEvidence, upsertEntrySignal, upsertHypothesis, DEFAULT_LEARNER_ID } from "./learning/store";
+import { isSelfReportedFamiliarity } from "./learning/types";
 import {
   HYPOTHESIS_KINDS,
   HYPOTHESIS_KIND_REMEDY,
@@ -586,8 +588,13 @@ export function boardHasOpenCommitment(board: BoardDoc | undefined): boolean {
  * turn is allowed to be exactly that. The obligation is still enforced; it is
  * just discharged by the question that is already waiting.
  */
-export function enforceLearnerAgency(turn: TutorTurn, board?: BoardDoc): TutorTurn {
+export function enforceLearnerAgency(
+  turn: TutorTurn,
+  board?: BoardDoc,
+  options: { allowPresentationFirst?: boolean } = {}
+): TutorTurn {
   if (turn.boardOps.length === 0) return turn;
+  if (options.allowPresentationFirst) return turn;
   if (turnLeavesLearnerSomethingToDo(turn)) return turn;
   if (boardHasOpenCommitment(board)) return turn;
   const speech = turn.speech.trim();
@@ -1173,139 +1180,6 @@ function turnAddsTeachingContent(turn: TutorTurn): boolean {
 }
 
 /**
- * Show, don't just tell.
- *
- * The never-passive rule above gets a runtime backstop; the "show it" half of
- * the stage vocabulary does not. The observable failure is a board that
- * accumulates question after question while a spatial idea — slope, area,
- * shape, motion — is never once drawn, in a stage whose whole job is to build
- * the picture (Encounter: function/geometry, Apply/Transfer: function/equation,
- * Understand: equation).
- *
- * Same honesty constraint as the agency rule: this never fabricates a figure
- * the agent did not author. It appends an invitation in speech, so the
- * learner's "draw it" becomes the cue the model then fulfils with a real
- * `visualize` op.
- *
- * Fires at most once per board: as soon as any figure, equation, or
- * self-drawing widget (animation/slider) exists on the board, the obligation is
- * discharged. A session is nudged toward its first picture, not harassed on
- * every later turn. An equation only satisfies a stage whose own visual
- * vocabulary is `equation` — Encounter wants a *picture*, and a lone Σ is not
- * one. `plan` and `roadmap` placements are orientation, not concept teaching,
- * so the session-opening beat is never nudged.
- */
-export function enforceVisualExplanation(
-  turn: TutorTurn,
-  stage: MasteryStage,
-  board?: BoardDoc
-): TutorTurn {
-  if (turn.boardOps.length === 0) return turn;
-  const spec = MASTERY_STAGE_SPECS[stage];
-  if (!spec || spec.visualizations.length === 0) return turn;
-  // A pure-explanation turn is the never-passive rule's to fix, in its own
-  // words. Two nudges on one turn is harassment, not rigour.
-  if (!turnLeavesLearnerSomethingToDo(turn)) return turn;
-  if (!turnAddsTeachingContent(turn)) return turn;
-
-  const equationSatisfies = spec.visualizations.includes("equation");
-  if (turnHasVisualRepresentation(turn, equationSatisfies)) return turn;
-  if (boardHasVisualRepresentation(board, equationSatisfies)) return turn;
-
-  const speech = turn.speech.trim();
-  const nudge =
-    "This idea is clearer seen than read — ask me to put it on the board as a graph, diagram or equation, and I'll draw the smallest one that shows it.";
-  return { ...turn, speech: speech ? `${speech} ${nudge}` : nudge };
-}
-
-/** Widgets that draw their own picture, satisfying the stage without a
- *  separate `visualize` op. */
-const VISUAL_WIDGET_KINDS: ReadonlySet<WidgetKind> = new Set(["animation", "slider"]);
-
-/** `plan` and `roadmap` are orientation/consent, not the teaching of a spatial
- *  concept — placing them owes no figure, so the opening turn stays clean. */
-function widgetKindTeachesConcept(kind: WidgetKind): boolean {
-  return kind !== "plan" && kind !== "roadmap";
-}
-
-function blockSpecHasVisualRepresentation(block: BoardBlockSpec, equationSatisfies: boolean): boolean {
-  if (block.kind === "visualization") return true;
-  if (block.kind === "latex") return equationSatisfies;
-  return block.kind === "widget" && VISUAL_WIDGET_KINDS.has(block.intent.kind);
-}
-
-function turnHasVisualRepresentation(turn: TutorTurn, equationSatisfies: boolean): boolean {
-  return turn.boardOps.some((op) => {
-    switch (op.op) {
-      case "visualize":
-        return true;
-      case "write_latex":
-        return equationSatisfies;
-      case "place_widget":
-      case "update_widget":
-        return VISUAL_WIDGET_KINDS.has(op.intent.kind);
-      case "replace_block":
-      case "insert_after":
-        return blockSpecHasVisualRepresentation(op.block, equationSatisfies);
-      case "spawn_thread":
-        return op.initialBlocks.some((block) => blockSpecHasVisualRepresentation(block, equationSatisfies));
-      default:
-        return false;
-    }
-  });
-}
-
-function blockHasVisualRepresentation(
-  block: BoardDoc["blocks"][number],
-  equationSatisfies: boolean
-): boolean {
-  switch (block.kind) {
-    case "visualization":
-      return true;
-    case "latex":
-      return equationSatisfies;
-    case "widget":
-      return VISUAL_WIDGET_KINDS.has(block.intent.kind);
-    case "row":
-      return block.children.some((child) => blockHasVisualRepresentation(child, equationSatisfies));
-    default:
-      return false;
-  }
-}
-
-function boardHasVisualRepresentation(board: BoardDoc | undefined, equationSatisfies: boolean): boolean {
-  return Boolean(board?.blocks.some((block) => blockHasVisualRepresentation(block, equationSatisfies)));
-}
-
-/** Does this turn add content that teaches — the kind whose missing figure is a
- *  real gap. Housekeeping (delete/revise/redraw) owes the learner nothing new. */
-function turnAddsTeachingContent(turn: TutorTurn): boolean {
-  return turn.boardOps.some((op) => {
-    switch (op.op) {
-      case "write_title":
-      case "write_text":
-      case "write_bullets":
-      case "write_callout":
-      case "write_latex":
-      case "visualize":
-        return true;
-      case "place_widget":
-      case "update_widget":
-        return widgetKindTeachesConcept(op.intent.kind);
-      case "replace_block":
-      case "insert_after":
-        return op.block.kind !== "widget" || widgetKindTeachesConcept(op.block.intent.kind);
-      case "spawn_thread":
-        return op.initialBlocks.some(
-          (block) => block.kind !== "widget" || widgetKindTeachesConcept(block.intent.kind)
-        );
-      default:
-        return false;
-    }
-  });
-}
-
-/**
  * Widget kinds that hand the learner support rather than work.
  *
  * A `hint` is support by definition. An `example` is a worked demonstration —
@@ -1343,7 +1217,36 @@ function hintStepSupportLevel(level: number): SupportLevel {
  * treated as an adult; a learner whose hint quietly vanished is being gaslit by
  * their study tool.
  */
-export function enforceSupportCeiling(turn: TutorTurn, ceiling: SupportLevel): TutorTurn {
+export function enforceSupportCeiling(
+  turn: TutorTurn,
+  ceiling: SupportLevel,
+  options: { route?: LearningRoute; permittedWidgetKinds?: readonly WidgetKind[] } = {}
+): TutorTurn {
+  if (options.route === "direct_instruction") {
+    const permitted = new Set(options.permittedWidgetKinds ?? []);
+    const isPermittedWidget = (kind: WidgetKind): boolean => permitted.has(kind);
+    const isPermittedBlock = (block: BoardBlockSpec): boolean =>
+      block.kind !== "widget" || isPermittedWidget(block.intent.kind);
+    const presentationOps = turn.boardOps.flatMap<BoardOp>((op) => {
+      switch (op.op) {
+        case "place_widget":
+        case "update_widget":
+          return isPermittedWidget(op.intent.kind) ? [op] : [];
+        case "replace_block":
+        case "insert_after":
+          return isPermittedBlock(op.block) ? [op] : [];
+        case "spawn_thread": {
+          const initialBlocks = op.initialBlocks.filter(isPermittedBlock);
+          return initialBlocks.length > 0 ? [{ ...op, initialBlocks }] : [];
+        }
+        default:
+          return [op];
+      }
+    });
+    return presentationOps.length === turn.boardOps.length && presentationOps.every((op, index) => op === turn.boardOps[index])
+      ? turn
+      : { ...turn, boardOps: presentationOps };
+  }
   if (ceiling >= 3) return turn;
 
   let trimmedAny = false;
@@ -2803,6 +2706,8 @@ export function buildTutorUserPrompt(params: {
    *  stage gate's outstanding requirements, the warranted move, the support
    *  ceiling, and the response routing table. */
   policyBrief?: string;
+  /** True only while policy selected the bounded first-contact teaching move. */
+  presentationFirst?: boolean;
   /** Widget kinds the policy warranted for this turn. When supplied, only these
    *  are described in the catalog; the validator still governs what may render. */
   permittedWidgetKinds?: readonly WidgetKind[];
@@ -2924,6 +2829,9 @@ export function buildTutorUserPrompt(params: {
 
   parts.push(
     `GLOBAL BEHAVIOR: The chalkboard is the primary teaching surface and interactive lesson. Do not teach, explain the lesson, or ask instructional/content questions in speech. Put teaching steps, Socratic questions, checks for understanding, examples, definitions, and practice prompts onto the chalkboard using board_ops. Speech must stay to a brief acknowledgement or transition (for example, “I put that on the board”). Only use speech for a direct learner clarification when no board content is needed. ` +
+    (params.presentationFirst
+      ? `PRESENTATION-FIRST EXCEPTION — the policy selected direct_instruction for genuine first contact. For this bounded opening only, put the intuition, core representation or mechanism, essential terminology, and one canonical worked example on the board before requesting learner work. Do not force a filler check into those beats. This presentation is not learner evidence and cannot advance mastery; after it, the next policy move must obtain one focused prediction or observation. `
+      : ``) +
     `First decide whether changing the board is pedagogically necessary for this exact turn. Greetings, thanks, acknowledgements, social chat, navigation questions, and replies that are already clear in short speech MUST return board_ops exactly []. Do not create an equation, graph, diagram, chart, text block, callout, widget, or thread merely because a chalkboard is available. ` +
     `THE LEARNER IS NEVER PASSIVE: the learner must always be holding a task. If your board_ops add only presentational content (roadmap, concept card, text, bullets, diagram, worked example) and nothing on the board is already awaiting their answer, you have explained AT the learner and stopped — pair it with the widget that hands the work back. Placing a roadmap alone is a forbidden turn: place it together with the question, scratchpad or reveal that opens its first step. When a goal is demonstrably complete, update_widget the EXISTING roadmap in that same turn (mark the finished step done and the next step current) while opening the next step's work — never a roadmap-only turn, never a second roadmap, never a turn that only retouches the roadmap. Never close a turn with "let me know when you're ready", "does that make sense?", "tell me what you already know", or "before we go on"; open the work or teach the next mechanism instead. ` +
     `ONE COMMITMENT PER CYCLE, NOT PER TURN: when an unanswered question, scratchpad or prediction is already on the board, do not add another. Answer what was asked, extend the explanation, and let the learner finish the task they are already in the middle of. A second demand stacked on an open one abandons the first. Never manufacture a filler question to satisfy the rule — a prompt attached to nothing teaches the learner that prompts can be skimmed past. ` +
@@ -3146,17 +3054,19 @@ export function summarizeRoadmapSteps(intent: RoadmapWidget): string {
  *
  * Policy routes whitelist pedagogical moves — so a diagnostic route's catalog
  * lists four kinds and the model simply never sees the rest. The designated
- * session opening (greeting turn + onboarding reminder on record) is exempt:
- * it is a product beat that must always be able to place the plan widget and
- * the roadmap, whatever the route happens to warrant. `undefined` = full
- * catalog. Exported for unit testing.
+ * session opening and the learner's first plan agreement are exempt: each is a
+ * product beat that must be able to place the plan widget and roadmap, whatever
+ * the route happens to warrant. `undefined` = full catalog. Exported for unit
+ * testing.
  */
 export function resolveTurnWidgetPermit(
-  turnKind: "chat" | "greeting" | "widget" | undefined,
+  turnKind: "chat" | "greeting" | "widget" | "plan_start" | undefined,
   hasOnboarding: boolean,
   policyPermitted: readonly WidgetKind[] | undefined
 ): readonly WidgetKind[] | undefined {
-  return turnKind === "greeting" && hasOnboarding ? undefined : policyPermitted;
+  return (turnKind === "greeting" || turnKind === "plan_start") && hasOnboarding
+    ? undefined
+    : policyPermitted;
 }
 
 export interface TutorTurnRequest {
@@ -3176,7 +3086,7 @@ export interface TutorTurnRequest {
    *  onboarding answers on record is the DESIGNATED session opening: the turn
    *  that must place the plan widget (zero→mastery route built on the five
    *  intake answers) and the roadmap before any teaching. */
-  turnKind?: "chat" | "greeting" | "widget";
+  turnKind?: "chat" | "greeting" | "widget" | "plan_start";
   attachments?: {
     name: string;
     kind: string;
@@ -3346,20 +3256,40 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // A route-scoped catalog never contains either — the greeting then quietly
   // renders "roadmap only" because the model never saw the plan exists.
   const isSessionOpening = req.turnKind === "greeting" && Boolean(req.onboarding);
+  const isPlanningTurn = isSessionOpening || req.turnKind === "plan_start";
+
+  if (
+    (req.turnKind === "greeting" || req.turnKind === "plan_start") &&
+    isSelfReportedFamiliarity(req.onboarding?.selfReportedFamiliarity)
+  ) {
+    try {
+      await upsertEntrySignal({
+        learnerId,
+        sessionId: req.sessionId,
+        skillId,
+        familiarity: req.onboarding.selfReportedFamiliarity,
+      });
+    } catch (error) {
+      console.warn("[tutor] could not persist onboarding entry signal", error);
+    }
+  }
 
   let openingBrief = "";
   try {
-    policyBrief = await buildPolicyBrief({
-      learnerId,
-      skillId,
-      learnerMessage: req.learnerMessage,
-      supportAlreadyUsed: Math.max(0, Math.min(3, hintLevel)) as 0 | 1 | 2 | 3,
-      fallbackStage: masteryStage.stage,
-    });
+    if (!isSessionOpening) {
+      policyBrief = await buildPolicyBrief({
+        learnerId,
+        skillId,
+        sessionId: req.sessionId,
+        learnerMessage: req.learnerMessage,
+        supportAlreadyUsed: Math.max(0, Math.min(3, hintLevel)) as 0 | 1 | 2 | 3,
+        fallbackStage: masteryStage.stage,
+      });
+    }
     // Due retrievals belong at the top of a session, not buried mid-flow: a
     // review surfaced after twenty minutes of new teaching is a review the
     // learner has already been primed for, which measures priming.
-    if (awaitingFirstAttempt) {
+    if (!isSessionOpening && (awaitingFirstAttempt || req.turnKind === "plan_start")) {
       openingBrief = await buildSessionOpeningBrief(learnerId);
     }
   } catch (error) {
@@ -3431,6 +3361,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     masteryStage: policyBrief?.state.stage ?? masteryStage.stage,
     masteryStageEvidence: masteryStage.evidence,
     policyBrief: policyBrief?.prompt,
+    presentationFirst: policyBrief?.move.route === "direct_instruction",
     permittedWidgetKinds: resolveTurnWidgetPermit(
       req.turnKind,
       Boolean(req.onboarding),
@@ -3482,7 +3413,15 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   let ledgerEvidence: LearningEvidenceEvent[] = [];
   let turnEvidenceId: string | undefined;
   try {
-    if (policyBrief && !awaitingFirstAttempt && policyBrief.attempt.madeAttempt) {
+    if (
+      policyBrief &&
+      // A plan agreement authorizes the activity but contains no performance to
+      // measure; the next substantive learner response is the first observation.
+      !isPlanningTurn &&
+      policyBrief.move.route !== "direct_instruction" &&
+      !awaitingFirstAttempt &&
+      policyBrief.attempt.madeAttempt
+    ) {
       const observation = await recordTutorObservation({
         learnerId,
         sessionId: req.sessionId,
@@ -3518,7 +3457,9 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // exactly one stage, while an observed regression is honoured immediately.
   // Resolved here so roadmap integrity can see whether a goal was demonstrably
   // completed — the same gate, not a parallel one.
-  const resolvedStage = resolveNextMasteryStage(masteryStage.stage, rawResult.value, ledgerEvidence);
+  const resolvedStage = isPlanningTurn
+    ? null
+    : resolveNextMasteryStage(masteryStage.stage, rawResult.value, ledgerEvidence);
   const advancedTo =
     resolvedStage &&
     MASTERY_STAGES.indexOf(resolvedStage.stage) > MASTERY_STAGES.indexOf(masteryStage.stage)
@@ -3535,7 +3476,6 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
 
   // Ceiling enforcement runs BEFORE the agency check, so that a turn whose only
   // learner-facing element was an over-supportive widget is caught by the
-<<<<<<< HEAD
   // never-passive net rather than shipping as a bare explanation. Roadmap
   // progress sits with those filters: it may rewrite place→update and inject a
   // progress update clamped to the demonstrated stage, but never fabricates the
@@ -3544,6 +3484,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // have decided what survived.
   const turnStage = policyBrief?.state.stage ?? masteryStage.stage;
   const roadmapLiveStage = advancedTo ?? regressTo ?? turnStage;
+  const directInstruction = policyBrief?.move.route === "direct_instruction";
   const policedTurn = enforceVisualExplanation(
     enforceLearnerAgency(
       enforceRoadmapProgress(
@@ -3552,30 +3493,22 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
             enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
             req.learnerMessage
           ),
-          policyBrief?.support.granted ?? 3
+          policyBrief?.support.granted ?? 3,
+          {
+            route: policyBrief?.move.route,
+            permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
+          }
         ),
         req.board,
         { advancedTo, liveStage: roadmapLiveStage }
-=======
-  // never-passive net rather than shipping as a bare explanation. The
-  // show-don't-just-tell backstop runs last: it only ever appends speech, and
-  // it must see the turn after the other filters have decided what survived.
-  const turnStage = policyBrief?.state.stage ?? masteryStage.stage;
-  const policedTurn = enforceVisualExplanation(
-    enforceLearnerAgency(
-      enforceSupportCeiling(
-        enforceTutorBoardNecessity(
-          enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
-          req.learnerMessage
-        ),
-        policyBrief?.support.granted ?? 3
->>>>>>> 0ad7ebbfc9bbb8312cb1f1cbadcb8aba823bdf61
       ),
-      req.board
+      req.board,
+      { allowPresentationFirst: directInstruction }
     ),
     turnStage,
     req.board
   );
+
 
   // Any mastery card in this turn is rewritten from the ledger before it can
   // reach the board. Whatever the model wrote into those five numbers never
@@ -3600,9 +3533,11 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     promptVersion: TUTOR_PROMPT_VERSION,
     tokensUsed: result.usage?.total ?? null,
   });
-  await rememberTutorDiagnosis(req.sessionId, result.value.diagnosis, studio, result.value.evidenceRefs);
+  if (!isPlanningTurn) {
+    await rememberTutorDiagnosis(req.sessionId, result.value.diagnosis, studio, result.value.evidenceRefs);
+  }
 
-  if (typeof result.value.requestedLevel === "number" && result.value.requestedLevel !== hintLevel) {
+  if (!isPlanningTurn && typeof result.value.requestedLevel === "number" && result.value.requestedLevel !== hintLevel) {
     await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
   }
 
@@ -3610,7 +3545,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // widget the learner answers later resolves to a named task family, context
   // variant and support ceiling rather than being filed as an anonymous click.
   let turnActivityId: string | undefined;
-  if (policyBrief) {
+  if (policyBrief && !isSessionOpening) {
     const contract = await recordMoveActivity({
       learnerId,
       sessionId: req.sessionId,
@@ -3626,13 +3561,15 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // evidence attached cannot later be shown to the learner as "here is why I
   // think this", and an unexplainable claim about a learner is one they have no
   // fair way to contest.
-  await recordTutorHypotheses({
-    learnerId,
-    skillId,
-    diagnosis: result.value.diagnosis,
-    preferences: studio,
-    evidenceIds: turnEvidenceId ? [turnEvidenceId] : [],
-  });
+  if (!isPlanningTurn) {
+    await recordTutorHypotheses({
+      learnerId,
+      skillId,
+      diagnosis: result.value.diagnosis,
+      preferences: studio,
+      evidenceIds: turnEvidenceId ? [turnEvidenceId] : [],
+    });
+  }
 
   if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
     await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
@@ -3776,6 +3713,51 @@ export function validateCreateFormsPayload(payload: unknown): ValidationResult<G
           } else if (hasOptions) {
             errors.push(`${path} is a free-text question, so it must not carry options`);
           }
+          let familiarityOptions: OnboardingFamiliarityOption[] | undefined;
+          if (obj.familiarityOptions !== undefined) {
+            if (kind !== "choice" || !options?.length) {
+              errors.push(`${path}.familiarityOptions can only appear on a choice question`);
+            } else {
+              const rawFamiliarityOptions = asArray(obj.familiarityOptions, `${path}.familiarityOptions`, errors);
+              if (rawFamiliarityOptions) {
+                const mapped: OnboardingFamiliarityOption[] = [];
+                const mappedOptions = new Set<string>();
+                const mappedFamiliarities = new Set<SelfReportedFamiliarity>();
+                rawFamiliarityOptions.forEach((entry, j) => {
+                  const mapping = asRecord(entry, `${path}.familiarityOptions[${j}]`, errors);
+                  if (!mapping) return;
+                  const option = asNonEmptyString(mapping.option, `${path}.familiarityOptions[${j}].option`, errors);
+                  const familiarity = mapping.familiarity;
+                  if (!option || !isSelfReportedFamiliarity(familiarity)) {
+                    if (familiarity !== undefined && !isSelfReportedFamiliarity(familiarity)) {
+                      errors.push(`${path}.familiarityOptions[${j}].familiarity must be "new", "shaky", or "confident"`);
+                    }
+                    return;
+                  }
+                  const optionKey = option.trim().toLowerCase();
+                  if (!options.some((candidate) => candidate.toLowerCase() === optionKey)) {
+                    errors.push(`${path}.familiarityOptions[${j}].option must name an option of this question`);
+                    return;
+                  }
+                  if (mappedOptions.has(optionKey) || mappedFamiliarities.has(familiarity)) {
+                    errors.push(`${path}.familiarityOptions must map each option and familiarity exactly once`);
+                    return;
+                  }
+                  mappedOptions.add(optionKey);
+                  mappedFamiliarities.add(familiarity);
+                  mapped.push({
+                    option: options.find((candidate) => candidate.toLowerCase() === optionKey) ?? option.trim(),
+                    familiarity,
+                  });
+                });
+                if (mapped.length === options.length && mappedFamiliarities.size === 3) {
+                  familiarityOptions = mapped;
+                } else if (mapped.length > 0 || rawFamiliarityOptions.length > 0) {
+                  errors.push(`${path}.familiarityOptions must map every option and include new, shaky, and confident exactly once`);
+                }
+              }
+            }
+          }
           // onlyIf: a constraint against an earlier question's answer, so a
           // probe that cannot apply (e.g. "which part feels shakiest?" asked of
           // someone who has never met the concept at all) simply never shows.
@@ -3817,11 +3799,15 @@ export function validateCreateFormsPayload(payload: unknown): ValidationResult<G
             }
           }
 
-          questions.push({ id: `q${i + 1}`, question: text.trim(), kind, options, onlyIf });
+          questions.push({ id: `q${i + 1}`, question: text.trim(), kind, options, familiarityOptions, onlyIf });
         });
         const title = typeof args.title === "string" && args.title.trim() ? args.title.trim() : undefined;
         const invitation = typeof args.invitation === "string" && args.invitation.trim() ? args.invitation.trim() : undefined;
         form = { title, invitation, questions };
+        const footingQuestions = questions.filter((question) => question.familiarityOptions?.length);
+        if (footingQuestions.length !== 1) {
+          errors.push("root.tool_call.arguments.questions must include exactly one familiarityOptions footing question");
+        }
       }
     }
   }
@@ -3882,6 +3868,7 @@ export async function generateOnboardingQuestions(req: {
     `Rules:\n` +
     `- Ask AT MOST ${MAX_ONBOARDING_QUESTIONS} questions, and no fewer than ${MIN_ONBOARDING_QUESTIONS}. Ask fewer when fewer will do; do not pad to reach the maximum.\n` +
     `- Probe what actually matters for teaching this material: current grasp, which sub-parts they expect to struggle with, prior background the concept depends on, pace/deadline pressure, and how they want to be taught.\n` +
+    `- The FIRST question must be a choice footing question with exactly three options, one each for a learner who is new, shaky, or confident. Attach familiarityOptions mapping every option exactly once to "new", "shaky", or "confident". It is the only question allowed to carry familiarityOptions; phrase the visible labels naturally for this concept.\n` +
     `- Ask about the learner, never quiz them on the content — this is calibration, not assessment.\n` +
     `- Pick the answer format that fits each question: kind "choice" when two to six options genuinely cover the space (each a short phrase, ordered sensibly), kind "free" when the honest answer is a line of the learner's own words. A good intake mixes both.\n` +
     `- Respect constraints: a follow-up probe must make sense to the particular learner reading it. When a question only applies given a certain earlier answer — e.g. "which part feels shakiest?" means nothing to someone who just said they have never met the concept at all — gate it with onlyIf on that earlier choice question and the option labels under which it applies, rather than asking it unconditionally.\n` +
@@ -3890,7 +3877,7 @@ export async function generateOnboardingQuestions(req: {
     `- Do not number the questions; numbering is added by the app.\n` +
     `- Write as a counsellor preparing a form for a person, not a clerk printing paperwork.\n\n` +
     `Return JSON only:\n` +
-    `{"notification": string, "tool_call": {"name": "${CREATE_FORMS_TOOL}", "arguments": {"title": string, "invitation": string, "questions": [{"question": string, "kind": "free" | "choice", "options"?: string[], "onlyIf"?: {"questionId": string, "anyOf": string[]}}, ...]}}, "handoff": string}.\n` +
+    `{"notification": string, "tool_call": {"name": "${CREATE_FORMS_TOOL}", "arguments": {"title": string, "invitation": string, "questions": [{"question": string, "kind": "free" | "choice", "options"?: string[], "familiarityOptions"?: [{"option": string, "familiarity": "new" | "shaky" | "confident"}], "onlyIf"?: {"questionId": string, "anyOf": string[]}}, ...]}}, "handoff": string}.\n` +
     `- "notification": one or two sentences in your own voice, posted in the chat as you run — welcome this learner to THIS concept and tell them you are putting your ${MAX_ONBOARDING_QUESTIONS} intake questions into a small form they can open right in the chat, so it takes a minute and they can skip anything they like. Your words, never a fixed formula.\n` +
     `- "title": two to six words naming this intake, specific to the concept.\n` +
     `- "invitation": one sentence shown inside the form, inviting them to answer and making clear they may skip any or all of the questions.\n` +

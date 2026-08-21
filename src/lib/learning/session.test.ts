@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { getDb } from "../../db/database";
 import { buildPolicyBrief, buildSessionOpeningBrief, formatPolicyBrief, refreshSkillAfterTurn } from "./session";
-import { recordEvidence, scheduleReview, upsertHypothesis, upsertSkillNode } from "./store";
+import { recordEvidence, scheduleReview, upsertEntrySignal, upsertHypothesis, upsertSkillNode } from "./store";
 import { emptySkillState, type LearningEvidenceEvent, type LearningEvidenceInput, type NextLearningMove } from "./types";
 import type { SupportDecision } from "./support";
 
@@ -59,6 +59,104 @@ describe("buildPolicyBrief — one turn's decision, assembled from the ledger", 
     // only just named. Evidence overrides this the moment any exists.
     expect(brief.state.stage).toBe("construct");
     expect(brief.state.totalEvidenceCount).toBe(0);
+  });
+
+  it("routes a genuinely cold skill neighborhood into direct instruction", async () => {
+    const learnerId = learner();
+    const sessionId = `cold-session-${learnerId}`;
+    const brief = await buildPolicyBrief({
+      learnerId,
+      sessionId,
+      skillId: "cold_limits",
+      learnerMessage: "where do I begin?",
+    });
+
+    expect(brief.move.route).toBe("direct_instruction");
+    expect(brief.move.requiredEvidence).toEqual([]);
+    expect(brief.move.supportCeiling).toBe(3);
+    expect(brief.prompt).toMatch(/bounded presentation-first opening/i);
+    expect(brief.prompt).toMatch(/canonical worked example/i);
+  });
+
+  it("does not treat an evidenced nearby prerequisite as a cold neighborhood", async () => {
+    const learnerId = learner();
+    const sessionId = `warm-prereq-${learnerId}`;
+    await upsertSkillNode({ skillId: "cold_target", label: "Target", prerequisites: ["warm_prereq"] });
+    await upsertSkillNode({ skillId: "warm_prereq", label: "Prerequisite", prerequisites: [] });
+    await evidence({ learnerId, skillIds: ["warm_prereq"] });
+
+    const brief = await buildPolicyBrief({
+      learnerId,
+      sessionId,
+      skillId: "cold_target",
+      learnerMessage: "show me what to predict",
+    });
+
+    expect(brief.move.route).toBe("prediction");
+  });
+
+  it("routes validated onboarding familiarity without creating evidence or mastery", async () => {
+    for (const [familiarity, expected] of [
+      ["new", "direct_instruction"],
+      ["shaky", "diagnostic_probe"],
+      ["confident", "prediction"],
+    ] as const) {
+      const learnerId = learner();
+      const sessionId = `entry-${familiarity}-${learnerId}`;
+      const skillId = `entry_skill_${familiarity}`;
+      await upsertEntrySignal({ learnerId, sessionId, skillId, familiarity });
+
+      const brief = await buildPolicyBrief({ learnerId, sessionId, skillId, learnerMessage: "start" });
+      expect(brief.move.route).toBe(expected);
+      expect(brief.state.totalEvidenceCount).toBe(0);
+      expect(await import("./store").then((m) => m.getSkillEvidence(skillId, learnerId))).toEqual([]);
+      expect(await import("./store").then((m) => m.getSkillState(skillId, learnerId))).toBeUndefined();
+    }
+  });
+
+  it("keeps onboarding routing behind a due review", async () => {
+    const learnerId = learner();
+    const sessionId = `entry-due-${learnerId}`;
+    const skillId = "entry_due_skill";
+    await upsertEntrySignal({ learnerId, sessionId, skillId, familiarity: "new" });
+    await scheduleReview({
+      learnerId,
+      skillId,
+      taskFamily: "entry-review",
+      dueAt: new Date(Date.now() - DAY),
+    });
+
+    const brief = await buildPolicyBrief({ learnerId, sessionId, skillId, learnerMessage: "start" });
+    expect(brief.move.route).toBe("due_retrieval");
+  });
+
+  it("does not repeat direct instruction after its session contract exists", async () => {
+    const learnerId = learner();
+    const sessionId = `introduced-${learnerId}`;
+    const first = await buildPolicyBrief({
+      learnerId,
+      sessionId,
+      skillId: "introduced_skill",
+      learnerMessage: "start from zero",
+    });
+    expect(first.move.route).toBe("direct_instruction");
+
+    const { recordMoveActivity } = await import("./session");
+    await recordMoveActivity({
+      learnerId,
+      sessionId,
+      skillId: "introduced_skill",
+      move: first.move,
+      turnOrdinal: 0,
+    });
+
+    const second = await buildPolicyBrief({
+      learnerId,
+      sessionId,
+      skillId: "introduced_skill",
+      learnerMessage: "I am ready to predict",
+    });
+    expect(second.move.route).toBe("prediction");
   });
 
   it("normalizes the skill id so board and tutor evidence land on one row", async () => {

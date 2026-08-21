@@ -17,7 +17,16 @@ function validPayload() {
         title: "Before we start: limits",
         invitation: "Answer whichever of these you can — skipping is fine.",
         questions: [
-          { question: "How comfortable are you with limits already?", kind: "free" },
+          {
+            question: "Where are you with limits?",
+            kind: "choice",
+            options: ["Brand new", "A little shaky", "Comfortable already"],
+            familiarityOptions: [
+              { option: "Brand new", familiarity: "new" },
+              { option: "A little shaky", familiarity: "shaky" },
+              { option: "Comfortable already", familiarity: "confident" },
+            ],
+          },
           {
             question: "Which part do you expect to trip you up?",
             kind: "choice",
@@ -43,6 +52,11 @@ describe("validateCreateFormsPayload — onlyIf constraints", () => {
     payload.tool_call.arguments.questions[1].onlyIf = { questionId: "q1", anyOf: ["The definitions"] };
     payload.tool_call.arguments.questions[0].kind = "choice";
     payload.tool_call.arguments.questions[0].options = ["The definitions", "The algebra", "New to this"];
+    payload.tool_call.arguments.questions[0].familiarityOptions = [
+      { option: "The definitions", familiarity: "new" },
+      { option: "The algebra", familiarity: "shaky" },
+      { option: "New to this", familiarity: "confident" },
+    ];
     return payload;
   };
 
@@ -65,7 +79,7 @@ describe("validateCreateFormsPayload — onlyIf constraints", () => {
 
   it("rejects a gate on a free-text question — there is no option list to match", () => {
     const payload = validPayload() as any;
-    payload.tool_call.arguments.questions[1].onlyIf = { questionId: "q1", anyOf: ["anything"] };
+    payload.tool_call.arguments.questions[3].onlyIf = { questionId: "q3", anyOf: ["anything"] };
     const result = validateCreateFormsPayload(payload);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.join(" ")).toMatch(/choice/i);
@@ -105,10 +119,44 @@ describe("validateCreateFormsPayload — the counsellor's create_forms call", ()
 
   it("accepts bare-string questions as free text", () => {
     const payload = validPayload();
-    payload.tool_call.arguments.questions[0] = "How comfortable are you with limits already?" as never;
+    payload.tool_call.arguments.questions[2] = "What background is freshest for you?" as never;
     const result = validateCreateFormsPayload(payload);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value.form.questions[0].kind).toBe("free");
+    if (result.ok) expect(result.value.form.questions[2].kind).toBe("free");
+  });
+
+
+  it("rejects a missing or malformed footing mapping", () => {
+    const absent = validPayload() as any;
+    delete absent.tool_call.arguments.questions[0].familiarityOptions;
+    expect(validateCreateFormsPayload(absent).ok).toBe(false);
+
+    const freeText = validPayload() as any;
+    freeText.tool_call.arguments.questions[0].kind = "free";
+    freeText.tool_call.arguments.questions[0].options = undefined;
+    expect(validateCreateFormsPayload(freeText).ok).toBe(false);
+
+    const absentOption = validPayload() as any;
+    absentOption.tool_call.arguments.questions[0].familiarityOptions[0].option = "Not listed";
+    expect(validateCreateFormsPayload(absentOption).ok).toBe(false);
+  });
+
+  it("rejects duplicate or incomplete familiarity mappings", () => {
+    const duplicateOption = validPayload() as any;
+    duplicateOption.tool_call.arguments.questions[0].familiarityOptions[1].option = "Brand new";
+    expect(validateCreateFormsPayload(duplicateOption).ok).toBe(false);
+
+    const duplicateFamiliarity = validPayload() as any;
+    duplicateFamiliarity.tool_call.arguments.questions[0].familiarityOptions[1].familiarity = "new";
+    expect(validateCreateFormsPayload(duplicateFamiliarity).ok).toBe(false);
+
+    const secondFooting = validPayload() as any;
+    secondFooting.tool_call.arguments.questions[1].familiarityOptions = [
+      { option: "The definitions", familiarity: "new" },
+      { option: "The algebra", familiarity: "shaky" },
+      { option: "The notation", familiarity: "confident" },
+    ];
+    expect(validateCreateFormsPayload(secondFooting).ok).toBe(false);
   });
 
   it("rejects any other tool name — the intake is create_forms only", () => {
@@ -138,7 +186,7 @@ describe("validateCreateFormsPayload — the counsellor's create_forms call", ()
 
   it("rejects a free question carrying options", () => {
     const payload = validPayload();
-    payload.tool_call.arguments.questions[0] = { question: "Q?", kind: "free", options: ["a", "b"] } as never;
+    payload.tool_call.arguments.questions[2] = { question: "Q?", kind: "free", options: ["a", "b"] } as never;
     const result = validateCreateFormsPayload(payload);
     expect(result.ok).toBe(false);
   });

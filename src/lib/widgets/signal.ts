@@ -245,8 +245,8 @@ export function buildWidgetSignalMessage(
       });
       lines.push(
         draft
-          ? `[The route above is the one I signed off, edits included — teach to it. Begin at the first phase now, and if evidence later forces a revision, say what changed and why; the plan is ours, not yours alone.]`
-          : `[This is my go-ahead: teach to this route. Begin at the first phase now, and if evidence later forces you to revise the plan, say what changed and why; never teach silently around it.]`
+          ? `[The route above is the one I signed off, edits included — teach toward it. Choose the next valid move from the deterministic learning policy, and if evidence later forces a revision, say what changed and why; the plan is ours, not yours alone.]`
+          : `[This is my go-ahead: teach toward this route. Choose the next valid move from the deterministic learning policy, and if evidence later forces you to revise the plan, say what changed and why; never teach silently around it.]`
       );
       break;
     }
