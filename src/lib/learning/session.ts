@@ -65,6 +65,13 @@ export interface PolicyBrief {
   hypotheses: LearnerHypothesis[];
   /** The rendered prompt block. */
   prompt: string;
+  /**
+   * Whether this turn's route allows an exposition beat. True when the move's
+   * support ceiling is above zero (meaning the learner is not being purely
+   * assessed) or when the learner already made an attempt on the current
+   * task. This gates the never-passive rule during presentation-first phases.
+   */
+  expositionAllowed: boolean;
 }
 
 export interface PolicyBriefInput {
@@ -158,6 +165,7 @@ export async function buildPolicyBrief(input: PolicyBriefInput): Promise<PolicyB
     dueReviews,
     hypotheses,
     prompt: formatPolicyBrief({ state, events, move, support, hypotheses, dueReviews }),
+    expositionAllowed: move.supportCeiling > 0 || attempt.madeAttempt,
   };
 }
 

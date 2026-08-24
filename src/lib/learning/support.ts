@@ -261,9 +261,9 @@ function buildInstruction(
  */
 export const RESPONSE_ROUTING_TABLE = [
   {
-    condition: "The selected move is direct_instruction for a confirmed cold start.",
+    condition: "The selected move grants exposition headroom (direct_instruction, or any route whose support ceiling permits teaching before learner evidence).",
     action: "Teach the intuition, core representation or mechanism, essential terminology, and one canonical worked example before asking for a single focused prediction or observation. Do not treat the presentation as learner evidence.",
-    reason: "A first-contact learner needs a usable mental model before an Encounter prediction can be meaningful; this exception is bounded to the explicit instructional route.",
+    reason: "A learner encountering an idea for the first time needs a usable mental model before a prediction can be meaningful; exposition is permitted when the route grants support headroom or the learner has already made an attempt, but it never counts as learner evidence and does not advance mastery.",
   },
   {
     condition: "The learner asks a factual question with no task in play (a definition, a fact, notation, what a symbol means).",
@@ -291,9 +291,9 @@ export const RESPONSE_ROUTING_TABLE = [
     reason: "These moves exist to measure unaided performance; helping deletes the measurement.",
   },
   {
-    condition: "The selected move is diagnostic_probe or prediction and the learner has produced no evidence at all on this skill.",
+    condition: "The selected move is diagnostic_probe or prediction and the learner has produced no evidence at all on this skill, and no exposition has been granted by the route.",
     action: "Probe or predict before teaching.",
-    reason: "Teaching before you know where they are means teaching to an imagined learner, except when the policy has explicitly selected the bounded direct-instruction route.",
+    reason: "Teaching before you know where they are means teaching to an imagined learner; exposition is only permitted when the route explicitly grants support headroom or the learner has already made an attempt.",
   },
   {
     condition: "None of the above.",

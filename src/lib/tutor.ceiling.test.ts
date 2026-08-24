@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { enforceLearnerAgency, enforceSupportCeiling, type BoardOp, type TutorTurn } from "./tutor";
+import { enforceLearnerAgency, enforceSupportCeiling, turnLeavesLearnerSomethingToDo, EXPOSITION_TURN_BUDGET, type BoardOp, type TutorTurn } from "./tutor";
 import type { BoardDoc } from "../data/boards";
 import type { WidgetIntent, WidgetKind } from "./widgets/types";
 
@@ -315,5 +315,124 @@ describe("One commitment per cycle", () => {
   it("leaves a pure-speech turn alone regardless of the board", () => {
     const speechOnly = turn([], "Yes, exactly — the inside function is x squared.");
     expect(enforceLearnerAgency(speechOnly, answeredQuestion)).toBe(speechOnly);
+  });
+});
+
+/**
+ * The exposition budget must bind on presentation-only turns regardless of
+ * which route produced them. The streak is driven by what the policed turn
+ * actually does (via `turnLeavesLearnerSomethingToDo`), not by the route
+ * name.
+ */
+describe("Exposition budget binding", () => {
+  const presentationalTurn: TutorTurn = {
+    speech: "The derivative of x squared is 2x by the power rule.",
+    boardOps: [{ op: "write_latex", tex: "\\frac{d}{dx}x^2 = 2x" }],
+    evidenceRefs: [],
+  };
+
+  const activeTurn: TutorTurn = {
+    speech: "Try this yourself.",
+    boardOps: [
+      {
+        op: "place_widget",
+        intent: {
+          kind: "question",
+          id: "q1",
+          prompt: "What is the derivative of x^3?",
+          format: "short_answer",
+        },
+      },
+    ],
+    evidenceRefs: [],
+  };
+
+  it("recognizes a presentation-only turn as exposition", () => {
+    expect(turnLeavesLearnerSomethingToDo(presentationalTurn)).toBe(false);
+  });
+
+  it("recognizes a turn with an actionable widget as not exposition", () => {
+    expect(turnLeavesLearnerSomethingToDo(activeTurn)).toBe(true);
+  });
+
+  it("allows exposition when streak is below the budget", () => {
+    const result = enforceLearnerAgency(presentationalTurn, undefined, {
+      expositionAllowed: true,
+      expositionStreak: 0,
+    });
+    expect(result).toBe(presentationalTurn);
+  });
+
+  it("allows exposition at streak = BUDGET - 1 (last allowed turn)", () => {
+    const result = enforceLearnerAgency(presentationalTurn, undefined, {
+      expositionAllowed: true,
+      expositionStreak: EXPOSITION_TURN_BUDGET - 1,
+    });
+    expect(result).toBe(presentationalTurn);
+  });
+
+  it("triggers the nudge when streak reaches the budget", () => {
+    const result = enforceLearnerAgency(presentationalTurn, undefined, {
+      expositionAllowed: true,
+      expositionStreak: EXPOSITION_TURN_BUDGET,
+    });
+    expect(result).not.toBe(presentationalTurn);
+    expect(result.speech).toContain("continue");
+  });
+
+  it("triggers the nudge when exposition is not allowed", () => {
+    const result = enforceLearnerAgency(presentationalTurn, undefined, {
+      expositionAllowed: false,
+      expositionStreak: 0,
+    });
+    expect(result).not.toBe(presentationalTurn);
+  });
+
+  it("consecutive presentation-only turns would increment the streak", () => {
+    // Simulate the streak logic: a turn where turnLeavesLearnerSomethingToDo
+    // returns false and exposition is allowed increments the streak.
+    const turnA: TutorTurn = {
+      speech: "First explanation.",
+      boardOps: [{ op: "write_text", text: "Key concept." }],
+      evidenceRefs: [],
+    };
+    const turnB: TutorTurn = {
+      speech: "Second explanation.",
+      boardOps: [{ op: "write_latex", tex: "E = mc^2" }],
+      evidenceRefs: [],
+    };
+    // Both are presentation-only: the streak should increment.
+    expect(turnLeavesLearnerSomethingToDo(turnA)).toBe(false);
+    expect(turnLeavesLearnerSomethingToDo(turnB)).toBe(false);
+
+    // Simulate streak progression: 0 -> 1 -> 2 -> 3 -> 4 (budget)
+    for (let streak = 0; streak < EXPOSITION_TURN_BUDGET; streak++) {
+      const result = enforceLearnerAgency(turnA, undefined, {
+        expositionAllowed: true,
+        expositionStreak: streak,
+      });
+      expect(result).toBe(turnA);
+    }
+    // At budget, the nudge fires.
+    const nudgeResult = enforceLearnerAgency(turnA, undefined, {
+      expositionAllowed: true,
+      expositionStreak: EXPOSITION_TURN_BUDGET,
+    });
+    expect(nudgeResult).not.toBe(turnA);
+  });
+
+  it("a turn with an active widget resets the streak to 0 (streak would not increment)", () => {
+    // The streak increment logic uses turnLeavesLearnerSomethingToDo(policedTurn).
+    // When the policed turn has an actionable widget, it returns true, so the
+    // nextStreak formula yields 0.
+    const nextStreak =
+      !turnLeavesLearnerSomethingToDo(activeTurn) ? EXPOSITION_TURN_BUDGET + 1 : 0;
+    expect(nextStreak).toBe(0);
+  });
+
+  it("a presentation-only turn would increment the streak", () => {
+    const nextStreak =
+      !turnLeavesLearnerSomethingToDo(presentationalTurn) ? 3 + 1 : 0;
+    expect(nextStreak).toBe(4);
   });
 });

@@ -922,7 +922,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
             if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
             const op = turn.boardOps[index];
             setAgentActivity(activityForBoardOp(op, index, turn.boardOps.length));
-            await new Promise((resolve) => window.setTimeout(resolve, 360));
+            if (index > 0) {
+              await new Promise((resolve) => window.setTimeout(resolve, 360));
+            }
             if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
 
             if (op.op === "spawn_thread") {

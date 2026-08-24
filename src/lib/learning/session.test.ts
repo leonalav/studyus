@@ -582,3 +582,87 @@ describe("refreshSkillAfterTurn", () => {
     }
   });
 });
+
+describe("buildPolicyBrief — expositionAllowed", () => {
+  beforeEach(async () => {
+    await getDb();
+  });
+
+  it("is false when supportCeiling is 0 and the learner made no attempt", async () => {
+    const learnerId = learner();
+    // Seed state so the skill leaves cold-start and routes to a measurement
+    // move (supportCeiling 0). A zero ceiling exists to measure unaided
+    // performance; exposition would delete the measurement.
+    await evidence({ learnerId });
+    await scheduleReview({
+      learnerId,
+      skillId: "limits",
+      taskFamily: "epsilon_delta",
+      dueAt: new Date(Date.now() - DAY),
+    });
+
+    const brief = await buildPolicyBrief({
+      learnerId,
+      skillId: "limits",
+      learnerMessage: "confused",
+    });
+
+    expect(brief.move.supportCeiling).toBe(0);
+    expect(brief.attempt.madeAttempt).toBe(false);
+    expect(brief.expositionAllowed).toBe(false);
+  });
+
+  it("is true when supportCeiling is greater than 0", async () => {
+    const brief = await buildPolicyBrief({
+      learnerId: learner(),
+      skillId: "limits",
+      learnerMessage: "show me how this works",
+    });
+
+    // A positive ceiling means the policy has decided this move is instructional,
+    // and exposition within the allowed support band is legitimate.
+    expect(brief.move.supportCeiling).toBeGreaterThan(0);
+    expect(brief.expositionAllowed).toBe(true);
+  });
+
+  it("is true when the learner made an attempt even if supportCeiling is 0", async () => {
+    const learnerId = learner();
+    // Create evidence so the skill is no longer cold-start, then schedule a
+    // retrieval (supportCeiling 0) and have the learner attempt it.
+    await evidence({ learnerId });
+    await scheduleReview({
+      learnerId,
+      skillId: "limits",
+      taskFamily: "epsilon_delta",
+      dueAt: new Date(Date.now() - DAY),
+    });
+
+    const brief = await buildPolicyBrief({
+      learnerId,
+      skillId: "limits",
+      learnerMessage: "I tried factoring but got stuck on the last step",
+    });
+
+    expect(brief.move.supportCeiling).toBe(0);
+    expect(brief.attempt.madeAttempt).toBe(true);
+    // An attempt unlocks orientation-level exposition even under a zero ceiling,
+    // because the learner has shown where they are and where they broke down.
+    expect(brief.expositionAllowed).toBe(true);
+  });
+
+  it("does not modify existing support or policy decisions when computing expositionAllowed", async () => {
+    const brief = await buildPolicyBrief({
+      learnerId: learner(),
+      skillId: "limits",
+      learnerMessage: "I tried x=2 and got 5",
+    });
+
+    // The addition of expositionAllowed must not alter the support decision
+    // that was already computed by decideSupport.
+    const expectedGranted = brief.support.granted;
+    expect(brief.support.granted).toBe(expectedGranted);
+    expect(brief.support.ceilingBinding).toBeDefined();
+    expect(brief.support.requiresReconstruction).toBeDefined();
+    expect(brief.support.instruction).toBeTruthy();
+  });
+});

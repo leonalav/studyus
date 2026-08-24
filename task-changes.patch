@@ -1,0 +1,839 @@
+diff --git a/src/components/board/StudyRoom.tsx b/src/components/board/StudyRoom.tsx
+index 9047dfe..960ddd6 100644
+--- a/src/components/board/StudyRoom.tsx
++++ b/src/components/board/StudyRoom.tsx
+@@ -922,7 +922,9 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
+             if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
+             const op = turn.boardOps[index];
+             setAgentActivity(activityForBoardOp(op, index, turn.boardOps.length));
+-            await new Promise((resolve) => window.setTimeout(resolve, 360));
++            if (index > 0) {
++              await new Promise((resolve) => window.setTimeout(resolve, 360));
++            }
+             if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
+ 
+             if (op.op === "spawn_thread") {
+diff --git a/src/db/database.ts b/src/db/database.ts
+index 62743a2..68f3341 100644
+--- a/src/db/database.ts
++++ b/src/db/database.ts
+@@ -5,6 +5,10 @@ let initPromise: Promise<Database> | null = null;
+ 
+ const STORAGE_KEY = "studyus_sqlite_db_v1";
+ 
++// ── Write-coalescing batch API ──
++let _batchDepth = 0;
++let _flushOwed = false;
++
+ export async function getDb(): Promise<Database> {
+   if (dbInstance) return dbInstance;
+   if (initPromise) return initPromise;
+@@ -43,13 +47,45 @@ export async function getDb(): Promise<Database> {
+ }
+ 
+ export function saveDbSync(): void {
++  if (!dbInstance) return;
++  // While inside a batch, defer the real flush.
++  if (_batchDepth > 0) {
++    _flushOwed = true;
++    return;
++  }
++  _doFlush();
++}
++
++export function beginBatch(): void {
++  _batchDepth++;
++}
++
++export function endBatch(): void {
++  if (_batchDepth <= 0) return;          // unmatched endBatch is a no-op
++  _batchDepth--;
++  if (_batchDepth === 0 && _flushOwed) {
++    _flushOwed = false;
++    _doFlush();
++  }
++}
++
++/** Test-only: reset batch depth to zero and clear the deferred-flush flag. */
++export function resetBatchState(): void {
++  _batchDepth = 0;
++  _flushOwed = false;
++}
++
++/** Internal: perform the actual serialize-to-localStorage flush. */
++function _doFlush(): void {
+   if (!dbInstance) return;
+   if (typeof window !== "undefined" && window.localStorage) {
+     try {
+       const data = dbInstance.export();
++      // Chunked string building — safe against call-stack limits.
++      const CHUNK = 8192;
+       let binary = "";
+-      for (let i = 0; i < data.length; i++) {
+-        binary += String.fromCharCode(data[i]);
++      for (let i = 0; i < data.length; i += CHUNK) {
++        binary += String.fromCharCode.apply(null, data.subarray(i, i + CHUNK) as unknown as number[]);
+       }
+       window.localStorage.setItem(STORAGE_KEY, btoa(binary));
+     } catch (e) {
+@@ -738,6 +774,28 @@ function runMigrations(db: Database) {
+     db.run("COMMIT;");
+   }
+ 
++  if (currentVersion < 9) {
++    db.run("BEGIN TRANSACTION;");
++
++    db.run(`
++      ALTER TABLE chalkboard_sessions ADD COLUMN exposition_streak INTEGER NOT NULL DEFAULT 0;
++    `);
++
++    const v9Now = new Date().toISOString();
++    db.run(
++      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
++      [
++        9,
++        "Track consecutive direct-instruction exposition turns per session",
++        v9Now,
++        "Rule: exposition_streak counts consecutive turns routed to direct_instruction with policyBrief.expositionAllowed. It is incremented by the tutor harness, capped at EXPOSITION_TURN_BUDGET (4), and overridden to a learner-ownership route when the budget is exhausted. It does not affect support ceiling, policy routing, or stage predicates.",
++      ]
++    );
++
++    db.run("PRAGMA user_version = 9;");
++    db.run("COMMIT;");
++  }
++
+   // No legacy assessment fixtures are seeded in production. A fresh profile
+   // starts with no forms/attempts so AvailableTests shows its empty state
+   // (see plan §3 / verification: "Fresh profile shows no … seeded recent
+diff --git a/src/lib/learning/session.test.ts b/src/lib/learning/session.test.ts
+index f26d1d4..7229ff2 100644
+--- a/src/lib/learning/session.test.ts
++++ b/src/lib/learning/session.test.ts
+@@ -582,3 +582,87 @@ describe("refreshSkillAfterTurn", () => {
+     }
+   });
+ });
++
++describe("buildPolicyBrief — expositionAllowed", () => {
++  beforeEach(async () => {
++    await getDb();
++  });
++
++  it("is false when supportCeiling is 0 and the learner made no attempt", async () => {
++    const learnerId = learner();
++    // Seed state so the skill leaves cold-start and routes to a measurement
++    // move (supportCeiling 0). A zero ceiling exists to measure unaided
++    // performance; exposition would delete the measurement.
++    await evidence({ learnerId });
++    await scheduleReview({
++      learnerId,
++      skillId: "limits",
++      taskFamily: "epsilon_delta",
++      dueAt: new Date(Date.now() - DAY),
++    });
++
++    const brief = await buildPolicyBrief({
++      learnerId,
++      skillId: "limits",
++      learnerMessage: "confused",
++    });
++
++    expect(brief.move.supportCeiling).toBe(0);
++    expect(brief.attempt.madeAttempt).toBe(false);
++    expect(brief.expositionAllowed).toBe(false);
++  });
++
++  it("is true when supportCeiling is greater than 0", async () => {
++    const brief = await buildPolicyBrief({
++      learnerId: learner(),
++      skillId: "limits",
++      learnerMessage: "show me how this works",
++    });
++
++    // A positive ceiling means the policy has decided this move is instructional,
++    // and exposition within the allowed support band is legitimate.
++    expect(brief.move.supportCeiling).toBeGreaterThan(0);
++    expect(brief.expositionAllowed).toBe(true);
++  });
++
++  it("is true when the learner made an attempt even if supportCeiling is 0", async () => {
++    const learnerId = learner();
++    // Create evidence so the skill is no longer cold-start, then schedule a
++    // retrieval (supportCeiling 0) and have the learner attempt it.
++    await evidence({ learnerId });
++    await scheduleReview({
++      learnerId,
++      skillId: "limits",
++      taskFamily: "epsilon_delta",
++      dueAt: new Date(Date.now() - DAY),
++    });
++
++    const brief = await buildPolicyBrief({
++      learnerId,
++      skillId: "limits",
++      learnerMessage: "I tried factoring but got stuck on the last step",
++    });
++
++    expect(brief.move.supportCeiling).toBe(0);
++    expect(brief.attempt.madeAttempt).toBe(true);
++    // An attempt unlocks orientation-level exposition even under a zero ceiling,
++    // because the learner has shown where they are and where they broke down.
++    expect(brief.expositionAllowed).toBe(true);
++  });
++
++  it("does not modify existing support or policy decisions when computing expositionAllowed", async () => {
++    const brief = await buildPolicyBrief({
++      learnerId: learner(),
++      skillId: "limits",
++      learnerMessage: "I tried x=2 and got 5",
++    });
++
++    // The addition of expositionAllowed must not alter the support decision
++    // that was already computed by decideSupport.
++    const expectedGranted = brief.support.granted;
++    expect(brief.support.granted).toBe(expectedGranted);
++    expect(brief.support.ceilingBinding).toBeDefined();
++    expect(brief.support.requiresReconstruction).toBeDefined();
++    expect(brief.support.instruction).toBeTruthy();
++  });
++});
+diff --git a/src/lib/learning/session.ts b/src/lib/learning/session.ts
+index c57469a..672e6bc 100644
+--- a/src/lib/learning/session.ts
++++ b/src/lib/learning/session.ts
+@@ -65,6 +65,13 @@ export interface PolicyBrief {
+   hypotheses: LearnerHypothesis[];
+   /** The rendered prompt block. */
+   prompt: string;
++  /**
++   * Whether this turn's route allows an exposition beat. True when the move's
++   * support ceiling is above zero (meaning the learner is not being purely
++   * assessed) or when the learner already made an attempt on the current
++   * task. This gates the never-passive rule during presentation-first phases.
++   */
++  expositionAllowed: boolean;
+ }
+ 
+ export interface PolicyBriefInput {
+@@ -158,6 +165,7 @@ export async function buildPolicyBrief(input: PolicyBriefInput): Promise<PolicyB
+     dueReviews,
+     hypotheses,
+     prompt: formatPolicyBrief({ state, events, move, support, hypotheses, dueReviews }),
++    expositionAllowed: move.supportCeiling > 0 || attempt.madeAttempt,
+   };
+ }
+ 
+diff --git a/src/lib/learning/support.ts b/src/lib/learning/support.ts
+index 105c237..d08c5b3 100644
+--- a/src/lib/learning/support.ts
++++ b/src/lib/learning/support.ts
+@@ -261,9 +261,9 @@ function buildInstruction(
+  */
+ export const RESPONSE_ROUTING_TABLE = [
+   {
+-    condition: "The selected move is direct_instruction for a confirmed cold start.",
++    condition: "The selected move grants exposition headroom (direct_instruction, or any route whose support ceiling permits teaching before learner evidence).",
+     action: "Teach the intuition, core representation or mechanism, essential terminology, and one canonical worked example before asking for a single focused prediction or observation. Do not treat the presentation as learner evidence.",
+-    reason: "A first-contact learner needs a usable mental model before an Encounter prediction can be meaningful; this exception is bounded to the explicit instructional route.",
++    reason: "A learner encountering an idea for the first time needs a usable mental model before a prediction can be meaningful; exposition is permitted when the route grants support headroom or the learner has already made an attempt, but it never counts as learner evidence and does not advance mastery.",
+   },
+   {
+     condition: "The learner asks a factual question with no task in play (a definition, a fact, notation, what a symbol means).",
+@@ -291,9 +291,9 @@ export const RESPONSE_ROUTING_TABLE = [
+     reason: "These moves exist to measure unaided performance; helping deletes the measurement.",
+   },
+   {
+-    condition: "The selected move is diagnostic_probe or prediction and the learner has produced no evidence at all on this skill.",
++    condition: "The selected move is diagnostic_probe or prediction and the learner has produced no evidence at all on this skill, and no exposition has been granted by the route.",
+     action: "Probe or predict before teaching.",
+-    reason: "Teaching before you know where they are means teaching to an imagined learner, except when the policy has explicitly selected the bounded direct-instruction route.",
++    reason: "Teaching before you know where they are means teaching to an imagined learner; exposition is only permitted when the route explicitly grants support headroom or the learner has already made an attempt.",
+   },
+   {
+     condition: "None of the above.",
+diff --git a/src/lib/llm.ts b/src/lib/llm.ts
+index 5fe1eb6..614abef 100644
+--- a/src/lib/llm.ts
++++ b/src/lib/llm.ts
+@@ -49,7 +49,7 @@ CONTEXT YOU RECEIVE
+ - Assistance policy and current unlocked hint level
+ 
+ RULES
+-1. Never state the final answer, the next algebraic step, or the worked solution unless the unlocked hint level explicitly permits it.
++1. Never state the final answer, the next algebraic step, or the worked solution of an actively-assessed item unless the unlocked hint level explicitly permits it. You may freely write a derivation, a canonical worked example, or a full demonstration when you are teaching a concept for the first time — the prohibition targets the step the learner is currently being measured on, not every step you write.
+ 2. Whether to ASK or TELL is not left to your judgement. Each turn you receive a RESPONSE ROUTING table; apply the first row that matches and follow it. The short form: answer factual questions directly, render requested visualizations first, help a learner who has already attempted, and hand the work back to a learner who has not. Do not interrogate someone who asked what a symbol means, and do not solve a task for someone who has not tried it.
+ 3. Support level is set by the policy engine, not by you and not by the learner. The SUPPORT CEILING you are given each turn is a hard cap: it does not rise because the learner asks, is frustrated, is short of time, or says they already understand. When you are holding back deliberately, say so plainly rather than pretending you have nothing to offer — a refusal that names itself reads as a decision, an unexplained one reads as evasion.
+ 4. At most one follow-up question, only when required by a missing detail that blocks rendering or explanation.
+@@ -65,7 +65,7 @@ RULES
+ 14. Treat the board as a visual teaching surface, not a text transcript. Before every operation, ask whether that exact equation, graph, chart, domain-faithful diagram, or study widget materially improves understanding beyond speech alone. Use the smallest relevant representation only when the answer is yes; a substantive reply may correctly remain speech-only. Never add decorative, redundant, irrelevant, or semantically misleading content, and respect disabled tool permissions.
+ 15. The study widgets are your teaching vocabulary, not a toolbox of features. When you make a pedagogical move, place the widget that IS that move: roadmap to orient, concept_card for the durable definition, slider and animation to build intuition, comparison to separate confused ideas, question and retrieval_check to check, hint for progressive disclosure, scratchpad to hand over the work, annotation to teach notation, reveal to make them try first, example for worked reasoning with a why on every step, mistake_check to diagnose an error, memory_hook for what must be memorized, challenge for unscaffolded work, reflection to have them teach it back, mastery_card to close with evidence. Graphs, points/geometry, and equations remain visualization intents.
+ 16. Follow the Guide to Mastery loop: Encounter → Understand → Construct → Apply → Transfer → Master. Stage position is COMPUTED from the evidence ledger by machine-checkable predicates; you do not decide it and cannot advance it by asserting it. Your job is to produce the specific evidence the current stage gate is missing — you are told each turn exactly what that is — and the stage moves on its own once the ledger supports it. Report observations, not verdicts. Going backwards when a misconception surfaces is correct behaviour, not failure.
+-17. Shift the work to the learner over time. When you are about to write the next step of a solution, place a scratchpad or question instead. Diagnose misconceptions rather than correcting answers; name the underlying error and ask the question that exposes it. Teach notation explicitly, including how symbols are read aloud, and mark explicitly what must be memorized.
++17. Shift the work to the learner over time. Hand over the step the learner is actually being measured on; place a scratchpad or question for an actively-assessed item. A derivation, a canonical example, or a mechanism being taught for the first time is yours to write. Diagnose misconceptions rather than correcting answers; name the underlying error and ask the question that exposes it. Teach notation explicitly, including how symbols are read aloud, and mark explicitly what must be memorized.
+ 18. Mastery is a verdict from five kinds of evidence — Recall, Understanding, Procedure/Application, Transfer, Independence — and those five numbers are COMPUTED from the ledger of what the learner actually did. You may never author them. Do not put mastery percentages in a mastery_card, in speech, or anywhere else; the card is filled in from the evidence store and will overwrite anything you supply. What you may do is report an observation: what the learner said or produced, on what task, with how much help, and how confident you are in your reading of it. Never declare mastery from a score ("you got 90%, so you've mastered it" is forbidden), and never celebrate completion ("You completed Section X 🎉" is forbidden). State what the learner understands, what they can do, and what they are likely to forget. Mastery decays: retrieval checks are scheduled for you and surfaced when due, and a failed retrieval routes back through targeted repair rather than a restatement of the answer.
+ 20. Correct-after-hint is not the same fact as correct-unaided, and the system records the difference whether or not you mention it. When you give substantive help, an unaided reconstruction on a similar-but-not-identical task becomes owed and will be scheduled automatically. Do not reassure a learner that they have got something when what they have got is your explanation.
+ 19. When curriculum scope is supplied, treat its sequence and page ranges as the binding core syllabus. Teach its objectives, prerequisites, definitions, methods, examples, constraints, and checks for mastery in order. Progress over turns through explanation, worked example, understanding check, practice, remediation, and mastery. Label any material outside the supplied curriculum explicitly as OPTIONAL ENRICHMENT and never invent missing source content.
+diff --git a/src/lib/tutor.ceiling.test.ts b/src/lib/tutor.ceiling.test.ts
+index 32942a2..f14a9f5 100644
+--- a/src/lib/tutor.ceiling.test.ts
++++ b/src/lib/tutor.ceiling.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, it, expect } from "vitest";
+-import { enforceLearnerAgency, enforceSupportCeiling, type BoardOp, type TutorTurn } from "./tutor";
++import { enforceLearnerAgency, enforceSupportCeiling, turnLeavesLearnerSomethingToDo, EXPOSITION_TURN_BUDGET, type BoardOp, type TutorTurn } from "./tutor";
+ import type { BoardDoc } from "../data/boards";
+ import type { WidgetIntent, WidgetKind } from "./widgets/types";
+ 
+@@ -317,3 +317,122 @@ describe("One commitment per cycle", () => {
+     expect(enforceLearnerAgency(speechOnly, answeredQuestion)).toBe(speechOnly);
+   });
+ });
++
++/**
++ * The exposition budget must bind on presentation-only turns regardless of
++ * which route produced them. The streak is driven by what the policed turn
++ * actually does (via `turnLeavesLearnerSomethingToDo`), not by the route
++ * name.
++ */
++describe("Exposition budget binding", () => {
++  const presentationalTurn: TutorTurn = {
++    speech: "The derivative of x squared is 2x by the power rule.",
++    boardOps: [{ op: "write_latex", tex: "\\frac{d}{dx}x^2 = 2x" }],
++    evidenceRefs: [],
++  };
++
++  const activeTurn: TutorTurn = {
++    speech: "Try this yourself.",
++    boardOps: [
++      {
++        op: "place_widget",
++        intent: {
++          kind: "question",
++          id: "q1",
++          prompt: "What is the derivative of x^3?",
++          format: "short_answer",
++        },
++      },
++    ],
++    evidenceRefs: [],
++  };
++
++  it("recognizes a presentation-only turn as exposition", () => {
++    expect(turnLeavesLearnerSomethingToDo(presentationalTurn)).toBe(false);
++  });
++
++  it("recognizes a turn with an actionable widget as not exposition", () => {
++    expect(turnLeavesLearnerSomethingToDo(activeTurn)).toBe(true);
++  });
++
++  it("allows exposition when streak is below the budget", () => {
++    const result = enforceLearnerAgency(presentationalTurn, undefined, {
++      expositionAllowed: true,
++      expositionStreak: 0,
++    });
++    expect(result).toBe(presentationalTurn);
++  });
++
++  it("allows exposition at streak = BUDGET - 1 (last allowed turn)", () => {
++    const result = enforceLearnerAgency(presentationalTurn, undefined, {
++      expositionAllowed: true,
++      expositionStreak: EXPOSITION_TURN_BUDGET - 1,
++    });
++    expect(result).toBe(presentationalTurn);
++  });
++
++  it("triggers the nudge when streak reaches the budget", () => {
++    const result = enforceLearnerAgency(presentationalTurn, undefined, {
++      expositionAllowed: true,
++      expositionStreak: EXPOSITION_TURN_BUDGET,
++    });
++    expect(result).not.toBe(presentationalTurn);
++    expect(result.speech).toContain("continue");
++  });
++
++  it("triggers the nudge when exposition is not allowed", () => {
++    const result = enforceLearnerAgency(presentationalTurn, undefined, {
++      expositionAllowed: false,
++      expositionStreak: 0,
++    });
++    expect(result).not.toBe(presentationalTurn);
++  });
++
++  it("consecutive presentation-only turns would increment the streak", () => {
++    // Simulate the streak logic: a turn where turnLeavesLearnerSomethingToDo
++    // returns false and exposition is allowed increments the streak.
++    const turnA: TutorTurn = {
++      speech: "First explanation.",
++      boardOps: [{ op: "write_text", text: "Key concept." }],
++      evidenceRefs: [],
++    };
++    const turnB: TutorTurn = {
++      speech: "Second explanation.",
++      boardOps: [{ op: "write_latex", tex: "E = mc^2" }],
++      evidenceRefs: [],
++    };
++    // Both are presentation-only: the streak should increment.
++    expect(turnLeavesLearnerSomethingToDo(turnA)).toBe(false);
++    expect(turnLeavesLearnerSomethingToDo(turnB)).toBe(false);
++
++    // Simulate streak progression: 0 -> 1 -> 2 -> 3 -> 4 (budget)
++    for (let streak = 0; streak < EXPOSITION_TURN_BUDGET; streak++) {
++      const result = enforceLearnerAgency(turnA, undefined, {
++        expositionAllowed: true,
++        expositionStreak: streak,
++      });
++      expect(result).toBe(turnA);
++    }
++    // At budget, the nudge fires.
++    const nudgeResult = enforceLearnerAgency(turnA, undefined, {
++      expositionAllowed: true,
++      expositionStreak: EXPOSITION_TURN_BUDGET,
++    });
++    expect(nudgeResult).not.toBe(turnA);
++  });
++
++  it("a turn with an active widget resets the streak to 0 (streak would not increment)", () => {
++    // The streak increment logic uses turnLeavesLearnerSomethingToDo(policedTurn).
++    // When the policed turn has an actionable widget, it returns true, so the
++    // nextStreak formula yields 0.
++    const nextStreak =
++      !turnLeavesLearnerSomethingToDo(activeTurn) ? EXPOSITION_TURN_BUDGET + 1 : 0;
++    expect(nextStreak).toBe(0);
++  });
++
++  it("a presentation-only turn would increment the streak", () => {
++    const nextStreak =
++      !turnLeavesLearnerSomethingToDo(presentationalTurn) ? 3 + 1 : 0;
++    expect(nextStreak).toBe(4);
++  });
++});
+diff --git a/src/lib/tutor.ts b/src/lib/tutor.ts
+index d1056db..e34cba9 100644
+--- a/src/lib/tutor.ts
++++ b/src/lib/tutor.ts
+@@ -24,7 +24,7 @@
+  * This module performs no writes outside the session/message tables.
+  */
+ 
+-import { getDb, saveDbSync } from "../db/database";
++import { getDb, saveDbSync, beginBatch, endBatch } from "../db/database";
+ import {
+   asArray,
+   asEnum,
+@@ -101,6 +101,13 @@ export const ONBOARDING_SCHEMA_VERSION = "onboarding_create_forms_v1";
+ export const MAX_HINT_LEVEL = 3;
+ export const MAX_BOARD_OPS_PER_TURN = 12;
+ export const MAX_THREAD_INITIAL_BLOCKS = 6;
++/**
++ * Maximum consecutive direct-instruction (exposition) turns before the
++ * harness overrides the route to force learner ownership. Prevents the
++ * tutor from generating an unbounded sequence of worked demonstrations
++ * when the policy engine keeps selecting `direct_instruction`.
++ */
++export const EXPOSITION_TURN_BUDGET = 4;
+ /** Bounds on the generated onboarding interview, so a model cannot return a
+  *  one-question stub or a 40-question intake form. */
+ // The intake is intentionally a fixed five-question reception: enough signal to
+@@ -483,6 +490,28 @@ export function isNonInstructionalTutorMessage(message: string): boolean {
+   ].some((pattern) => pattern.test(normalized));
+ }
+ 
++/**
++ * Detect continuation/acknowledgement filler — messages the learner sends to
++ * advance the conversation without providing substantive content.
++ *
++ * When the board carries an unanswered actionable widget and the learner
++ * sends filler, the tutor must not generate further explanatory content or
++ * reveal assessed work. It must instead point the learner at the existing
++ * commitment. Substantive answers receive normal feedback.
++ *
++ * This is NOT a replacement for `enforceSupportCeiling`; it is a separate
++ * guard for the specific failure where filler triggers exposition.
++ */
++export function isFillerMessage(message: string): boolean {
++  const normalized = message
++    .toLowerCase()
++    .replace(/[.!?,;:…]+/g, " ")
++    .replace(/\s+/g, " ")
++    .trim();
++  if (!normalized) return true;
++  return /^(?:continue|go on|next|sure|hmm|ok|okay|got it|yep|yeah|ya|k|proceed|carry on|tell me more|and\?|then\?|what else|let's go|let's do it|sounds good|alright|understood|makes sense|makes sense\?)$/.test(normalized);
++}
++
+ /**
+  * Does this turn leave the learner with something to do?
+  *
+@@ -587,16 +616,30 @@ export function boardHasOpenCommitment(board: BoardDoc | undefined): boolean {
+  * So when the board already carries an unanswered commitment, an explanatory
+  * turn is allowed to be exactly that. The obligation is still enforced; it is
+  * just discharged by the question that is already waiting.
++ *
++ * During an exposition beat the obligation is suspended for at most
++ * `EXPOSITION_TURN_BUDGET` consecutive turns. The budget is checked against the
++ * session's persisted streak: if the streak has not been exhausted the turn
++ * stands; once it has, the normal never-passive rule reasserts.
+  */
+ export function enforceLearnerAgency(
+   turn: TutorTurn,
+   board?: BoardDoc,
+-  options: { allowPresentationFirst?: boolean } = {}
++  options: { expositionAllowed?: boolean; expositionStreak?: number } = {}
+ ): TutorTurn {
+   if (turn.boardOps.length === 0) return turn;
+-  if (options.allowPresentationFirst) return turn;
+   if (turnLeavesLearnerSomethingToDo(turn)) return turn;
+   if (boardHasOpenCommitment(board)) return turn;
++  // Allow an exposition beat when the route permits it and the streak has not
++  // been exhausted. Without the streak check the exemption would last the
++  // entire session.
++  if (
++    options.expositionAllowed &&
++    typeof options.expositionStreak === "number" &&
++    options.expositionStreak < EXPOSITION_TURN_BUDGET
++  ) {
++    return turn;
++  }
+   const speech = turn.speech.trim();
+   return { ...turn, speech: speech ? `${speech} ${PASSIVE_TURN_NUDGE}` : PASSIVE_TURN_NUDGE };
+ }
+@@ -1323,6 +1366,53 @@ export function enforceTutorBoardNecessity(turn: TutorTurn, learnerMessage: stri
+     : turn;
+ }
+ 
++/**
++ * When the learner sends filler ("continue", "ok", "hmm", etc.) and the
++ * board already has an unanswered actionable widget, suppress further
++ * explanatory content or assessed-work reveals. Redirect the learner to
++ * the existing commitment instead.
++ *
++ * Substantive answers pass through unchanged. This guard is independent
++ * of `enforceSupportCeiling` — it catches the specific failure mode
++ * where filler triggers a new exposition block rather than addressing
++ * what is already on the board.
++ */
++export function enforceFillerGuard(
++  turn: TutorTurn,
++  learnerMessage: string,
++  board?: BoardDoc
++): TutorTurn {
++  if (!isFillerMessage(learnerMessage)) return turn;
++  if (!boardHasOpenCommitment(board)) return turn;
++  // Strip board ops that add new presentational content; keep ops that
++  // update existing widgets (e.g. highlighting the pending task) and
++  // actionable widgets the learner can interact with.
++  const filteredOps = turn.boardOps.filter((op) => {
++    switch (op.op) {
++      case "write_title":
++      case "write_text":
++      case "write_bullets":
++      case "write_latex":
++      case "write_callout":
++      case "visualize":
++        return false;
++      case "place_widget":
++        // Actionable widgets (questions, scratchpads, etc.) hand work back
++        // to the learner and must not be stripped on filler.
++        return isActionableWidget(op.intent);
++      default:
++        return true;
++    }
++  });
++  const redirect = "You have an unanswered task on the board — try that before we move on.";
++  const speech = turn.speech.trim();
++  return {
++    ...turn,
++    boardOps: filteredOps,
++    speech: speech ? `${speech}\n\n${redirect}` : redirect,
++  };
++}
++
+ export function enforceTutorToolPolicy(
+   turn: TutorTurn,
+   tools: TutorToolPermissions,
+@@ -1412,19 +1502,27 @@ function parseBoundedMathExpression(
+ 
+ export async function runTutorMathToolCommand(message: string, tools: TutorToolPermissions): Promise<string> {
+   const trimmed = message.trim();
++  const lower = trimmed.toLowerCase();
++  // Detect recognized commands BEFORE importing mathjs so that plain
++  // conversation and unrecognized commands never pay the module cost.
++  const isCalculate = tools.calculator && lower.startsWith("/calculate ");
++  const isSimplify = tools.symbolicAlgebra && lower.startsWith("/simplify ");
++  const isDifferentiate = tools.symbolicAlgebra && lower.startsWith("/differentiate ");
++  if (!isCalculate && !isSimplify && !isDifferentiate) return "";
++
+   try {
+     const math = await import("mathjs");
+-    if (tools.calculator && trimmed.toLowerCase().startsWith("/calculate ")) {
++    if (isCalculate) {
+       const expression = trimmed.slice(11).trim();
+       const parsed = parseBoundedMathExpression(math, expression, false);
+       return `DETERMINISTIC CALCULATOR RESULT for ${JSON.stringify(expression)}: ${String(parsed.evaluate())}`;
+     }
+-    if (tools.symbolicAlgebra && trimmed.toLowerCase().startsWith("/simplify ")) {
++    if (isSimplify) {
+       const expression = trimmed.slice(10).trim();
+       parseBoundedMathExpression(math, expression, true);
+       return `DETERMINISTIC SYMBOLIC RESULT for ${JSON.stringify(expression)}: ${math.simplify(expression).toString()}`;
+     }
+-    if (tools.symbolicAlgebra && trimmed.toLowerCase().startsWith("/differentiate ")) {
++    if (isDifferentiate) {
+       const request = trimmed.slice(15).trim();
+       if (request.length > 350) throw new Error("request is too long");
+       const match = request.match(/^(.*?)\s+(?:with respect to|wrt)\s+([A-Za-z][A-Za-z0-9_]*)$/i);
+@@ -1433,9 +1531,7 @@ export async function runTutorMathToolCommand(message: string, tools: TutorToolP
+       return `DETERMINISTIC SYMBOLIC DERIVATIVE: ${math.derivative(match[1], match[2]).toString()}`;
+     }
+   } catch (error) {
+-    if (/^\/(?:calculate|simplify|differentiate)\b/i.test(trimmed)) {
+-      return `DETERMINISTIC MATH TOOL ERROR: ${error instanceof Error ? error.message : "invalid expression"}. Do not invent a tool result.`;
+-    }
++    return `DETERMINISTIC MATH TOOL ERROR: ${error instanceof Error ? error.message : "invalid expression"}. Do not invent a tool result.`;
+   }
+   return "";
+ }
+@@ -2641,6 +2737,39 @@ export async function setSessionMasteryStage(
+   saveDbSync();
+ }
+ 
++/**
++ * Read the session's consecutive direct-instruction (exposition) turn count.
++ *
++ * Returns 0 for sessions that predate the column or were never exposed to
++ * exposition, preserving former behaviour transparently.
++ */
++export async function getSessionExpositionStreak(sessionId: string): Promise<number> {
++  const db = await getDb();
++  const res = db.exec("SELECT exposition_streak FROM chalkboard_sessions WHERE id = ?;", [sessionId]);
++  const v = res[0]?.values?.[0]?.[0];
++  return typeof v === "number" && Number.isFinite(v) ? v : 0;
++}
++
++/**
++ * Persist the session's exposition streak after a teaching turn.
++ *
++ * The streak is incremented when the policed turn added presentational
++ * content and left the learner nothing to do, and reset to 0 otherwise.
++ * The value is clamped to `[0, EXPOSITION_TURN_BUDGET]`.
++ */
++export async function setSessionExpositionStreak(
++  sessionId: string,
++  streak: number
++): Promise<void> {
++  const db = await getDb();
++  const clamped = Math.max(0, Math.min(EXPOSITION_TURN_BUDGET, Math.round(streak)));
++  db.run(
++    "UPDATE chalkboard_sessions SET exposition_streak = ?, updated_at = ? WHERE id = ?;",
++    [clamped, new Date().toISOString(), sessionId]
++  );
++  saveDbSync();
++}
++
+ /**
+  * Decide the session's next stage from a completed turn.
+  *
+@@ -3484,26 +3613,37 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
+   // have decided what survived.
+   const turnStage = policyBrief?.state.stage ?? masteryStage.stage;
+   const roadmapLiveStage = advancedTo ?? regressTo ?? turnStage;
+-  const directInstruction = policyBrief?.move.route === "direct_instruction";
++
++  // Read the persisted exposition streak so the agency check knows how many
++  // consecutive exposition turns have already been allowed.
++  const expositionStreak = await getSessionExpositionStreak(req.sessionId);
++
+   const policedTurn = enforceVisualExplanation(
+-    enforceLearnerAgency(
+-      enforceRoadmapProgress(
+-        enforceSupportCeiling(
+-          enforceTutorBoardNecessity(
+-            enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
+-            req.learnerMessage
++    enforceFillerGuard(
++      enforceLearnerAgency(
++        enforceRoadmapProgress(
++          enforceSupportCeiling(
++            enforceTutorBoardNecessity(
++              enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
++              req.learnerMessage
++            ),
++            policyBrief?.support.granted ?? 3,
++            {
++              route: policyBrief?.move.route,
++              permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
++            }
+           ),
+-          policyBrief?.support.granted ?? 3,
+-          {
+-            route: policyBrief?.move.route,
+-            permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
+-          }
++          req.board,
++          { advancedTo, liveStage: roadmapLiveStage }
+         ),
+         req.board,
+-        { advancedTo, liveStage: roadmapLiveStage }
++        {
++          expositionAllowed: policyBrief?.expositionAllowed,
++          expositionStreak,
++        }
+       ),
+-      req.board,
+-      { allowPresentationFirst: directInstruction }
++      req.learnerMessage,
++      req.board
+     ),
+     turnStage,
+     req.board
+@@ -3525,60 +3665,81 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
+ 
+   const result: StructuredCallResult<TutorTurn> = { ...rawResult, value: groundedTurn };
+ 
+-  await appendSessionMessage({
+-    sessionId: req.sessionId,
+-    role: "assistant",
+-    content: result.value.speech,
+-    modelId: result.modelId,
+-    promptVersion: TUTOR_PROMPT_VERSION,
+-    tokensUsed: result.usage?.total ?? null,
+-  });
+-  if (!isPlanningTurn) {
+-    await rememberTutorDiagnosis(req.sessionId, result.value.diagnosis, studio, result.value.evidenceRefs);
+-  }
+-
+-  if (!isPlanningTurn && typeof result.value.requestedLevel === "number" && result.value.requestedLevel !== hintLevel) {
+-    await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
+-  }
+-
+-  // Record the contract this turn's board activity is placed under, so that a
+-  // widget the learner answers later resolves to a named task family, context
+-  // variant and support ceiling rather than being filed as an anonymous click.
+-  let turnActivityId: string | undefined;
+-  if (policyBrief && !isSessionOpening) {
+-    const contract = await recordMoveActivity({
+-      learnerId,
++  // Batch all SQLite writes for this turn so they serialize to disk once
++  // instead of one-by-one. The model call and board policing are already
++  // complete; only persistence writes follow.
++  beginBatch();
++  try {
++    await appendSessionMessage({
+       sessionId: req.sessionId,
+-      skillId,
+-      move: policyBrief.move,
+-      turnOrdinal: loadedHistory.length,
++      role: "assistant",
++      content: result.value.speech,
++      modelId: result.modelId,
++      promptVersion: TUTOR_PROMPT_VERSION,
++      tokensUsed: result.usage?.total ?? null,
+     });
+-    turnActivityId = contract?.activityId;
+-  }
+-
+-  // Hypotheses are written after the evidence they rest on, so each claim
+-  // carries the id of the observation that prompted it. A claim with no
+-  // evidence attached cannot later be shown to the learner as "here is why I
+-  // think this", and an unexplainable claim about a learner is one they have no
+-  // fair way to contest.
+-  if (!isPlanningTurn) {
+-    await recordTutorHypotheses({
+-      learnerId,
+-      skillId,
+-      diagnosis: result.value.diagnosis,
+-      preferences: studio,
+-      evidenceIds: turnEvidenceId ? [turnEvidenceId] : [],
+-    });
+-  }
++    if (!isPlanningTurn) {
++      await rememberTutorDiagnosis(req.sessionId, result.value.diagnosis, studio, result.value.evidenceRefs);
++    }
+ 
+-  if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
+-    await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
+-  }
++    if (!isPlanningTurn && typeof result.value.requestedLevel === "number" && result.value.requestedLevel !== hintLevel) {
++      await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
++    }
++
++    // Persist the exposition streak: increment when the policed turn stayed
++    // within an allowed exposition beat (presentational content only, nothing
++    // handed back to the learner), reset to zero when the tutor switches to a
++    // learner-ownership route.
++    if (policyBrief && !isSessionOpening && !isPlanningTurn) {
++      const nextStreak =
++        policyBrief.expositionAllowed &&
++        !turnLeavesLearnerSomethingToDo(policedTurn)
++          ? expositionStreak + 1
++          : 0;
++      await setSessionExpositionStreak(req.sessionId, nextStreak);
++    }
+ 
+-  // Hand the caller the contract these board ops were authored under so it can
+-  // bind it to the blocks this turn creates. Binding at placement is what makes
+-  // a late answer resolvable to the right activity.
+-  if (turnActivityId) result.value.activityId = turnActivityId;
++    // Record the contract this turn's board activity is placed under, so that a
++    // widget the learner answers later resolves to a named task family, context
++    // variant and support ceiling rather than being filed as an anonymous click.
++    let turnActivityId: string | undefined;
++    if (policyBrief && !isSessionOpening) {
++      const contract = await recordMoveActivity({
++        learnerId,
++        sessionId: req.sessionId,
++        skillId,
++        move: policyBrief.move,
++        turnOrdinal: loadedHistory.length,
++      });
++      turnActivityId = contract?.activityId;
++    }
++
++    // Hypotheses are written after the evidence they rest on, so each claim
++    // carries the id of the observation that prompted it. A claim with no
++    // evidence attached cannot later be shown to the learner as "here is why I
++    // think this", and an unexplainable claim about a learner is one they have no
++    // fair way to contest.
++    if (!isPlanningTurn) {
++      await recordTutorHypotheses({
++        learnerId,
++        skillId,
++        diagnosis: result.value.diagnosis,
++        preferences: studio,
++        evidenceIds: turnEvidenceId ? [turnEvidenceId] : [],
++      });
++    }
++
++    if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
++      await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
++    }
++
++    // Hand the caller the contract these board ops were authored under so it can
++    // bind it to the blocks this turn creates. Binding at placement is what makes
++    // a late answer resolvable to the right activity.
++    if (turnActivityId) result.value.activityId = turnActivityId;
++  } finally {
++    endBatch();
++  }
+ 
+   return result;
+ }
+diff --git a/src/lib/widgets/prompt.ts b/src/lib/widgets/prompt.ts
+index e65aeb7..6b29106 100644
+--- a/src/lib/widgets/prompt.ts
++++ b/src/lib/widgets/prompt.ts
+@@ -190,13 +190,12 @@ export function formatMasteryDirective(): string {
+     ``,
+     `SHIFTING THE WORK:`,
+     `- Early stages: you demonstrate. Later stages: the learner produces and you diagnose. Across a concept the ratio of your work to theirs must visibly fall.`,
+-    `- The instant you are about to write the next step of a solution yourself, place a scratchpad or a question instead and let them write it.`,
++    `- Hand over the step the learner is actually being measured on. When the next step of a solution is an actively-assessed item, place a scratchpad or a question instead and let them write it. A derivation, a canonical example, or a mechanism being taught for the first time is yours to write — the scope of handover is the assessed step, not every step you happen to write.`,
+     `- Diagnose, never correct. When the learner is wrong, identify the misconception behind the error and ask the question that makes them see it. Handing back a corrected line teaches copying.`,
+     `- Teach notation explicitly. Say what a symbol means and how it is read aloud; do not assume it is transparent.`,
+     ``,
+     `THE LEARNER IS NEVER PASSIVE (binding):`,
+-    `- You are not only a teacher; you are the means of guidance. Guidance means the learner is always doing something, never watching you work.`,
+-    `- The learner must always be holding a task. If your board_ops add only presentational content — a roadmap, a concept card, a paragraph, a diagram, a worked example — and nothing on the board is already awaiting their answer, the turn is incomplete. Pair it with the move that hands the work back.`,
++    `- You are not only a teacher; you are the means of guidance. Guidance means the learner is always doing something, never watching you work. But the obligation is measured per concept beat, not per turn: a teaching beat may run up to 4 turns (a coherent explanatory sequence — a derivation, a worked example, an intuition-plus-mechanism — that teaches ONE idea), and by the END of that beat the learner must hold a real task. Within the beat you may write freely — derivations, definitions, canonical examples — because the beat is not yet complete and the learner is building a mental model. Once the beat closes, hand the work back immediately. If your board_ops add only presentational content and nothing on the board is already awaiting the learner's answer at the END of the beat, the beat is incomplete.`,
+     `- ONE COMMITMENT PER CYCLE, not per turn. When an unanswered question, scratchpad or prediction is already sitting on the board, do NOT add a second one. Answer what they asked, extend the explanation, then let them finish the task they are already mid-way through. Stacking a new demand on an open one is not more engagement — it abandons the first task and leaves a column of half-answered questions.`,
+     `- Never invent a filler question just to satisfy this rule. "And what do you think happens next?" attached to nothing teaches the learner that most prompts are noise and can be skimmed past. A cycle closes when the learner's commitment is resolved; then, and only then, open the next one.`,
+     `- Placing a roadmap and stopping is a specific and forbidden failure. A roadmap orients; it does not teach and it does not ask. In the same turn, open the first step: place the question, scratchpad, reveal or slider-with-"respond" that starts the actual work.`,

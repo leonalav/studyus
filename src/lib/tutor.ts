@@ -24,7 +24,7 @@
  * This module performs no writes outside the session/message tables.
  */
 
-import { getDb, saveDbSync } from "../db/database";
+import { getDb, saveDbSync, beginBatch, endBatch } from "../db/database";
 import {
   asArray,
   asEnum,
@@ -101,6 +101,13 @@ export const ONBOARDING_SCHEMA_VERSION = "onboarding_create_forms_v1";
 export const MAX_HINT_LEVEL = 3;
 export const MAX_BOARD_OPS_PER_TURN = 12;
 export const MAX_THREAD_INITIAL_BLOCKS = 6;
+/**
+ * Maximum consecutive direct-instruction (exposition) turns before the
+ * harness overrides the route to force learner ownership. Prevents the
+ * tutor from generating an unbounded sequence of worked demonstrations
+ * when the policy engine keeps selecting `direct_instruction`.
+ */
+export const EXPOSITION_TURN_BUDGET = 4;
 /** Bounds on the generated onboarding interview, so a model cannot return a
  *  one-question stub or a 40-question intake form. */
 // The intake is intentionally a fixed five-question reception: enough signal to
@@ -484,6 +491,28 @@ export function isNonInstructionalTutorMessage(message: string): boolean {
 }
 
 /**
+ * Detect continuation/acknowledgement filler — messages the learner sends to
+ * advance the conversation without providing substantive content.
+ *
+ * When the board carries an unanswered actionable widget and the learner
+ * sends filler, the tutor must not generate further explanatory content or
+ * reveal assessed work. It must instead point the learner at the existing
+ * commitment. Substantive answers receive normal feedback.
+ *
+ * This is NOT a replacement for `enforceSupportCeiling`; it is a separate
+ * guard for the specific failure where filler triggers exposition.
+ */
+export function isFillerMessage(message: string): boolean {
+  const normalized = message
+    .toLowerCase()
+    .replace(/[.!?,;:…]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return true;
+  return /^(?:continue|go on|next|sure|hmm|ok|okay|got it|yep|yeah|ya|k|proceed|carry on|tell me more|and\?|then\?|what else|let's go|let's do it|sounds good|alright|understood|makes sense|makes sense\?)$/.test(normalized);
+}
+
+/**
  * Does this turn leave the learner with something to do?
  *
  * The standing policy is that the learner is never passive. A turn that adds
@@ -587,16 +616,30 @@ export function boardHasOpenCommitment(board: BoardDoc | undefined): boolean {
  * So when the board already carries an unanswered commitment, an explanatory
  * turn is allowed to be exactly that. The obligation is still enforced; it is
  * just discharged by the question that is already waiting.
+ *
+ * During an exposition beat the obligation is suspended for at most
+ * `EXPOSITION_TURN_BUDGET` consecutive turns. The budget is checked against the
+ * session's persisted streak: if the streak has not been exhausted the turn
+ * stands; once it has, the normal never-passive rule reasserts.
  */
 export function enforceLearnerAgency(
   turn: TutorTurn,
   board?: BoardDoc,
-  options: { allowPresentationFirst?: boolean } = {}
+  options: { expositionAllowed?: boolean; expositionStreak?: number } = {}
 ): TutorTurn {
   if (turn.boardOps.length === 0) return turn;
-  if (options.allowPresentationFirst) return turn;
   if (turnLeavesLearnerSomethingToDo(turn)) return turn;
   if (boardHasOpenCommitment(board)) return turn;
+  // Allow an exposition beat when the route permits it and the streak has not
+  // been exhausted. Without the streak check the exemption would last the
+  // entire session.
+  if (
+    options.expositionAllowed &&
+    typeof options.expositionStreak === "number" &&
+    options.expositionStreak < EXPOSITION_TURN_BUDGET
+  ) {
+    return turn;
+  }
   const speech = turn.speech.trim();
   return { ...turn, speech: speech ? `${speech} ${PASSIVE_TURN_NUDGE}` : PASSIVE_TURN_NUDGE };
 }
@@ -1323,6 +1366,53 @@ export function enforceTutorBoardNecessity(turn: TutorTurn, learnerMessage: stri
     : turn;
 }
 
+/**
+ * When the learner sends filler ("continue", "ok", "hmm", etc.) and the
+ * board already has an unanswered actionable widget, suppress further
+ * explanatory content or assessed-work reveals. Redirect the learner to
+ * the existing commitment instead.
+ *
+ * Substantive answers pass through unchanged. This guard is independent
+ * of `enforceSupportCeiling` — it catches the specific failure mode
+ * where filler triggers a new exposition block rather than addressing
+ * what is already on the board.
+ */
+export function enforceFillerGuard(
+  turn: TutorTurn,
+  learnerMessage: string,
+  board?: BoardDoc
+): TutorTurn {
+  if (!isFillerMessage(learnerMessage)) return turn;
+  if (!boardHasOpenCommitment(board)) return turn;
+  // Strip board ops that add new presentational content; keep ops that
+  // update existing widgets (e.g. highlighting the pending task) and
+  // actionable widgets the learner can interact with.
+  const filteredOps = turn.boardOps.filter((op) => {
+    switch (op.op) {
+      case "write_title":
+      case "write_text":
+      case "write_bullets":
+      case "write_latex":
+      case "write_callout":
+      case "visualize":
+        return false;
+      case "place_widget":
+        // Actionable widgets (questions, scratchpads, etc.) hand work back
+        // to the learner and must not be stripped on filler.
+        return isActionableWidget(op.intent);
+      default:
+        return true;
+    }
+  });
+  const redirect = "You have an unanswered task on the board — try that before we move on.";
+  const speech = turn.speech.trim();
+  return {
+    ...turn,
+    boardOps: filteredOps,
+    speech: speech ? `${speech}\n\n${redirect}` : redirect,
+  };
+}
+
 export function enforceTutorToolPolicy(
   turn: TutorTurn,
   tools: TutorToolPermissions,
@@ -1412,19 +1502,27 @@ function parseBoundedMathExpression(
 
 export async function runTutorMathToolCommand(message: string, tools: TutorToolPermissions): Promise<string> {
   const trimmed = message.trim();
+  const lower = trimmed.toLowerCase();
+  // Detect recognized commands BEFORE importing mathjs so that plain
+  // conversation and unrecognized commands never pay the module cost.
+  const isCalculate = tools.calculator && lower.startsWith("/calculate ");
+  const isSimplify = tools.symbolicAlgebra && lower.startsWith("/simplify ");
+  const isDifferentiate = tools.symbolicAlgebra && lower.startsWith("/differentiate ");
+  if (!isCalculate && !isSimplify && !isDifferentiate) return "";
+
   try {
     const math = await import("mathjs");
-    if (tools.calculator && trimmed.toLowerCase().startsWith("/calculate ")) {
+    if (isCalculate) {
       const expression = trimmed.slice(11).trim();
       const parsed = parseBoundedMathExpression(math, expression, false);
       return `DETERMINISTIC CALCULATOR RESULT for ${JSON.stringify(expression)}: ${String(parsed.evaluate())}`;
     }
-    if (tools.symbolicAlgebra && trimmed.toLowerCase().startsWith("/simplify ")) {
+    if (isSimplify) {
       const expression = trimmed.slice(10).trim();
       parseBoundedMathExpression(math, expression, true);
       return `DETERMINISTIC SYMBOLIC RESULT for ${JSON.stringify(expression)}: ${math.simplify(expression).toString()}`;
     }
-    if (tools.symbolicAlgebra && trimmed.toLowerCase().startsWith("/differentiate ")) {
+    if (isDifferentiate) {
       const request = trimmed.slice(15).trim();
       if (request.length > 350) throw new Error("request is too long");
       const match = request.match(/^(.*?)\s+(?:with respect to|wrt)\s+([A-Za-z][A-Za-z0-9_]*)$/i);
@@ -1433,9 +1531,7 @@ export async function runTutorMathToolCommand(message: string, tools: TutorToolP
       return `DETERMINISTIC SYMBOLIC DERIVATIVE: ${math.derivative(match[1], match[2]).toString()}`;
     }
   } catch (error) {
-    if (/^\/(?:calculate|simplify|differentiate)\b/i.test(trimmed)) {
-      return `DETERMINISTIC MATH TOOL ERROR: ${error instanceof Error ? error.message : "invalid expression"}. Do not invent a tool result.`;
-    }
+    return `DETERMINISTIC MATH TOOL ERROR: ${error instanceof Error ? error.message : "invalid expression"}. Do not invent a tool result.`;
   }
   return "";
 }
@@ -2642,6 +2738,39 @@ export async function setSessionMasteryStage(
 }
 
 /**
+ * Read the session's consecutive direct-instruction (exposition) turn count.
+ *
+ * Returns 0 for sessions that predate the column or were never exposed to
+ * exposition, preserving former behaviour transparently.
+ */
+export async function getSessionExpositionStreak(sessionId: string): Promise<number> {
+  const db = await getDb();
+  const res = db.exec("SELECT exposition_streak FROM chalkboard_sessions WHERE id = ?;", [sessionId]);
+  const v = res[0]?.values?.[0]?.[0];
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * Persist the session's exposition streak after a teaching turn.
+ *
+ * The streak is incremented when the policed turn added presentational
+ * content and left the learner nothing to do, and reset to 0 otherwise.
+ * The value is clamped to `[0, EXPOSITION_TURN_BUDGET]`.
+ */
+export async function setSessionExpositionStreak(
+  sessionId: string,
+  streak: number
+): Promise<void> {
+  const db = await getDb();
+  const clamped = Math.max(0, Math.min(EXPOSITION_TURN_BUDGET, Math.round(streak)));
+  db.run(
+    "UPDATE chalkboard_sessions SET exposition_streak = ?, updated_at = ? WHERE id = ?;",
+    [clamped, new Date().toISOString(), sessionId]
+  );
+  saveDbSync();
+}
+
+/**
  * Decide the session's next stage from a completed turn.
  *
  * Advancement is decided by machine-checkable predicates over the evidence
@@ -3484,26 +3613,37 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // have decided what survived.
   const turnStage = policyBrief?.state.stage ?? masteryStage.stage;
   const roadmapLiveStage = advancedTo ?? regressTo ?? turnStage;
-  const directInstruction = policyBrief?.move.route === "direct_instruction";
+
+  // Read the persisted exposition streak so the agency check knows how many
+  // consecutive exposition turns have already been allowed.
+  const expositionStreak = await getSessionExpositionStreak(req.sessionId);
+
   const policedTurn = enforceVisualExplanation(
-    enforceLearnerAgency(
-      enforceRoadmapProgress(
-        enforceSupportCeiling(
-          enforceTutorBoardNecessity(
-            enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
-            req.learnerMessage
+    enforceFillerGuard(
+      enforceLearnerAgency(
+        enforceRoadmapProgress(
+          enforceSupportCeiling(
+            enforceTutorBoardNecessity(
+              enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
+              req.learnerMessage
+            ),
+            policyBrief?.support.granted ?? 3,
+            {
+              route: policyBrief?.move.route,
+              permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
+            }
           ),
-          policyBrief?.support.granted ?? 3,
-          {
-            route: policyBrief?.move.route,
-            permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
-          }
+          req.board,
+          { advancedTo, liveStage: roadmapLiveStage }
         ),
         req.board,
-        { advancedTo, liveStage: roadmapLiveStage }
+        {
+          expositionAllowed: policyBrief?.expositionAllowed,
+          expositionStreak,
+        }
       ),
-      req.board,
-      { allowPresentationFirst: directInstruction }
+      req.learnerMessage,
+      req.board
     ),
     turnStage,
     req.board
@@ -3525,60 +3665,81 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
 
   const result: StructuredCallResult<TutorTurn> = { ...rawResult, value: groundedTurn };
 
-  await appendSessionMessage({
-    sessionId: req.sessionId,
-    role: "assistant",
-    content: result.value.speech,
-    modelId: result.modelId,
-    promptVersion: TUTOR_PROMPT_VERSION,
-    tokensUsed: result.usage?.total ?? null,
-  });
-  if (!isPlanningTurn) {
-    await rememberTutorDiagnosis(req.sessionId, result.value.diagnosis, studio, result.value.evidenceRefs);
-  }
-
-  if (!isPlanningTurn && typeof result.value.requestedLevel === "number" && result.value.requestedLevel !== hintLevel) {
-    await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
-  }
-
-  // Record the contract this turn's board activity is placed under, so that a
-  // widget the learner answers later resolves to a named task family, context
-  // variant and support ceiling rather than being filed as an anonymous click.
-  let turnActivityId: string | undefined;
-  if (policyBrief && !isSessionOpening) {
-    const contract = await recordMoveActivity({
-      learnerId,
+  // Batch all SQLite writes for this turn so they serialize to disk once
+  // instead of one-by-one. The model call and board policing are already
+  // complete; only persistence writes follow.
+  beginBatch();
+  try {
+    await appendSessionMessage({
       sessionId: req.sessionId,
-      skillId,
-      move: policyBrief.move,
-      turnOrdinal: loadedHistory.length,
+      role: "assistant",
+      content: result.value.speech,
+      modelId: result.modelId,
+      promptVersion: TUTOR_PROMPT_VERSION,
+      tokensUsed: result.usage?.total ?? null,
     });
-    turnActivityId = contract?.activityId;
-  }
+    if (!isPlanningTurn) {
+      await rememberTutorDiagnosis(req.sessionId, result.value.diagnosis, studio, result.value.evidenceRefs);
+    }
 
-  // Hypotheses are written after the evidence they rest on, so each claim
-  // carries the id of the observation that prompted it. A claim with no
-  // evidence attached cannot later be shown to the learner as "here is why I
-  // think this", and an unexplainable claim about a learner is one they have no
-  // fair way to contest.
-  if (!isPlanningTurn) {
-    await recordTutorHypotheses({
-      learnerId,
-      skillId,
-      diagnosis: result.value.diagnosis,
-      preferences: studio,
-      evidenceIds: turnEvidenceId ? [turnEvidenceId] : [],
-    });
-  }
+    if (!isPlanningTurn && typeof result.value.requestedLevel === "number" && result.value.requestedLevel !== hintLevel) {
+      await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
+    }
 
-  if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
-    await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
-  }
+    // Persist the exposition streak: increment when the policed turn stayed
+    // within an allowed exposition beat (presentational content only, nothing
+    // handed back to the learner), reset to zero when the tutor switches to a
+    // learner-ownership route.
+    if (policyBrief && !isSessionOpening && !isPlanningTurn) {
+      const nextStreak =
+        policyBrief.expositionAllowed &&
+        !turnLeavesLearnerSomethingToDo(policedTurn)
+          ? expositionStreak + 1
+          : 0;
+      await setSessionExpositionStreak(req.sessionId, nextStreak);
+    }
 
-  // Hand the caller the contract these board ops were authored under so it can
-  // bind it to the blocks this turn creates. Binding at placement is what makes
-  // a late answer resolvable to the right activity.
-  if (turnActivityId) result.value.activityId = turnActivityId;
+    // Record the contract this turn's board activity is placed under, so that a
+    // widget the learner answers later resolves to a named task family, context
+    // variant and support ceiling rather than being filed as an anonymous click.
+    let turnActivityId: string | undefined;
+    if (policyBrief && !isSessionOpening) {
+      const contract = await recordMoveActivity({
+        learnerId,
+        sessionId: req.sessionId,
+        skillId,
+        move: policyBrief.move,
+        turnOrdinal: loadedHistory.length,
+      });
+      turnActivityId = contract?.activityId;
+    }
+
+    // Hypotheses are written after the evidence they rest on, so each claim
+    // carries the id of the observation that prompted it. A claim with no
+    // evidence attached cannot later be shown to the learner as "here is why I
+    // think this", and an unexplainable claim about a learner is one they have no
+    // fair way to contest.
+    if (!isPlanningTurn) {
+      await recordTutorHypotheses({
+        learnerId,
+        skillId,
+        diagnosis: result.value.diagnosis,
+        preferences: studio,
+        evidenceIds: turnEvidenceId ? [turnEvidenceId] : [],
+      });
+    }
+
+    if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
+      await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
+    }
+
+    // Hand the caller the contract these board ops were authored under so it can
+    // bind it to the blocks this turn creates. Binding at placement is what makes
+    // a late answer resolvable to the right activity.
+    if (turnActivityId) result.value.activityId = turnActivityId;
+  } finally {
+    endBatch();
+  }
 
   return result;
 }

@@ -5,6 +5,10 @@ let initPromise: Promise<Database> | null = null;
 
 const STORAGE_KEY = "studyus_sqlite_db_v1";
 
+// ── Write-coalescing batch API ──
+let _batchDepth = 0;
+let _flushOwed = false;
+
 export async function getDb(): Promise<Database> {
   if (dbInstance) return dbInstance;
   if (initPromise) return initPromise;
@@ -44,12 +48,44 @@ export async function getDb(): Promise<Database> {
 
 export function saveDbSync(): void {
   if (!dbInstance) return;
+  // While inside a batch, defer the real flush.
+  if (_batchDepth > 0) {
+    _flushOwed = true;
+    return;
+  }
+  _doFlush();
+}
+
+export function beginBatch(): void {
+  _batchDepth++;
+}
+
+export function endBatch(): void {
+  if (_batchDepth <= 0) return;          // unmatched endBatch is a no-op
+  _batchDepth--;
+  if (_batchDepth === 0 && _flushOwed) {
+    _flushOwed = false;
+    _doFlush();
+  }
+}
+
+/** Test-only: reset batch depth to zero and clear the deferred-flush flag. */
+export function resetBatchState(): void {
+  _batchDepth = 0;
+  _flushOwed = false;
+}
+
+/** Internal: perform the actual serialize-to-localStorage flush. */
+function _doFlush(): void {
+  if (!dbInstance) return;
   if (typeof window !== "undefined" && window.localStorage) {
     try {
       const data = dbInstance.export();
+      // Chunked string building — safe against call-stack limits.
+      const CHUNK = 8192;
       let binary = "";
-      for (let i = 0; i < data.length; i++) {
-        binary += String.fromCharCode(data[i]);
+      for (let i = 0; i < data.length; i += CHUNK) {
+        binary += String.fromCharCode.apply(null, data.subarray(i, i + CHUNK) as unknown as number[]);
       }
       window.localStorage.setItem(STORAGE_KEY, btoa(binary));
     } catch (e) {
@@ -735,6 +771,28 @@ function runMigrations(db: Database) {
     );
 
     db.run("PRAGMA user_version = 8;");
+    db.run("COMMIT;");
+  }
+
+  if (currentVersion < 9) {
+    db.run("BEGIN TRANSACTION;");
+
+    db.run(`
+      ALTER TABLE chalkboard_sessions ADD COLUMN exposition_streak INTEGER NOT NULL DEFAULT 0;
+    `);
+
+    const v9Now = new Date().toISOString();
+    db.run(
+      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
+      [
+        9,
+        "Track consecutive direct-instruction exposition turns per session",
+        v9Now,
+        "Rule: exposition_streak counts consecutive turns routed to direct_instruction with policyBrief.expositionAllowed. It is incremented by the tutor harness, capped at EXPOSITION_TURN_BUDGET (4), and overridden to a learner-ownership route when the budget is exhausted. It does not affect support ceiling, policy routing, or stage predicates.",
+      ]
+    );
+
+    db.run("PRAGMA user_version = 9;");
     db.run("COMMIT;");
   }
 
