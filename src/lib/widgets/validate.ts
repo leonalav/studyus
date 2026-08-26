@@ -933,6 +933,12 @@ function validateChallenge(intent: Record<string, unknown>): ValidationResult {
       if (!optionalLatex(part.promptLatex)) return fail("Challenge part promptLatex is too long");
     }
   }
+  const preObs = intent.preObservation;
+  if (preObs !== undefined && preObs !== null) {
+    if (!isPlainObject(preObs)) return fail("Challenge preObservation must be an object");
+    if (!text(preObs.prompt, 300)) return fail("Challenge preObservation.prompt is required (max 300 chars)");
+    if (!optionalText(preObs.placeholder, 200)) return fail("Challenge preObservation.placeholder is too long (max 200 chars)");
+  }
   return ok;
 }
 

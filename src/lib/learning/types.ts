@@ -51,6 +51,7 @@ export const ACTIVITY_MODES = [
   "transfer",
   "retrieval",
   "repair",
+  "drill",
 ] as const;
 
 export type ActivityMode = typeof ACTIVITY_MODES[number];
@@ -115,6 +116,8 @@ export const EVIDENCE_TYPES = [
   "explanation",
   "transfer",
   "retrieval",
+  "drill",
+  "cover",
 ] as const;
 
 export type EvidenceType = typeof EVIDENCE_TYPES[number];
@@ -128,6 +131,8 @@ export const EVIDENCE_TYPE_MEANING: Record<EvidenceType, string> = {
   explanation: "The learner stated the mechanism in their own words, not a restatement of yours.",
   transfer: "The learner succeeded on a changed representation, context, or constraint set.",
   retrieval: "The learner produced it from memory after a delay, unaided.",
+  drill: "Compressed, isolated repetition of one cognitive operation.",
+  cover: "Retrieval of a previously learned concept with all support artifacts removed from the board.",
 };
 
 /**
@@ -463,6 +468,7 @@ export const LEARNING_ROUTES = [
   "independent_practice",
   "transfer_check",
   "due_retrieval",
+  "drill_loop",
 ] as const;
 
 export type LearningRoute = typeof LEARNING_ROUTES[number];
@@ -500,6 +506,8 @@ export const LEARNING_ROUTE_INSTRUCTION: Record<LearningRoute, string> = {
     "Change the representation, context, or constraints while holding the underlying idea fixed. If the learner only pattern-matched, this is where it shows. Require the justification, not just the answer.",
   due_retrieval:
     "A scheduled retrieval is due. Surface it before new teaching, unaided. Its outcome is evidence about retention, so do not coach it — a coached retrieval measures nothing.",
+  drill_loop:
+    "Compressed repetition of one cognitive operation until it is reliable. Place one question per turn. No hints, no worked steps, no leading questions. If the learner is correct three times in a row on the same family, signal that the family is fluent and move to the next.",
 };
 
 /**
@@ -538,6 +546,8 @@ export interface NextLearningMove {
    * pile up somewhere the scheduler never looks.
    */
   taskFamily?: string;
+  /** Set when the move should spawn a prerequisite thread. */
+  spawnThread?: boolean;
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -560,6 +570,8 @@ export interface SkillNode {
   /** Curriculum node this skill is taught under, when known. */
   curriculumNode?: string;
   description?: string;
+  /** Drill task families this skill uses for spaced retrieval. */
+  drillFamilies?: string[];
 }
 
 export interface SkillGraph {

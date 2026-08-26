@@ -2,7 +2,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import { viteSingleFile } from "vite-plugin-singlefile";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -36,5 +36,10 @@ export default defineConfig({
   // Under Tauri, watch must not race the Rust process monitor. Keep HMR off the
   // stricter debounce so the webview picks up edits without a manual reload.
   ...(isTauriBuild ? { clearScreen: false } : {}),
+  test: {
+    // Agent worktrees under .claude/ are full source copies; without this the
+    // runner collects every test three times and reports triple counts.
+    exclude: ["**/node_modules/**", "**/dist/**", "**/.claude/**", "**/src-tauri/**"],
+  },
 });
 

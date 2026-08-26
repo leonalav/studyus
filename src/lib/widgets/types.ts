@@ -520,6 +520,15 @@ export interface AnimationScene {
   elements: AnimationSceneElement[];
 }
 
+export interface AnimationKeyframe {
+  id: string;
+  label: string;
+  description?: string;
+  // Timing
+  duration: number; // ms
+  easing?: "linear" | "ease-in" | "ease-out" | "ease-in-out";
+}
+
 export interface AnimationWidget extends WidgetBase {
   kind: "animation";
   frames: AnimationFrame[];
@@ -531,6 +540,10 @@ export interface AnimationWidget extends WidgetBase {
   /** Total run time across all frames. */
   durationMs?: number;
   loop?: boolean;
+  // Timeline and keyframes
+  keyframes?: AnimationKeyframe[];
+  showTimeline?: boolean;
+  playbackSpeed?: number;
   /** The prediction the learner must commit BEFORE playback is unlocked.
    *
    *  When present, the surface locks the play control until an answer is
@@ -805,6 +818,13 @@ export interface ChallengeWidget extends WidgetBase {
   successCriteria?: string[];
   /** Set when the challenge deliberately changes context/representation. */
   transferNote?: string;
+  /** Optional pre-solution observation. The learner names the structural
+   *  shortcut or key insight before solving. Recorded as a separate
+   *  observation evidence event. */
+  preObservation?: {
+    prompt: string;
+    placeholder?: string;
+  };
 }
 
 /* ── 19 · Reflection — explain it in your own words ── */

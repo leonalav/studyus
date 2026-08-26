@@ -15,6 +15,22 @@ export const DEFAULT_BOARD_PAGE_SIZE = 8;
 export const MIN_BOARD_PAGE_SIZE = 4;
 export const MAX_BOARD_PAGE_SIZE = 16;
 
+/** Relative visual height of each block kind on screen.
+ * Formula blocks (latex, visualization) take full vertical space.
+ * Text prose wraps at a constrained width and is shorter per block.
+ * Widgets are medium height.
+ */
+const BLOCK_WEIGHT: Record<string, number> = {
+  title: 0.4,
+  text: 0.7,
+  bullets: 0.6,
+  latex: 1.0,
+  callout: 0.5,
+  widget: 0.8,
+  visualization: 1.0,
+  row: 0.8,
+};
+
 export function clampPageSize(size: unknown): number {
   if (typeof size !== "number" || !Number.isFinite(size)) return DEFAULT_BOARD_PAGE_SIZE;
   return Math.min(MAX_BOARD_PAGE_SIZE, Math.max(MIN_BOARD_PAGE_SIZE, Math.round(size)));
@@ -47,6 +63,50 @@ export function pageSlice(
   const safe = Math.max(0, revealedCount);
   const start = Math.min(Math.max(0, page) * size, safe);
   const end = Math.min(start + size, safe);
+  return { start, end };
+}
+
+/** Returns the (start, end) block indices for the given page, using
+ * formula-aware visual-weight accumulation instead of simple block count.
+ * Text blocks are capped at 3 "lines" of weight so long prose doesn't
+ * blow out a page — if a text block would exceed the page budget it
+ * ends the page, it is NOT split. */
+export function formulaAwarePageSlice(
+  blocks: { kind: string }[],
+  revealedCount: number,
+  page: number,
+  pageSize: number
+): { start: number; end: number } {
+  const size = clampPageSize(pageSize);
+  const safe = Math.max(0, revealedCount);
+  const visibleBlocks = blocks.slice(0, safe);
+
+  // Page budget in weight units; one "page" = `size` units worth of weight.
+  const budget = size;
+
+  // Accumulate weight until we fill a page boundary.
+  const pageBreaks: number[] = [0]; // pageBreaks[i] = start index of page i
+  let pageStart = 0;
+  let accumulated = 0;
+
+  for (let i = 0; i < visibleBlocks.length; i++) {
+    const blockWeight = BLOCK_WEIGHT[visibleBlocks[i].kind] ?? 0.8;
+    // Cap text at 3 lines of weight so long prose doesn't blow out a page.
+    const weight = visibleBlocks[i].kind === "text" ? Math.min(blockWeight, 0.9) : blockWeight;
+
+    if (accumulated + weight > budget && i > pageStart) {
+      pageBreaks.push(i);
+      pageStart = i;
+      accumulated = weight;
+    } else {
+      accumulated += weight;
+    }
+  }
+  pageBreaks.push(visibleBlocks.length); // sentinel
+
+  const clampedPage = Math.max(0, Math.min(page, pageBreaks.length - 2));
+  const start = pageBreaks[clampedPage];
+  const end = pageBreaks[clampedPage + 1];
   return { start, end };
 }
 

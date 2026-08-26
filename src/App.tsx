@@ -8,6 +8,7 @@ import { Toasts, type ToastItem } from "./components/Toasts";
 import { SearchModal } from "./components/SearchModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { HelpModal } from "./components/HelpModal";
+import { DownloadsModal } from "./components/DownloadsModal";
 import { MarketplacePage } from "./components/MarketplacePage";
 import { TabContent, type TestParams } from "./components/TabContent";
 import { decodeTestTabId, encodeTestTabId } from "./components/testTabIds";
@@ -17,6 +18,8 @@ import { WindowControls, DragBar } from "./components/WindowControls";
 import { buildBoard, detectDomain, type BoardDoc } from "./data/boards";
 import { type OnboardingAnswers } from "./data/tutor";
 import { getStudySession, type StoredStudySession } from "./state/studySessionStore";
+import { DEFAULT_LEARNER_ID } from "./lib/learning/store";
+import type { TurnContract } from "./lib/contracts/types";
 import { ContextMenu, type ContextMenuTarget } from "./components/ContextMenu";
 import {
   createDefaultTab,
@@ -65,8 +68,16 @@ export default function App() {
   const [restoredSession, setRestoredSession] = useState<StoredStudySession | null>(null);
   const [pendingBoundNodes, setPendingBoundNodes] = useState<string[]>([]);
   const [pendingOnboarding, setPendingOnboarding] = useState<OnboardingAnswers | null>(null);
+  /** Learner-approved contract from the onboarding review sheet. Threaded
+   *  into every fresh-session tutor turn alongside the onboarding reminder.
+   *  Restored sessions load theirs via the contracts store in StudyRoom. */
+  const [pendingContract, setPendingContract] = useState<TurnContract | null>(null);
+  /** The SessionCard-minted session id, passed to StudyRoom so its persisted
+   *  session row shares one id with the contract's revision lineage. */
+  const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [downloadsOpen, setDownloadsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<
     "root" | "about" | "appearance" | "tutor" | "notifications" | "models"
@@ -127,10 +138,18 @@ export default function App() {
   }, [notify]);
 
   const startPrep = useCallback(
-    (prompt: string, boundNodes?: string[], onboarding?: OnboardingAnswers) => {
+    (
+      prompt: string,
+      boundNodes?: string[],
+      onboarding?: OnboardingAnswers,
+      contract?: TurnContract | null,
+      sessionId?: string,
+    ) => {
       setRestoredSession(null);
       setPendingBoundNodes(boundNodes ?? []);
       setPendingOnboarding(onboarding ?? null);
+      setPendingContract(contract ?? null);
+      setPendingSessionId(sessionId ?? null);
       // Title the board from the chosen concept (carried on the onboarding
       // answers), never the raw prompt — the board must not echo the learner's
       // own query back at them.
@@ -398,8 +417,11 @@ export default function App() {
         <StudyRoom
           initialBoard={board}
           initialSession={restoredSession ?? undefined}
+          sessionId={restoredSession ? undefined : pendingSessionId ?? undefined}
           boundNodes={restoredSession ? undefined : pendingBoundNodes}
           onboarding={restoredSession ? undefined : pendingOnboarding ?? undefined}
+          turnContract={restoredSession ? undefined : pendingContract ?? undefined}
+          learnerId={DEFAULT_LEARNER_ID}
           notify={notify}
           onLeave={() => {
             setBoard(null);
@@ -474,6 +496,7 @@ export default function App() {
             onNotify={notify}
             onOpenSearch={() => setSearchOpen(true)}
             onOpenSettings={openSettingsRoot}
+            onOpenDownloads={() => setDownloadsOpen(true)}
             onOpenHelp={() => setHelpOpen(true)}
             onOpenMarketplace={() => openTab({ id: MARKETPLACE_TAB_ID, title: "Marketplace", kind: "marketplace" })}
             onOpenTab={openTab}
@@ -615,6 +638,12 @@ export default function App() {
         onClose={() => setSettingsOpen(false)}
         onNotify={notify}
         initialSection={settingsSection}
+      />
+
+      <DownloadsModal
+        open={downloadsOpen}
+        onClose={() => setDownloadsOpen(false)}
+        onNotify={notify}
       />
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />

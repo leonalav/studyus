@@ -417,3 +417,113 @@ export async function logAgentCall({
   ]);
   saveDbSync();
 }
+
+/* ─────────────────────────────────────────────────────────────
+   VISION LLM OCR FALLBACK
+   ───────────────────────────────────────────────────────────── */
+
+/**
+ * Attempt OCR on a PDF page image using the first available Vision model.
+ *
+ * This is the fallback path when Granite Docling is unavailable (non-Tauri builds,
+ * network errors, model loading failures, or a 503 from Hugging Face Inference).
+ * It runs after Granite Docling has already failed — it is not the primary pipeline.
+ *
+ * The function queries all available model bindings for one that advertises
+ * `vision: true`, preferring the active tutor endpoint. It constructs a
+ * base64 image URL and sends it via the standard OpenAI-compatible vision API.
+ *
+ * Returns the extracted text, or throws if no vision-capable model is available
+ * or if the API call fails.
+ *
+ * @param base64Image  Raw base64-encoded PNG (no `data:` prefix).
+ * @param pageLabel   Optional human-readable page label for error messages.
+ */
+export async function tryOcrWithVisionFallback(
+  base64Image: string,
+  pageLabel = "page"
+): Promise<string> {
+  const bindings = await getModelBindings();
+  const visionBinding =
+    bindings.find((b) => b.capabilities.vision) ??
+    bindings[0]; // Fall back to any binding if none advertises vision
+
+  if (!visionBinding) {
+    throw new Error(
+      `No model binding is available for vision OCR. ` +
+      `Add a vision-capable model in Settings → Models and assign it a role.`
+    );
+  }
+
+  const apiKey = getCredentialLocally(visionBinding.role);
+
+  const url = resolveEndpointChatUrl(visionBinding.baseUrl);
+  const body = {
+    model: visionBinding.modelId,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "You are an OCR engine. Return only the exact text from this page image, preserving paragraphs and line breaks. Do not summarise, translate, or add commentary.",
+          },
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:image/png;base64,${base64Image}`,
+              detail: "low",
+            },
+          },
+        ],
+      },
+    ],
+    max_tokens: 4096,
+    temperature: 0,
+  };
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new Error(
+      `Vision OCR failed for ${pageLabel}: network error — ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    );
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(
+      `Vision OCR failed for ${pageLabel}: HTTP ${response.status} — ${
+        response.statusText
+      }${text ? `. ${text.slice(0, 200)}` : ""}`
+    );
+  }
+
+  const data = await response.json() as {
+    choices?: Array<{ message?: { content?: string } }>;
+    error?: { message?: string };
+  };
+
+  if (data.error) {
+    throw new Error(`Vision OCR failed for ${pageLabel}: ${data.error.message}`);
+  }
+
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error(
+      `Vision OCR returned no text for ${pageLabel} (${visionBinding.modelId}).`
+    );
+  }
+
+  return content.trim();
+}

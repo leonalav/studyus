@@ -120,7 +120,7 @@ export function IntakeFormSheet({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm"
       onMouseDown={(event) => {
         // Click-through dismissal lands back on the chat card with the draft
         // intact; only the explicit controls submit or close from within.
@@ -131,44 +131,47 @@ export function IntakeFormSheet({
         role="dialog"
         aria-modal="true"
         aria-label={form.title ?? "Intake form"}
-        // One viewport cap (backdrop already has p-4). min-h-0 lets this node
-        // shrink as a centered flex child; h-fit keeps short forms content-sized
-        // (no mid-sheet footer / dead zone). Grid rows pin header + footer and
-        // make only the middle track the scrollport.
-        // Width is bounded by the padded backdrop (p-4), not by 94vw — a viewport-
-        // relative width overflows the content box on phones (94vw + 2rem > 100vw
-        // below ~533px). w-full max-w keeps the sheet inside the flex parent.
-        className="anim-msg relative grid h-fit max-h-[calc(100dvh-2rem)] min-h-0 w-full min-w-0 max-w-[348px] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
+        className="flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_90px_rgba(0,0,0,0.65)]"
+        style={{
+          height: "calc(100dvh - 3rem)",
+          width: "100%",
+          maxWidth: "640px",
+        }}
       >
-        {/* header — row 1, intrinsic height */}
-        <div className="border-b border-white/8 px-4 pb-3 pt-3.5">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
+        {/* header — clean title, description and X button */}
+        <div className="shrink-0 border-b border-white/8 px-6 pb-4 pt-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <ClipboardList size={12} className="shrink-0 text-accent" />
-                <span className="rounded-full bg-white/[0.07] px-1.5 py-px font-mono text-[9px] text-mut">
-                  {answered}/{total}
+                <ClipboardList size={13} className="shrink-0 text-accent" />
+                <span className="rounded-full bg-white/[0.07] px-2 py-0.5 font-mono text-[9.5px] text-mut">
+                  {answered}/{total} answered
                 </span>
               </div>
-              <h2 className="mt-1 break-words text-[15.5px] font-medium leading-snug text-fg">
+              <h2 className="mt-2 break-words text-[22px] font-bold tracking-tight text-fg sm:text-[24px]">
                 {form.title ?? "Intake form"}
               </h2>
+              {form.invitation && (
+                <p className="mt-1 text-[13px] leading-relaxed text-mut">{form.invitation}</p>
+              )}
             </div>
             <button
               onClick={onClose}
               aria-label="Close form"
-              className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-dim transition-colors hover:bg-white/[0.07] hover:text-fg"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-dim transition-colors hover:bg-white/[0.08] hover:text-fg"
             >
-              <X size={13} />
+              <X size={16} />
             </button>
           </div>
-          {form.invitation && (
-            <p className="mt-1.5 text-[11.5px] leading-relaxed text-mut">{form.invitation}</p>
-          )}
         </div>
 
-        {/* questions — row 2 scrolls under the pinned footer */}
-        <div ref={scrollRef} className="min-h-0 space-y-3 overflow-y-auto overscroll-contain px-4 py-3">
+        {/* questions — scrollable body with generous breathing room */}
+        <div
+          ref={scrollRef}
+          className="flex-1 overflow-y-auto overscroll-contain px-6 py-5"
+          style={{ minHeight: 0 }}
+        >
+          <div className="space-y-4">
           {visible.map((q, index) => (
             <QuestionBlock
               key={q.id}
@@ -179,14 +182,15 @@ export function IntakeFormSheet({
               onChange={(value) => onChange(q.id, value)}
             />
           ))}
+          </div>
         </div>
 
-        {/* footer — row 3, always after the scrollport, never over content */}
-        <div className="flex items-center justify-between gap-2 border-t border-white/8 bg-panel px-4 py-3">
+        {/* footer — solid pinned bar, no content overlap */}
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-white/8 bg-panel px-6 py-3.5">
           {readOnly ? (
             <button
               onClick={onClose}
-              className="w-full rounded-md border border-white/10 bg-white/[0.05] py-1.5 text-[12px] text-mut transition-colors hover:bg-white/[0.1] hover:text-fg"
+              className="w-full rounded-lg border border-white/10 bg-white/[0.05] py-2 text-[12.5px] font-medium text-mut transition-colors hover:bg-white/[0.1] hover:text-fg"
             >
               Close
             </button>
@@ -194,15 +198,15 @@ export function IntakeFormSheet({
             <>
               <button
                 onClick={onClose}
-                className="rounded-md px-2.5 py-1.5 text-[12px] text-dim transition-colors hover:text-fg"
+                className="rounded-lg px-3 py-1.5 text-[12.5px] text-dim transition-colors hover:bg-white/[0.05] hover:text-fg"
               >
                 Not now
               </button>
               <button
                 onClick={onSubmit}
-                className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-accent-deep"
+                className="flex items-center gap-1.5 rounded-lg bg-accent px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-accent-deep shadow-sm"
               >
-                <CheckCheck size={12} />
+                <CheckCheck size={13} />
                 {answered > 0 ? "Send answers" : "Skip all"}
               </button>
             </>
@@ -229,25 +233,32 @@ function QuestionBlock({
 }) {
   const options = question.kind === "choice" ? question.options ?? [] : [];
   return (
-    <fieldset className="rounded-lg border border-white/8 bg-black/20 px-3 py-2.5">
+    <fieldset className="rounded-xl border border-white/10 bg-black/20 p-4 sm:p-5 transition-colors focus-within:border-white/20">
       <legend className="sr-only">Question {index + 1}</legend>
-      <div className="mb-1.5 flex items-start gap-2">
-        <span className="mt-0.5 grid h-4.5 w-4.5 shrink-0 place-items-center rounded-full bg-white/[0.07] font-mono text-[9.5px] text-mut">
+      <div className="flex items-start gap-2.5">
+        <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-md bg-white/[0.08] font-mono text-[10px] font-semibold text-mut">
           {index + 1}
         </span>
-        <p className="text-[12.5px] leading-snug text-fg">{question.question}</p>
+        <div className="min-w-0 flex-1">
+          <h3 className="text-[14.5px] font-semibold leading-snug text-fg sm:text-[15.5px]">
+            {question.question}
+          </h3>
+          <p className="mt-0.5 text-[11.5px] text-dim">
+            {question.kind === "choice" ? "(Select an option)" : "(One short line)"}
+          </p>
+        </div>
       </div>
 
       {options.length > 0 ? (
-        <div className="mt-1 space-y-1 pl-6.5">
+        <div className="mt-3.5 space-y-1.5 pl-0 sm:pl-7.5">
           {options.map((option) => {
             const selected = value === option;
             return (
               <label
                 key={option}
-                className={`flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-[12px] transition-colors ${selected
-                  ? "border-accent/50 bg-accent/[0.12] text-fg"
-                  : "border-white/8 bg-transparent text-mut hover:border-white/20 hover:text-fg"
+                className={`flex cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-[12.5px] transition-colors ${selected
+                  ? "border-accent/50 bg-accent/[0.12] text-fg font-medium"
+                  : "border-white/8 bg-transparent text-mut hover:border-white/20 hover:bg-white/[0.03] hover:text-fg"
                   } ${readOnly ? "pointer-events-none opacity-80" : ""}`}
               >
                 <input
@@ -260,25 +271,27 @@ function QuestionBlock({
                 />
                 <span
                   aria-hidden
-                  className={`grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full border ${selected ? "border-accent bg-accent text-white" : "border-white/25"
+                  className={`grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full border ${selected ? "border-accent bg-accent text-white" : "border-white/25 bg-black/20"
                     }`}
                 >
                   {selected && <Check size={9} strokeWidth={3} />}
                 </span>
-                {option}
+                <span className="min-w-0 flex-1 leading-snug">{option}</span>
               </label>
             );
           })}
         </div>
       ) : (
-        <input
-          value={value}
-          readOnly={readOnly}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder={readOnly ? "" : "One short line…"}
-          aria-label={`Answer ${index + 1}`}
-          className="mt-1 ml-6.5 w-[calc(100%-26px)] rounded-md border border-white/10 bg-black/25 px-2 py-1.5 text-[12px] text-fg outline-none transition-colors placeholder:text-faint focus:border-accent/50"
-        />
+        <div className="mt-3 pl-0 sm:pl-7.5">
+          <input
+            value={value}
+            readOnly={readOnly}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder={readOnly ? "" : "One short line…"}
+            aria-label={`Answer ${index + 1}`}
+            className="w-full rounded-lg border border-white/10 bg-black/25 px-3 py-2 text-[12.5px] text-fg outline-none transition-colors placeholder:text-faint focus:border-accent/50 focus:bg-black/35"
+          />
+        </div>
       )}
     </fieldset>
   );

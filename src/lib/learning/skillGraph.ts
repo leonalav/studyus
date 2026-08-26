@@ -43,6 +43,7 @@ interface OutlineRow {
   title: string;
   sectionNumber: string | null;
   nodeKind: string;
+  drillFamilies?: string[];
 }
 
 /**
@@ -110,6 +111,7 @@ export function inferSkillNodes(rows: OutlineRow[]): SkillNode[] {
       label: row.sectionNumber ? `${row.sectionNumber} ${row.title}` : row.title,
       prerequisites: [...new Set(prerequisites)],
       curriculumNode: row.id,
+      drillFamilies: row.drillFamilies,
     } satisfies SkillNode;
   });
 }
@@ -127,7 +129,7 @@ export function inferSkillNodes(rows: OutlineRow[]): SkillNode[] {
 export async function seedSkillGraphFromCurriculum(sourceId: string): Promise<number> {
   const db = await getDb();
   const res = db.exec(
-    `SELECT id, parent_node_id, ordinal, title, section_number, node_kind
+    `SELECT id, parent_node_id, ordinal, title, section_number, node_kind, drill_families
      FROM curriculum_nodes WHERE source_id = ? ORDER BY ordinal ASC;`,
     [sourceId]
   );
@@ -139,6 +141,7 @@ export async function seedSkillGraphFromCurriculum(sourceId: string): Promise<nu
     title: String(row[3] ?? "Untitled section"),
     sectionNumber: row[4] === null || row[4] === undefined ? null : String(row[4]),
     nodeKind: String(row[5] ?? "section"),
+    drillFamilies: row[6] === null || row[6] === undefined ? undefined : String(row[6]).split(",").filter(Boolean),
   }));
 
   const nodes = inferSkillNodes(rows);
@@ -181,6 +184,7 @@ export async function linkObjectiveToCurriculumNode(params: {
     prerequisites,
     curriculumNode: params.curriculumNodeId,
     description: existing?.description,
+    drillFamilies: existing?.drillFamilies,
   });
 }
 

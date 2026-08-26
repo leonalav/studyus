@@ -16,6 +16,7 @@ import {
 import {
   DEFAULT_BOARD_PAGE_SIZE,
   clampPageSize,
+  formulaAwarePageSlice,
   pageCountFor,
   pageIndexOf,
   pageSlice,
@@ -559,7 +560,7 @@ export function Chalkboard({
   const gridSize = theme.id === "blueprint" ? 28 : 22;
 
   const { start: pageStart, end: pageEnd } = paginated
-    ? pageSlice(revealed, activePage, effectivePageSize)
+    ? formulaAwarePageSlice(blocks, revealed, activePage, effectivePageSize)
     : { start: 0, end: revealed };
   // `revealed` is the index of the NEXT block to appear. Camera and caret both
   // use followPage (last revealed block's page) so the pen does not blink off

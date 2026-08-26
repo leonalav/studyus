@@ -26,7 +26,12 @@ import {
   type OnboardingForm,
 } from "../data/tutor";
 import { FormCallCard, IntakeFormSheet, type IntakeDraft } from "./IntakeForm";
+import { ContractReview } from "./ContractReview";
 import { generateOnboardingQuestions, transcribeNode } from "../api";
+import { extractContractFromOnboarding, type ExtractionOutcome } from "../lib/contracts/extract";
+import { saveContract } from "../lib/contracts/store";
+import type { TurnContract } from "../lib/contracts/types";
+import { DEFAULT_LEARNER_ID } from "../lib/learning/store";
 import { SUBJECT_LIST, type SubjectKey } from "../data/curriculum";
 import { startLiveDictation, type LiveDictation } from "../lib/voice";
 import { useCurricula, type StoredCurriculum } from "../state/curriculumStore";
@@ -48,7 +53,7 @@ interface Msg {
  *  sheet. The submitted answers (or typed one-per-line replies, which still
  *  work) are threaded to the tutor as a consistent system reminder for the
  *  session, where they steer the syllabus it builds. */
-type OnboardingStage = "idle" | "generating" | "asking" | "preparing" | "done";
+type OnboardingStage = "idle" | "generating" | "asking" | "reviewing" | "preparing" | "done";
 
 interface PendingOnboarding {
   concept: string;
@@ -64,7 +69,13 @@ type Depth = "auto" | "simple" | "detailed";
 interface Props {
   notify: (text: string) => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
-  onPrepare: (prompt: string, boundNodes?: string[], onboarding?: OnboardingAnswers) => void;
+  onPrepare: (
+    prompt: string,
+    boundNodes?: string[],
+    onboarding?: OnboardingAnswers,
+    contract?: TurnContract | null,
+    sessionId?: string,
+  ) => void;
   selectedSection?: CurriculumStudySelection | null;
   onSelectedSectionChange?: (selection: CurriculumStudySelection | null) => void;
 }
@@ -148,12 +159,31 @@ export function SessionCard({
   const [formDraft, setFormDraft] = useState<IntakeDraft>({});
   /** The submitted answers; non-null flips the card to its completed state. */
   const [submittedAnswers, setSubmittedAnswers] = useState<IntakeDraft | null>(null);
+  /** The extraction outcome presented to the learner in the contract review
+   *  sheet. `null` while extraction is in flight; a contract proposal, the
+   *  intentional `empty` result, or extraction `failed` errors otherwise. */
+  const [contractOutcome, setContractOutcome] = useState<ExtractionOutcome | null>(null);
+  /** The proposal seed carrying deterministic contract identity (contractId,
+   *  createdAt, learnerId, sessionId, source) so the learner's edits keep
+   *  the same revision lineage rather than minting a new contract. */
+  const [contractSeed, setContractSeed] = useState<TurnContract | null>(null);
   /** Real preparation progress shown in the chatbox after onboarding answers:
    *  transcribing the chosen subsection + readying the chalkboard. */
   const [prep, setPrep] = useState<{ pct: number; stage: string }>({ pct: 0, stage: "" });
 
   const idRef = useRef(0);
+  /** The most recently submitted OnboardingAnswers, kept in a ref so the
+   *  contract-review approval handler (rendered deep in the tree) can hand
+   *  the same answers to preparation without rebinding on every keystroke. */
+  const submittedIntakeAnswersRef = useRef<OnboardingAnswers | null>(null);
   const timersRef = useRef<number[]>([]);
+  /** Stable session id for this SessionCard's session, minted once per first
+   *  prompt. Threaded to the contract (so its revision lineage and the board
+   *  session share one id) and through `onPrepare` so the StudyRoom session
+   *  matches. */
+  const [sessionId] = useState(
+    () => `session-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
   const depthRef = useRef<HTMLDivElement>(null);
   const commandRef = useRef<HTMLDivElement>(null);
@@ -166,12 +196,14 @@ export function SessionCard({
   useEffect(() => () => dictationRef.current?.stop(), []);
 
   // Input is locked while the tutor drafts the form, while the form awaits
-  // answers, while the preparation pass runs, and whenever the tutor is typing
-  // — until the intake is answered, the form card is the only way forward.
+  // answers, while the learner reviews their commitment contract, while the
+  // preparation pass runs, and whenever the tutor is typing — until the intake
+  // is answered, the form card is the only way forward.
   const busy =
     typing ||
     onboardingStage === "generating" ||
     onboardingStage === "asking" ||
+    onboardingStage === "reviewing" ||
     onboardingStage === "preparing";
 
   // A concept picked from the Curriculum tab carries stable source/node ids.
@@ -205,6 +237,8 @@ export function SessionCard({
     setFormOpen(false);
     setFormDraft({});
     setSubmittedAnswers(null);
+    setContractOutcome(null);
+    setContractSeed(null);
     setPrep({ pct: 0, stage: "" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -267,6 +301,8 @@ export function SessionCard({
     setFormOpen(false);
     setFormDraft({});
     setSubmittedAnswers(null);
+    setContractOutcome(null);
+    setContractSeed(null);
   }
 
   function submit(raw?: string, intent?: Intent) {
@@ -315,7 +351,68 @@ export function SessionCard({
     setSubmittedAnswers({ ...formDraft });
     setFormOpen(false);
     setMessages((m) => [...m, { id: ++idRef.current, role: "user", text: renderOnboardingReply(answers) }]);
-    void runPreparation(pendingOnboarding, answers);
+    submittedIntakeAnswersRef.current = answers;
+    // Pause before preparation: extract learner commitments from the submitted
+    // answers and let the learner review/edit/approve them. The contract is
+    // persisted only on approval (or skipped via the intentional empty path),
+    // then preparation runs. The model proposes; the learner approves;
+    // deterministic code validates, stores, and (later) enforces.
+    setOnboardingStage("reviewing");
+    setContractOutcome(null);
+    setContractSeed(null);
+    void runExtraction(pendingOnboarding, answers);
+  }
+
+  /** Run the contract extraction pass and surface the outcome in the review
+   *  sheet. A `generation`-role structured call proposes commitments; the
+   *  model never assigns contract identity, revision, or activation. Empty
+   *  extraction is a first-class outcome (the learner can approve "no
+   *  commitments"), and a failed call lets them continue without a contract
+   *  rather than fabricating one. */
+  async function runExtraction(_pending: PendingOnboarding, answers: OnboardingAnswers) {
+    try {
+      const outcome = await extractContractFromOnboarding(
+        DEFAULT_LEARNER_ID,
+        answers,
+        sessionId,
+      );
+      setContractSeed(outcome.kind === "proposed" ? outcome.contract : null);
+      setContractOutcome(outcome);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setContractSeed(null);
+      setContractOutcome({ kind: "failed", errors: [`Extraction failed: ${message}`] });
+    }
+  }
+
+  /** The learner has approved (or skipped) their commitments in the review
+   *  sheet. Persist the approved contract (initial revision; empty drafts are
+   *  stored as an active revision with no commitments so the lineage is
+   *  auditable, then superseded on the next edit) and proceed to the real
+   *  preparation pass. `null` means no contract — failed extraction or an
+   *  explicit "continue without": tutor without one, never a fake. */
+  async function handleContractApproved(
+    pending: PendingOnboarding,
+    answers: OnboardingAnswers,
+    approved: TurnContract | null,
+  ) {
+    let contract: TurnContract | null = null;
+    if (approved) {
+      contract = approved;
+      try {
+        await saveContract(approved);
+      } catch (error) {
+        // Persistence is best-effort for the in-memory session contract: a
+        // storage failure must not strand the learner. The contract is still
+        // threaded into the tutor turn from memory; it just won't survive a
+        // reload.
+        console.warn("[onboarding] could not persist learner contract", error);
+        notify("Couldn't save your commitments — Studyus will still honour them this session.");
+      }
+    }
+    setContractOutcome(null);
+    setContractSeed(null);
+    void runPreparation(pending, answers, contract);
   }
 
   /** Ask the tutor agent to prepare this concept's intake via its create_forms
@@ -377,7 +474,11 @@ export function SessionCard({
    * per-page progress. A node that was already transcribed is a cache hit and
    * passes through in a tick.
    */
-  async function runPreparation(pending: PendingOnboarding, answers: OnboardingAnswers) {
+  async function runPreparation(
+    pending: PendingOnboarding,
+    answers: OnboardingAnswers,
+    contract: TurnContract | null = null,
+  ) {
     const { prompt, boundNodes, concept, handoff } = pending;
     setOnboardingStage("preparing");
     setPendingOnboarding(null);
@@ -427,7 +528,7 @@ export function SessionCard({
       setPrep({ pct: 94, stage: "Preparing the chalkboard…" });
       setPrep({ pct: 100, stage: "Ready" });
       setOnboardingStage("done");
-      onPrepare(prompt, boundNodes, answers);
+      onPrepare(prompt, boundNodes, answers, contract, sessionId);
     } catch (error) {
       // Transcription is best-effort: the desktop-only pdfium path is absent in
       // the browser build, and a node may have no readable pages. Enter the
@@ -438,7 +539,7 @@ export function SessionCard({
           ? `Could not read the curriculum section (${error.message}) — starting with what's available.`
           : "Could not read the curriculum section — starting with what's available."
       );
-      onPrepare(prompt, boundNodes, answers);
+      onPrepare(prompt, boundNodes, answers, contract, sessionId);
     } finally {
       setPrep({ pct: 0, stage: "" });
     }
@@ -961,6 +1062,30 @@ export function SessionCard({
           }
           onSubmit={submitIntakeForm}
           onClose={() => setFormOpen(false)}
+        />
+      )}
+
+      {/* The commitment review sheet: after the intake is submitted, a
+          generation-role call proposes typed learner commitments and the
+          learner edits, adds, removes, or approves them. Approving (or the
+          intentional empty path) persists the contract and proceeds to
+          preparation; closing pauses onboarding until they reopen it. */}
+      {onboardingStage === "reviewing" && contractOutcome && pendingOnboarding && (
+        <ContractReview
+          open
+          outcome={contractOutcome}
+          contractSeed={contractSeed ?? undefined}
+          onApproved={(approved) => {
+            const answers = submittedIntakeAnswersRef.current;
+            if (!answers || !pendingOnboarding) return;
+            void handleContractApproved(pendingOnboarding, answers, approved);
+          }}
+          onClose={() => {
+            // Closing the review sheet pauses onboarding but keeps the
+            // outcome live so reopening re-enters the review rather than
+            // re-running extraction. The learner re-opens via the form card.
+            setOnboardingStage("asking");
+          }}
         />
       )}
     </section>

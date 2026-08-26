@@ -42,6 +42,8 @@ export interface AppearancePreferences {
   /** Top-level blocks per page. Remembered even while pagination is off, so
    *  toggling it back on restores the learner's chosen density. */
   boardPageSize: number;
+  /** Board page density: how many visual-weight units per page. */
+  boardDensity?: "compact" | "standard" | "spacious";
 }
 
 export interface NotificationRule {
@@ -411,6 +413,7 @@ export const DEFAULT_PREFERENCES: StudyusPreferences = {
     boardRevertsWithMessage: true,
     boardPagination: false,
     boardPageSize: DEFAULT_BOARD_PAGE_SIZE,
+    boardDensity: "standard",
   },
   notifications: {
     events: {
@@ -727,7 +730,13 @@ export function sanitizePreferences(value: unknown): StudyusPreferences {
       captions: booleanValue(appearance.captions, DEFAULT_PREFERENCES.appearance.captions),
       boardRevertsWithMessage: booleanValue(appearance.boardRevertsWithMessage, DEFAULT_PREFERENCES.appearance.boardRevertsWithMessage),
       boardPagination: booleanValue(appearance.boardPagination, DEFAULT_PREFERENCES.appearance.boardPagination),
-      boardPageSize: numberValue(appearance.boardPageSize, DEFAULT_PREFERENCES.appearance.boardPageSize, MIN_BOARD_PAGE_SIZE, MAX_BOARD_PAGE_SIZE),
+      boardPageSize: (() => {
+        const density = enumValue(appearance.boardDensity, ["compact", "standard", "spacious"], "standard");
+        if (density === "compact") return 6;
+        if (density === "spacious") return 10;
+        return numberValue(appearance.boardPageSize, DEFAULT_PREFERENCES.appearance.boardPageSize, MIN_BOARD_PAGE_SIZE, MAX_BOARD_PAGE_SIZE);
+      })(),
+      boardDensity: enumValue(appearance.boardDensity, ["compact", "standard", "spacious"], "standard"),
     },
     notifications: {
       events: {
@@ -796,7 +805,11 @@ export function applyAppearancePreferences(appearance: AppearancePreferences): v
   root.dataset.motion = appearance.reducedMotion ? "reduced" : "full";
   root.dataset.contrast = appearance.highContrast ? "high" : "normal";
   root.dataset.captions = appearance.captions ? "on" : "off";
+  root.dataset.boardDensity = appearance.boardDensity ?? "standard";
   root.style.setProperty("--app-text-scale", String(appearance.textSize / 100));
+  root.style.setProperty("--board-page-size", String(
+    appearance.boardDensity === "compact" ? 6 : appearance.boardDensity === "spacious" ? 10 : 8
+  ));
   root.style.colorScheme = resolvedTheme;
 }
 

@@ -15,6 +15,11 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import {
+  Check,
+  Plus,
+  X,
+} from "lucide-react";
 import { renderMath } from "../../lib/latex/render";
 import { generateAxisTicks } from "./Visuals";
 import { gradeAnswerableWidget, MAX_RECTS, sanitizeWidgetState } from "../../lib/widgets/validate";
@@ -30,10 +35,12 @@ import {
   type SceneAccent,
   type SceneLineStyle,
   type ScenePointSpec,
+  type AnimationKeyframe,
 } from "../../lib/widgets/types";
 import { assessMastery, MASTERY_DIMENSION_LABEL, MASTERY_THRESHOLD } from "../../lib/mastery";
 import { MASTERY_EVIDENCE_DIMENSIONS } from "../../lib/widgets/types";
 import { ErrorBoundary } from "../ErrorBoundary";
+import { AnimationTimeline } from "./AnimationTimeline";
 
 /** What a widget needs to know about the cluster it belongs to. */
 export interface WidgetClusterInfo {
@@ -729,9 +736,7 @@ function PlanBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & 
   );
 }
 
-/** The floating editor behind "Edit plan": every line is free text, steps add
- *  and remove freely, and a save that empties the route is refused — a plan
- *  with one step is a sentence, with zero it's a shrug. */
+/** The floating editor behind "Edit plan": minimal document editor */
 function PlanEditSheet({
   heading,
   steps,
@@ -776,7 +781,7 @@ function PlanEditSheet({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -785,82 +790,93 @@ function PlanEditSheet({
         role="dialog"
         aria-modal="true"
         aria-label="Edit plan"
-        className="anim-msg relative flex w-[min(380px,94vw)] max-h-[86vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-panel shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
-        style={{ maxHeight: "calc(100dvh - 2rem)" }}
+        className="anim-msg relative flex w-[min(640px,96vw)] flex-col overflow-hidden rounded-lg border border-white/10 bg-[#18181b] shadow-[0_25px_80px_rgba(0,0,0,0.6)]"
+        style={{ maxHeight: "calc(100dvh - 3rem)" }}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-white/8 px-4 py-3">
-          <h2 className="m-0 text-[14px] font-medium text-fg">Edit plan</h2>
+        {/* Header */}
+        <div className="shrink-0 flex items-center justify-between border-b border-white/8 px-6 py-4">
+          <span className="text-[15px] font-medium text-fg">Edit plan</span>
           <button
             onClick={onClose}
-            aria-label="Close editor"
-            className="grid h-6 w-6 place-items-center rounded-md text-dim transition-colors hover:bg-white/[0.07] hover:text-fg"
+            aria-label="Close"
+            className="grid h-8 w-8 place-items-center rounded-md text-dim transition-colors hover:bg-white/[0.08] hover:text-fg"
           >
-            ×
+            <X size={16} />
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+        {/* Content */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 space-y-6">
+          {/* Title field */}
           <div>
-            <label className="mb-1 block font-mono text-[9px] uppercase tracking-[0.14em] text-dim">Concept</label>
             <input
               value={draftHeading}
               onChange={(event) => setDraftHeading(event.target.value)}
-              className="w-full rounded-md border border-white/10 bg-black/25 px-2.5 py-1.5 text-[12.5px] text-fg outline-none focus:border-accent/50"
+              placeholder="Plan title"
+              className="w-full bg-transparent text-[20px] font-semibold text-fg outline-none placeholder:text-faint"
             />
           </div>
 
-          {draftSteps.map((step, index) => (
-            <div key={step.id} className="rounded-lg border border-white/8 bg-black/20 px-3 py-2.5">
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-[9.5px] text-dim">{index + 1}.</span>
-                <input
-                  value={step.label}
-                  placeholder="Phase…"
-                  aria-label={`Step ${index + 1} label`}
-                  onChange={(event) => patchStep(step.id, { label: event.target.value })}
-                  className="min-w-0 flex-1 rounded border border-white/10 bg-black/25 px-2 py-1 text-[12px] text-fg outline-none focus:border-accent/50"
-                />
-                <button
-                  onClick={() => removeStep(step.id)}
-                  aria-label={`Remove step ${index + 1}`}
-                  className="grid h-5 w-5 shrink-0 place-items-center rounded text-dim transition-colors hover:bg-white/[0.07] hover:text-[#ff8b80]"
-                >
-                  ×
-                </button>
+          {/* Steps */}
+          <div className="space-y-4">
+            {draftSteps.map((step, index) => (
+              <div key={step.id} className="group">
+                <div className="flex items-start gap-3">
+                  <span className="mt-2.5 w-5 shrink-0 text-right font-mono text-[12px] text-dim">
+                    {index + 1}.
+                  </span>
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <input
+                      value={step.label}
+                      placeholder="Step title"
+                      aria-label={`Step ${index + 1} title`}
+                      onChange={(event) => patchStep(step.id, { label: event.target.value })}
+                      className="w-full bg-transparent text-[14px] font-medium text-fg outline-none placeholder:text-faint"
+                    />
+                    <textarea
+                      value={step.details}
+                      rows={2}
+                      placeholder="Details (one per line)"
+                      aria-label={`Step ${index + 1} details`}
+                      onChange={(event) => patchStep(step.id, { details: event.target.value })}
+                      className="w-full resize-none bg-transparent text-[13px] leading-relaxed text-muted outline-none placeholder:text-faint/60"
+                    />
+                  </div>
+                  <button
+                    onClick={() => removeStep(step.id)}
+                    aria-label={`Remove step ${index + 1}`}
+                    className="mt-1.5 grid h-6 w-6 shrink-0 place-items-center rounded text-dim opacity-40 transition-all hover:text-rose-400 group-hover:opacity-100"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
               </div>
-              <textarea
-                value={step.details}
-                rows={2}
-                placeholder="What this phase covers — one line per item (optional)"
-                aria-label={`Step ${index + 1} details`}
-                onChange={(event) => patchStep(step.id, { details: event.target.value })}
-                className="mt-1.5 w-full resize-y rounded border border-white/10 bg-black/25 px-2 py-1.5 text-[11px] leading-relaxed text-fg outline-none focus:border-accent/50"
-              />
-            </div>
-          ))}
+            ))}
 
-          <button
-            onClick={addStep}
-            className="w-full rounded-md border border-dashed border-white/15 py-1.5 text-[11.5px] text-mut transition-colors hover:border-accent/40 hover:text-fg"
-          >
-            + Add a step
-          </button>
-        </div>
-
-        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-white/8 px-4 py-3">
-          <span className="text-[10px] text-dim">{savable ? "" : "Keep a heading and at least two steps."}</span>
-          <div className="flex items-center gap-2">
-            <button onClick={onClose} className="rounded-md px-2.5 py-1.5 text-[11.5px] text-dim transition-colors hover:text-fg">
-              Cancel
-            </button>
             <button
-              onClick={() => savable && onSave(normalized)}
-              disabled={!savable}
-              className="rounded-md bg-accent px-3 py-1.5 text-[11.5px] font-medium text-white transition-colors hover:bg-accent-deep disabled:opacity-40"
+              onClick={addStep}
+              className="ml-8 flex items-center gap-2 text-[13px] text-dim transition-colors hover:text-fg"
             >
-              Save plan
+              + Add step
             </button>
           </div>
+        </div>
+
+        {/* Footer */}
+        <div className="shrink-0 flex items-center justify-end gap-3 border-t border-white/8 px-6 py-4">
+          <button
+            onClick={onClose}
+            className="rounded-md px-4 py-2 text-[13px] text-mut transition-colors hover:bg-white/[0.06] hover:text-fg"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => savable && onSave(normalized)}
+            disabled={!savable}
+            className="rounded-md bg-white px-4 py-2 text-[13px] font-medium text-black transition-colors hover:bg-white/90 disabled:opacity-40"
+          >
+            Save
+          </button>
         </div>
       </div>
     </div>,
@@ -2001,6 +2017,23 @@ function AnimationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPro
 
         <span className="font-mono text-[9px] opacity-45">{frameIndex + 1}/{frames.length}</span>
       </div>
+
+      {/* Timeline keyframe control when enabled */}
+      {intent.showTimeline && intent.frames.length > 1 ? (
+        <AnimationTimeline
+          keyframes={intent.keyframes ?? intent.frames.map((f, i) => ({
+            id: f.id,
+            label: f.caption || `Frame ${i + 1}`,
+            duration: Math.max(500, (intent.durationMs ?? 3000) / intent.frames.length),
+          }))}
+          autoPlay={false}
+          loop={intent.loop}
+          playbackSpeed={intent.playbackSpeed}
+          onKeyframeChange={(index) => {
+            seek(index / frames.length);
+          }}
+        />
+      ) : null}
 
       {/* Caption and its equation read as one beat. The padding guards the
           display-math descenders so the linked-representation chips can no

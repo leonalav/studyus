@@ -86,63 +86,56 @@ describe("IntakeFormSheet — the floating portrait form", () => {
     expect(html).toContain('aria-modal="true"');
     // Width is parent-bounded (backdrop p-4), never viewport-relative 94vw.
     expect(html).toContain("w-full");
-    expect(html).toContain("max-w-[348px]");
+    expect(html).toContain("max-w-[640px]");
     expect(html).not.toContain("94vw");
-    expect(html).not.toContain("w-[min(348px");
-    // Single viewport cap + 3-row grid: header/footer intrinsic, body scrolls.
-    expect(html).toContain("max-h-[calc(100dvh-2rem)]");
-    expect(html).toContain("grid-rows-[auto_minmax(0,1fr)_auto]");
-    expect(html).toContain("min-h-0 space-y-3 overflow-y-auto");
-    expect(html).toContain("items-center justify-between gap-2 border-t");
+    expect(html).not.toContain("w-[min(");
+    // Single viewport cap + flex column: header/footer shrink-0, body scrolls.
+    expect(html).toContain("max-h-[calc(100dvh-3rem)]");
+    expect(html).toContain("flex-col");
+    expect(html).toContain("min-h-0 flex-1 space-y-4 overflow-y-auto");
+    expect(html).toContain("shrink-0 flex items-center justify-between gap-3 border-t");
   });
 
   it("keeps header and footer pinned with one height cap (no mid-sheet footer / overlap)", () => {
     const html = sheet();
-    // Dialog root: one max-height, h-fit (no forced full-height dead zone),
-    // min-h-0 (can shrink as a centered flex child), grid rows pin chrome.
-    // Assert each layout invariant on the dialog root tag (order-independent).
+    // Dialog root: one max-height, min-h-0 can shrink as a centered flex child.
     const dialogOpen = html.indexOf('role="dialog"');
     const dialogTag = html.slice(dialogOpen, html.indexOf(">", dialogOpen) + 1);
-    expect(dialogTag).toContain("h-fit");
-    expect(dialogTag).toContain("max-h-[calc(100dvh-2rem)]");
-    expect(dialogTag).toContain("min-h-0");
-    expect(dialogTag).toContain("grid-rows-[auto_minmax(0,1fr)_auto]");
+    expect(dialogTag).toContain("max-h-[calc(100dvh-3rem)]");
     expect(dialogTag).toContain("overflow-hidden");
-    expect(dialogTag).toContain("grid ");
+    expect(dialogTag).toContain("flex ");
+    expect(dialogTag).toContain("flex-col");
     expect(dialogTag).toContain("w-full");
-    expect(dialogTag).toContain("max-w-[348px]");
-    expect(dialogTag).toContain("min-w-0");
+    expect(dialogTag).toContain("max-w-[640px]");
     // Competing dual caps were the old bug surface — neither half may return.
     expect(html).not.toContain("max-h-[86vh]");
     expect(html).not.toContain("calc(100dvh - 2rem)");
     expect(html).not.toMatch(/style="[^"]*maxHeight/);
     expect(html).not.toMatch(/style="[^"]*max-height/);
-    expect(html).not.toContain("flex-col");
     // Body is the only scrollport; footer stays in normal flow after questions.
-    expect(html).toContain("min-h-0 space-y-3 overflow-y-auto");
-    expect(html).toContain("items-center justify-between gap-2 border-t");
+    expect(html).toContain("min-h-0 flex-1 space-y-4 overflow-y-auto");
+    expect(html).toContain("shrink-0 flex items-center justify-between gap-3 border-t");
     expect(html).not.toMatch(/border-t border-white\/8[^"]*\b(fixed|absolute|sticky)\b/);
-    const footerIdx = html.indexOf("items-center justify-between gap-2 border-t");
+    const footerIdx = html.indexOf("shrink-0 flex items-center justify-between gap-3 border-t");
     const lastQuestionIdx = html.lastIndexOf("Anything else the tutor should know?");
     expect(footerIdx).toBeGreaterThan(lastQuestionIdx);
   });
 
-  it("read-only review keeps the same grid-pinned chrome (footer after body)", () => {
+  it("read-only review keeps the same flex-pinned chrome (footer after body)", () => {
     const html = sheet({ readOnly: true, draft: { q1: "Fairly ok" } });
     const dialogOpen = html.indexOf('role="dialog"');
     const dialogTag = html.slice(dialogOpen, html.indexOf(">", dialogOpen) + 1);
-    expect(dialogTag).toContain("grid-rows-[auto_minmax(0,1fr)_auto]");
-    expect(dialogTag).toContain("h-fit");
-    expect(dialogTag).toContain("max-h-[calc(100dvh-2rem)]");
-    const footerIdx = html.indexOf("items-center justify-between gap-2 border-t");
-    const bodyIdx = html.indexOf("min-h-0 space-y-3 overflow-y-auto");
+    expect(dialogTag).toContain("flex-col");
+    expect(dialogTag).toContain("max-h-[calc(100dvh-3rem)]");
+    const footerIdx = html.indexOf("shrink-0 flex items-center justify-between gap-3 border-t");
+    const bodyIdx = html.indexOf("min-h-0 flex-1 space-y-4 overflow-y-auto");
     expect(bodyIdx).toBeGreaterThan(-1);
     expect(footerIdx).toBeGreaterThan(bodyIdx);
     expect(html).toContain("Close");
     expect(html).not.toContain("Send answers");
   });
 
-  it("short forms still use the single-cap grid contract (no mid-sheet footer class pattern)", () => {
+  it("short forms still use the single-cap flex contract (no mid-sheet footer class pattern)", () => {
     const short: OnboardingForm = {
       title: "One question",
       invitation: "Just this.",
@@ -151,10 +144,9 @@ describe("IntakeFormSheet — the floating portrait form", () => {
     const html = sheet({ form: short });
     const dialogOpen = html.indexOf('role="dialog"');
     const dialogTag = html.slice(dialogOpen, html.indexOf(">", dialogOpen) + 1);
-    expect(dialogTag).toContain("h-fit");
-    expect(dialogTag).toContain("grid-rows-[auto_minmax(0,1fr)_auto]");
+    expect(dialogTag).toContain("flex-col");
     expect(html).toContain("What is your goal?");
-    const footerIdx = html.indexOf("items-center justify-between gap-2 border-t");
+    const footerIdx = html.indexOf("shrink-0 flex items-center justify-between gap-3 border-t");
     const qIdx = html.indexOf("What is your goal?");
     expect(footerIdx).toBeGreaterThan(qIdx);
   });

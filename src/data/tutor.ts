@@ -155,15 +155,47 @@ export function renderOnboardingReply(answers: OnboardingAnswers): string {
  * agent's system prompt for the whole session, so the agent tutors to the
  * learner's stated situation across every turn rather than forgetting it after
  * the opener.
+ *
+ * Expanded to include: learning goal, misconceptions, time budget.
  */
 export function buildOnboardingReminder(answers: OnboardingAnswers): string {
+  // Parse answers into named fields for structured prompting
+  const byQuestion = new Map(answers.answers.map((a) => [a.question.toLowerCase().slice(0, 40), a.answer]));
+
   const lines = answers.answers.map(
     (a) => `- ${a.question}\n  → ${a.answer || "not given"}`
   );
-  return [
+
+  // Extract the goal if present (heuristic: longest free-text answer)
+  const goalAnswer = answers.answers.find((a) =>
+    a.answer.length > 20 && a.question.toLowerCase().includes("end") || a.question.toLowerCase().includes("able")
+  );
+
+  // Extract misconceptions if present
+  const misconceptionAnswer = answers.answers.find((a) =>
+    a.question.toLowerCase().includes("confus") || a.question.toLowerCase().includes("mistake")
+  );
+
+  const sections: string[] = [
     `LEARNER ONBOARDING for "${answers.concept}" (consistent reminder for this session):`,
     ...lines,
+  ];
+
+  if (goalAnswer?.answer) {
+    sections.push("", `SESSION GOAL: "${goalAnswer.answer}" — teach toward this observable outcome.`);
+  }
+
+  if (misconceptionAnswer?.answer) {
+    sections.push("", `KNOWN MISCONCEPTIONS to address: "${misconceptionAnswer.answer}"`);
+  }
+
+  sections.push(
+    "",
     "Tutor to these answers for the duration of the session.",
     "If these answers say the learner is new to the concept — or they were all skipped — slow right down: introduce one idea at a time, define every technical term in plain language before you use it (never open a sentence on jargon the learner has not defined first), and check understanding before stacking vocabulary on vocabulary.",
-  ].join("\n");
+    "If a learning goal is stated, work backward from it: every teaching move must serve that outcome.",
+    "If misconceptions are stated, address them proactively — do not wait for them to surface on a wrong answer."
+  );
+
+  return sections.join("\n");
 }

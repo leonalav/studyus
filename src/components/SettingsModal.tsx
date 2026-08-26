@@ -542,6 +542,17 @@ function Appearance({ value, onChange }: { value: AppearancePreferences; onChang
           options={[{ id: "comfortable", label: "Comfortable" }, { id: "compact", label: "Compact" }]}
         />
       </Row>
+      <Row label="Board pages" hint="Blocks per page">
+        <Segment<"compact" | "standard" | "spacious">
+          value={value.boardDensity ?? "standard"}
+          onChange={(d) => patch("boardDensity", d)}
+          options={[
+            { id: "compact", label: "Compact" },
+            { id: "standard", label: "Standard" },
+            { id: "spacious", label: "Spacious" },
+          ]}
+        />
+      </Row>
       <Row label={`Text size · ${value.textSize}%`}>
         <div className="w-[180px]"><Slider value={value.textSize} onChange={(size) => patch("textSize", size)} min={80} max={140} /></div>
       </Row>

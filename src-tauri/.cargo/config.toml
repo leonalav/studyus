@@ -1,8 +1,7 @@
 # Cargo keeps its output in the default `src-tauri/target/` on every platform.
-# Windows dev machines that need to dodge MAX_PATH limits set
-# `CARGO_TARGET_DIR=C:/rust_targets` on the `pnpm tauri*` scripts — see
-# scripts/tauri.mjs. An environment variable always wins over this file, so the
-# two mechanisms never fight. (This file only matters for direct
-# `cd src-tauri && cargo …` runs.)
+# Windows dev machines redirect to `A:/rust_targets` via `CARGO_TARGET_DIR` in
+# scripts/tauri.mjs (C: has only ~1 GB free, which trips LNK1180). An
+# environment variable always wins over this file, so the two mechanisms never
+# fight. (This file only matters for direct `cd src-tauri && cargo …` runs.)
 [build]
 target-dir = "target"

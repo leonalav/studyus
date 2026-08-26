@@ -9,6 +9,7 @@
 
 mod pdf_render;
 mod storage;
+mod granite_docling;
 
 use std::path::PathBuf;
 
@@ -184,14 +185,114 @@ struct ChatCompletionResponse {
     body: String,
 }
 
+/// Inference over a rendered PNG page using a Hugging Face model via the
+/// Inference API (text-generation or vision tasks). The HF_TOKEN environment
+/// variable is resolved on the Rust side so it never appears in the frontend JS
+/// bundle. Falls back gracefully when not running under Tauri.
+#[tauri::command]
+async fn hf_inference(
+    model: String,
+    inputs: String,
+    parameters: String,
+    options: String,
+) -> Result<String, String> {
+    let hf_token = std::env::var("HF_TOKEN")
+        .map_err(|_| "HF_TOKEN is not set in the environment".to_string())?;
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("could not build HTTP client: {e}"))?;
+
+    let url = format!("https://api-inference.huggingface.co/models/{model}");
+
+    let req = client.post(&url).header("Authorization", format!("Bearer {}", hf_token));
+
+    let body = serde_json::json!({
+        "inputs": inputs,
+        "parameters": serde_json::from_str(&parameters).unwrap_or(serde_json::Value::Null),
+        "options": serde_json::from_str(&options).unwrap_or(serde_json::Value::Null),
+    });
+
+    let res = req
+        .body(serde_json::to_string(&body).map_err(|e| e.to_string())?)
+        .send()
+        .map_err(|e| format!("transport error reaching {url}: {e}"))?;
+
+    let status = res.status().as_u16();
+    let text = res.text().unwrap_or_default();
+
+    if status == 422 {
+        return Err(format!("HF inference validation error (422): {text}"));
+    }
+    if status == 503 {
+        return Err(format!(
+            "HF model is loading (503). Try again in 20–30s: {text}"
+        ));
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!("HF inference error ({status}): {text}"));
+    }
+
+    // Hugging Face returns an array of results for most tasks
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("could not parse HF response: {e}"))?;
+
+    let output = if let Some(arr) = parsed.as_array() {
+        if let Some(first) = arr.first() {
+            if let Some(generations) = first.get("generated_text") {
+                generations.as_str().unwrap_or("").to_string()
+            } else if let Some(s) = first.as_str() {
+                s.to_string()
+            } else {
+                serde_json::to_string_pretty(&parsed).unwrap_or(text.clone())
+            }
+        } else {
+            serde_json::to_string_pretty(&parsed).unwrap_or(text.clone())
+        }
+    } else {
+        serde_json::to_string_pretty(&parsed).unwrap_or(text.clone())
+    };
+
+    Ok(output)
+}
+
+/// Extract content from a base64-encoded PNG page using the local Granite Docling
+/// ONNX pipeline running on CPU via ONNX Runtime.
+///
+/// Downloads the ONNX model files from HuggingFace on first invocation and caches
+/// them in `<app_data>/granite_docling/onnx/`. Subsequent calls reuse the cached
+/// sessions without re-downloading.
+///
+/// Replaces the HF Inference API call; the frontend calls this instead of
+/// `hf_inference("ds4sd/granite-docling-258M", ...)`.
+#[tauri::command]
+async fn docling_extract_image(
+    app: tauri::AppHandle,
+    base64_png: String,
+) -> Result<granite_docling::ExtractionResult, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+
+    granite_docling::docling_extract(&app_data, &base64_png)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load HF_TOKEN from .env so it is available to hf_inference without
+    // requiring the variable to be set at OS level. In production the same
+    // env var can be set by the installer / launch script instead.
+    let _ = dotenvy::dotenv();
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             render_page_range,
             extract_text_range,
             save_source_pdf,
-            chat_completion
+            chat_completion,
+            hf_inference,
+            docling_extract_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Studyus");

@@ -81,6 +81,8 @@ export {
 } from "./lib/tauri";
 
 export type { AttemptForTakingDTO, AttemptResultDTO, CurriculumNodeRecord, LearnerModelEntry, ModelEndpointConfig, AgentRole, GenerationRequest, GenerationResult, RubricEvaluation, RubricEvaluationRequest, TutorTurn, TutorTurnRequest, SessionMessage, GeneratedOnboarding };
+export type { Commitment, TurnContract } from "./lib/contracts/types";
+export { describeCommitment, commitmentKindLabel } from "./lib/contracts/format";
 
 export async function getAttemptForTaking(attemptId: string): Promise<AttemptForTakingDTO | null> {
   return backendGetAttemptForTaking(attemptId);

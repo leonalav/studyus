@@ -43,6 +43,13 @@ import {
   type StructuredCallResult,
   type ValidationResult,
 } from "./agentRuntime";
+import {
+  contractRepairErrors,
+  detectContractViolations,
+  enforceLearnerContract,
+} from "./contracts/enforce";
+import { buildContractReminder } from "./contracts/format";
+import type { TurnContract } from "./contracts/types";
 import { TUTOR_AGENT_PROMPT_V1 } from "./llm";
 import {
   getActiveTutorContextLearnerSummary,
@@ -79,7 +86,8 @@ import {
 } from "./learning/session";
 import { groundMasteryCards } from "./learning/masteryCard";
 import { recordTutorObservation } from "./learning/bridge";
-import { getSkillEvidence, upsertEntrySignal, upsertHypothesis, DEFAULT_LEARNER_ID } from "./learning/store";
+import { getSkillEvidence, upsertEntrySignal, upsertHypothesis, DEFAULT_LEARNER_ID, getActivePlanForSkill } from "./learning/store";
+import type { LearningPlan } from "./learning/plan";
 import { isSelfReportedFamiliarity } from "./learning/types";
 import {
   HYPOTHESIS_KINDS,
@@ -109,11 +117,14 @@ export const MAX_THREAD_INITIAL_BLOCKS = 6;
  */
 export const EXPOSITION_TURN_BUDGET = 4;
 /** Bounds on the generated onboarding interview, so a model cannot return a
- *  one-question stub or a 40-question intake form. */
-// The intake is intentionally a fixed five-question reception: enough signal to
-// calibrate the tutor without turning the first interaction into a survey.
-export const MIN_ONBOARDING_QUESTIONS = 5;
-export const MAX_ONBOARDING_QUESTIONS = 5;
+ *  one-question stub or an excessively long intake form. */
+/**
+ * Expanded intake for maximum ROI: goal-setting, misconception probing,
+ * time commitment, and learning-style questions added to the core 5.
+ * The first session shapes all subsequent sessions, so we invest here.
+ */
+export const MIN_ONBOARDING_QUESTIONS = 8;
+export const MAX_ONBOARDING_QUESTIONS = 10;
 
 /* ─────────────────────────────────────────────────────────────
    TURN TYPES
@@ -177,6 +188,13 @@ export type BoardOp =
       title: string;
       reason: string;
       initialBlocks: BoardBlockSpec[];
+    }
+  | {
+      op: "spawn_prerequisite_thread";
+      prerequisiteSkillId: string;
+      prerequisiteLabel: string;
+      teachingBlocks: BoardBlockSpec[];
+      resumeAfterComplete: boolean;
     };
 
 /**
@@ -243,12 +261,21 @@ export interface TutorEvidenceCard {
   excerpt?: string;
 }
 
+export interface PageExtraction {
+  page: number;
+  markdown: string;
+  images: { id: string; caption: string }[];
+  tables: { id: string; markdown: string }[];
+}
+
 export interface TutorCurriculumScopeItem {
   nodeId: string;
   section: string;
   startPage: number;
   endPage: number;
   evidencePages: number[];
+  /** Full-page extractions from Granite Docling OCR, keyed by page number. */
+  pageExtractions?: PageExtraction[];
 }
 
 export interface TutorGrounding {
@@ -313,6 +340,16 @@ export async function buildTutorGrounding(boundNodes: string[]): Promise<TutorGr
     startPage: node.startPage,
     endPage: node.endPage,
     evidencePages: [...(evidencePagesByNode.get(node.id) ?? [])].sort((a, b) => a - b),
+    // Aggregate Granite Docling full-page extractions stored on chunks
+    pageExtractions: chunks
+      .filter((c) => c.nodeId === node.id && c.doclingMarkdown)
+      .sort((a, b) => a.page - b.page)
+      .map((c) => ({
+        page: c.page,
+        markdown: c.doclingMarkdown ?? "",
+        images: c.extractedImages ? JSON.parse(c.extractedImages) : [],
+        tables: c.extractedTables ? JSON.parse(c.extractedTables) : [],
+      })),
   }));
 
   const cards: TutorEvidenceCard[] = [];
@@ -1413,6 +1450,21 @@ export function enforceFillerGuard(
   };
 }
 
+/**
+ * Enforce the widget budget: keep only the first place_widget op per turn.
+ *
+ * The board is a shared workspace, not a widget dashboard. More than one
+ * interactive study widget per teaching beat overwhelms the learner and
+ * fragments the turn into a scatter of half-answered prompts.
+ */
+export function enforceWidgetBudget(turn: TutorTurn): TutorTurn {
+  const widgetOps = turn.boardOps.filter((op) => op.op === "place_widget");
+  if (widgetOps.length <= 1) return turn;
+  const firstWidget = widgetOps[0];
+  const otherOps = turn.boardOps.filter((op) => op.op !== "place_widget");
+  return { ...turn, boardOps: [...otherOps, firstWidget] };
+}
+
 export function enforceTutorToolPolicy(
   turn: TutorTurn,
   tools: TutorToolPermissions,
@@ -1999,6 +2051,7 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
     "revise_text",
     "redraw_block",
     "spawn_thread",
+    "spawn_prerequisite_thread",
   ], `${path}.op`, errors);
   if (!op) return null;
 
@@ -2132,6 +2185,27 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
       if (errors.some((error) => error.startsWith(path))) return null;
       return { op, title, reason, initialBlocks };
     }
+    case "spawn_prerequisite_thread": {
+      const prerequisiteSkillId = textOf("prerequisiteSkillId");
+      const prerequisiteLabel = textOf("prerequisiteLabel");
+      const rawBlocks = asArray(rec.teaching_blocks ?? rec.teachingBlocks, `${path}.teaching_blocks`, errors);
+      const resumeAfterComplete = rec.resumeAfterComplete === true;
+      if (!prerequisiteSkillId || !prerequisiteLabel) {
+        errors.push(`${path} requires prerequisiteSkillId and prerequisiteLabel`);
+        return null;
+      }
+      if (!rawBlocks || rawBlocks.length === 0) {
+        errors.push(`${path} requires teaching_blocks with at least one block`);
+        return null;
+      }
+      const teachingBlocks: BoardBlockSpec[] = [];
+      rawBlocks.forEach((entry, index) => {
+        const block = validateBoardBlockSpec(entry, `${path}.teaching_blocks[${index}]`, errors);
+        if (block) teachingBlocks.push(block);
+      });
+      if (errors.some((error) => error.startsWith(path))) return null;
+      return { op, prerequisiteSkillId, prerequisiteLabel, teachingBlocks, resumeAfterComplete };
+    }
   }
 }
 
@@ -2147,7 +2221,8 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
 export function validateTutorPayload(
   payload: unknown,
   allowedEvidence: ReadonlySet<string>,
-  maxBoardOps: number = MAX_BOARD_OPS_PER_TURN
+  maxBoardOps: number = MAX_BOARD_OPS_PER_TURN,
+  turnContract?: TurnContract
 ): ValidationResult<TutorTurn> {
   const errors: string[] = [];
   const root = asRecord(payload, "response", errors);
@@ -2169,6 +2244,14 @@ export function validateTutorPayload(
   const spawnedThreads = boardOps.filter((operation) => operation.op === "spawn_thread").length;
   if (spawnedThreads > 1) {
     errors.push(`board_ops may contain at most one spawn_thread operation per turn (got ${spawnedThreads})`);
+  }
+  const spawnedPrereqThreads = boardOps.filter((operation) => operation.op === "spawn_prerequisite_thread").length;
+  if (spawnedPrereqThreads > 1) {
+    errors.push(`board_ops may contain at most one spawn_prerequisite_thread operation per turn (got ${spawnedPrereqThreads})`);
+  }
+  // Combined limit: can have one of each type per turn
+  if (spawnedThreads + spawnedPrereqThreads > 1) {
+    errors.push(`board_ops may contain at most one thread-spawning operation per turn (got ${spawnedThreads + spawnedPrereqThreads})`);
   }
 
   let diagnosis: TutorDiagnosis | undefined;
@@ -2246,18 +2329,27 @@ export function validateTutorPayload(
   }
 
   if (errors.length) return { ok: false, errors };
-  return {
-    ok: true,
-    value: {
-      speech,
-      boardOps,
-      diagnosis,
-      evidenceRefs,
-      requestedLevel,
-      stage,
-      stageAdvance,
-    },
+
+  const turn: TutorTurn = {
+    speech,
+    boardOps,
+    diagnosis,
+    evidenceRefs,
+    requestedLevel,
+    stage,
+    stageAdvance,
   };
+
+  // Learner commitments are checked only once the turn is structurally sound, so
+  // a malformed payload never produces confusing contract errors. Hard
+  // violations join the ordinary error list and reach the model through the
+  // existing bounded repair loop.
+  if (turnContract) {
+    const contractErrors = contractRepairErrors(detectContractViolations(turn, turnContract));
+    if (contractErrors.length) return { ok: false, errors: contractErrors };
+  }
+
+  return { ok: true, value: turn };
 }
 
 function asStringList(value: unknown, path: string, errors: string[]): string[] | null {
@@ -2377,6 +2469,7 @@ export function recoverTutorPayload(
 
   const boardOps: BoardOp[] = [];
   let recoveredThread = false;
+  let recoveredPrereqThread = false;
   const rawOps = root?.board_ops ?? root?.boardOps ?? root?.operations;
   if (Array.isArray(rawOps)) {
     for (const entry of rawOps.slice(0, maxBoardOps)) {
@@ -2393,6 +2486,10 @@ export function recoverTutorPayload(
         if (operation.op === "spawn_thread") {
           if (recoveredThread) continue;
           recoveredThread = true;
+        }
+        if (operation.op === "spawn_prerequisite_thread") {
+          if (recoveredPrereqThread) continue;
+          recoveredPrereqThread = true;
         }
         boardOps.push(operation);
       }
@@ -2899,6 +2996,34 @@ export function buildTutorUserPrompt(params: {
 
   parts.push(`LEARNER MODEL SUMMARY:\n${params.learnerSummary}`);
 
+  // Global PREREQUISITE REPAIR — always active
+  parts.push(
+    `PREREQUISITE REPAIR — If the learner shows signs of missing prerequisites (3+ consecutive failures, inability to start a problem, confusion about fundamental concepts):\n` +
+    `1. Use spawn_prerequisite_thread to create a prerequisite thread with title: "Review: [prerequisite concept]"\n` +
+    `2. In the thread reason, explain why this prerequisite is needed for the current topic\n` +
+    `3. The thread should teach the prerequisite concept using concept_card, example, and question widgets\n` +
+    `4. Set resumeAfterComplete: true so the learner returns to the main topic after completing the review\n` +
+    `5. NEVER tell the learner they don't know something; spawn the thread to teach it\n` +
+    `6. After the thread completes, resume the original topic with the prerequisite now covered`
+  );
+
+  // Include active learning plan context if available
+  if (params.activePlan) {
+    const plan = params.activePlan;
+    const completedCount = plan.objectives.filter((o) => o.status === "completed").length;
+    const currentObjective = plan.objectives[plan.currentObjectiveIndex];
+
+    parts.push(`LEARNING PLAN — You are following this personalized plan:
+- Plan ID: ${plan.id}
+- Status: ${plan.status}
+- Current objective: ${currentObjective?.description ?? "none"}
+- ${completedCount}/${plan.objectives.length} objectives complete
+- Follow the plan. Complete the current objective before advancing.
+- If the learner struggles, you may revise the plan using spawn_thread for prerequisites.
+- When an objective is met, advance to the next one in sequence.
+${currentObjective ? `- Current objective pages: ${currentObjective.targetPageRange[0]}-${currentObjective.targetPageRange[1]}` : ""}`);
+  }
+
   const curriculumScope = params.curriculumScope ?? [];
   if (curriculumScope.length > 0) {
     parts.push(
@@ -2922,6 +3047,25 @@ export function buildTutorUserPrompt(params: {
       `- Advance to the next selected section only after the learner meets a concrete mastery criterion: they can accurately explain the key idea or independently complete a representative check.\n` +
       `- Keep core instruction inside the selected range and order. If outside knowledge would genuinely help, label it explicitly as OPTIONAL ENRICHMENT, keep it brief, and never let it displace or contradict the curriculum.\n` +
       `- If evidence is partial or absent, say exactly what is unavailable. Do not pretend missing pages or facts were present; limit claims to the supplied metadata/evidence.`
+    );
+
+    // PREREQUISITE REPAIR — inject after curriculum scope, before cards
+    parts.push(
+      `PREREQUISITE REPAIR — If the learner shows signs of missing prerequisites (3+ consecutive failures, inability to start, confusion about fundamental concepts):\n` +
+      `1. Use spawn_prerequisite_thread to create a prerequisite thread with title: "Review: [prerequisite concept]"\n` +
+      `2. In the thread reason, explain why this prerequisite is needed\n` +
+      `3. The thread should teach the prerequisite concept using concept_card, example, and question widgets\n` +
+      `4. After the thread completes, return to the current topic with the prerequisite filled\n` +
+      `5. NEVER tell the learner they don't know something; spawn the thread to teach it`
+    );
+  }
+
+  // Page extractions from Granite Docling OCR
+  const allPageExtractions = curriculumScope.flatMap((item) => item.pageExtractions ?? []);
+  if (allPageExtractions.length > 0) {
+    parts.push(
+      `CURRICULUM PAGE EXTRACTIONS — Full page content from Granite Docling OCR:\n` +
+      allPageExtractions.map((p) => `=== Page ${p.page} ===\n${p.markdown}`).join('\n\n')
     );
   }
 
@@ -2984,7 +3128,7 @@ export function buildTutorUserPrompt(params: {
     `Return JSON only, in this exact shape:\n` +
       `{\n` +
       `  "speech": "<your reply to the learner — one or two sentences, direct and helpful. When the learner explicitly asked for a visualization, confirm what you drew instead of asking a question>",\n` +
-      `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "place_widget" | "update_widget" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text" | "redraw_block" | "spawn_thread", ...fields }, ... ],\n` +
+      `  "board_ops": [ { "op": "write_title" | "write_text" | "write_bullets" | "write_latex" | "visualize" | "place_widget" | "update_widget" | "write_callout" | "replace_block" | "insert_after" | "delete_block" | "update_visualization" | "revise_text" | "redraw_block" | "spawn_thread" | "spawn_prerequisite_thread", ...fields }, ... ],\n` +
       `  "stage": "encounter"|"understand"|"construct"|"apply"|"transfer"|"master" /* the mastery stage you are teaching in this turn */,\n` +
       `  "stage_advance": { "ready": boolean, "evidence": "<what the learner did that satisfies this stage's exit condition>" } /* optional; ready:true REQUIRES evidence */,\n` +
       `  "diagnosis": { "misconceptions": [string], "weak_criteria": [string], "hint_dependence": "none"|"low"|"medium"|"high", "calibration": "under"|"over"|"accurate", "hypotheses": [ { "kind": ${HYPOTHESIS_KINDS.map((kind) => `"${kind}"`).join("|")}, "statement": "<the claim, stated so it could be wrong>", "next_best_test": "<the specific observation that would confirm or refute it>" } ] } /* optional; at most ${MAX_TUTOR_HYPOTHESES_PER_TURN} hypotheses */,\n` +
@@ -2996,6 +3140,7 @@ export function buildTutorUserPrompt(params: {
       `- write_bullets: { "op", "items": string[] }\n` +
       `- write_latex: { "op", "tex": string, "caption"?: string }\n` +
       `- spawn_thread: { "op", "title": string, "reason": string, "initial_blocks": BoardBlockSpec[] } — creates a logged child board in Threads without leaving the current board. Use it only when a substantial, separable investigation would clutter or derail the current explanation; never spawn a thread for a routine answer. Create at most one per turn, keep title/reason learner-facing, and include at most ${MAX_THREAD_INITIAL_BLOCKS} useful starter blocks.\n` +
+      `- spawn_prerequisite_thread: { "op", "prerequisiteSkillId": string, "prerequisiteLabel": string, "teaching_blocks": BoardBlockSpec[], "resumeAfterComplete": boolean } — creates a prerequisite review thread when the learner shows missing prerequisites. Title is auto-generated as "Review: [prerequisiteLabel]". Set resumeAfterComplete to true to return to the parent topic after completion. Use concept_card, example, and question widgets to teach the prerequisite. Never tell the learner they don't know something; spawn the thread to teach it.\n` +
       `- place_widget: { "op", "intent": WidgetIntent } — appends a new study widget. This is how you teach: every widget below is a specific pedagogical move with its own required fields.\n` +
       `- update_widget: { "op", targetAnchor?|targetIndex?|targetMatchText?, "intent": WidgetIntent } — reconfigures an existing widget in place, keeping the learner's answers and interaction state. Use it to mark the next roadmap step current (same turn that opens that step's work), add a deeper hint level, or reveal a mistake_check correction after the learner has responded — never append a second copy of a widget you already placed. When CURRENT BOARD BLOCKS already lists a roadmap, update THAT anchor and keep its step ids; a second place_widget roadmap is a protocol violation and will be rewritten or dropped.\n` +
       `- redraw_block: { "op", targetAnchor?|targetIndex?|targetMatchText? } — force a block to re-render from scratch, keeping its content exactly as-is. Use this ONLY when the learner reports they cannot see something you placed ("the widget is blank", "the diagram didn't load", "I can't see the equation"). It repairs a block that failed to draw; it does not change what the block says. Acknowledge it plainly ("Redrawing that now") and, if it still does not appear after one redraw, place the content again in a different form rather than redrawing a second time.\n` +
@@ -3234,6 +3379,12 @@ export interface TutorTurnRequest {
   /** Learner identity for the ledger. Single-user today; explicit so the
    *  evidence store is not retrofitted later. */
   learnerId?: string;
+  /** The learner's active Turn Contract revision. Binding over learner-owned
+   *  choices (scope, representation, notation, examples) and carrying no
+   *  authority over engine-owned support, evidence, or mastery decisions. */
+  turnContract?: TurnContract;
+  /** Optional active learning plan ID to include in tutor context */
+  activePlanId?: string;
 }
 
 /**
@@ -3451,6 +3602,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   const systemPrompt = [
     TUTOR_AGENT_PROMPT_V1,
     req.onboarding ? buildOnboardingReminder(req.onboarding) : "",
+    req.turnContract ? buildContractReminder(req.turnContract) : "",
     buildTutorPreferenceReminder(studio),
     studio.privacy.includeProfileIdentity
       ? `The learner has chosen to share this profile name: ${allPreferences.profile.fullName}.`
@@ -3504,6 +3656,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     board: req.board,
     learnerMessage: req.learnerMessage,
     attachmentsNote: `${attachmentNote}${capabilityNote}${mathToolContext ? `\n\n${mathToolContext}` : ""}`,
+    activePlan: req.activePlanId ? getActivePlanForSkill(req.activePlanId) : undefined,
   });
   const attachmentParts = [...fileParts, ...imageParts];
   const userContent: string | ContentPart[] = attachmentParts.length > 0
@@ -3521,7 +3674,8 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     maxTokens: studio.advanced.maxResponseTokens,
     timeoutMs: studio.advanced.requestTimeoutSeconds * 1000,
     signal: req.signal,
-    validate: (payload) => validateTutorPayload(payload, allowedEvidence),
+    validate: (payload) =>
+      validateTutorPayload(payload, allowedEvidence, MAX_BOARD_OPS_PER_TURN, req.turnContract),
     recover: ({ payload, raw }) => {
       try {
         return recoverTutorPayload(payload, raw, allowedEvidence, req.learnerMessage);
@@ -3619,8 +3773,9 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   const expositionStreak = await getSessionExpositionStreak(req.sessionId);
 
   const policedTurn = enforceVisualExplanation(
-    enforceFillerGuard(
-      enforceLearnerAgency(
+    enforceWidgetBudget(
+      enforceFillerGuard(
+        enforceLearnerAgency(
         enforceRoadmapProgress(
           enforceSupportCeiling(
             enforceTutorBoardNecessity(
@@ -3645,19 +3800,39 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
       req.learnerMessage,
       req.board
     ),
+    ),
     turnStage,
     req.board
   );
 
+  // Learner commitments are applied only after every engine-owned enforcer has
+  // decided what survives. This position is load-bearing: contract enforcement
+  // can only remove board ops, so it can never restore a hint the support
+  // ceiling clamped, revive a roadmap the progress guard dropped, or satisfy an
+  // agency requirement the learner never met.
+  const contractResult = enforceLearnerContract(policedTurn, req.turnContract);
+  if (contractResult.droppedBoardOpIndices.length || contractResult.unresolved.length) {
+    console.warn(
+      "[tutor] learner contract enforced after repair",
+      {
+        dropped: contractResult.droppedBoardOpIndices,
+        unresolved: contractResult.unresolved.map((violation) => ({
+          severity: violation.severity,
+          kind: violation.commitment.kind,
+          location: violation.location,
+        })),
+      }
+    );
+  }
 
   // Any mastery card in this turn is rewritten from the ledger before it can
   // reach the board. Whatever the model wrote into those five numbers never
   // becomes visible to the learner.
-  let groundedTurn = policedTurn;
+  let groundedTurn = contractResult.turn;
   try {
     groundedTurn = {
-      ...policedTurn,
-      boardOps: await groundMasteryCards(policedTurn.boardOps, { learnerId, fallbackSkillId: skillId }),
+      ...contractResult.turn,
+      boardOps: await groundMasteryCards(contractResult.turn.boardOps, { learnerId, fallbackSkillId: skillId }),
     };
   } catch (error) {
     console.warn("[tutor] could not ground mastery cards from the ledger", error);
@@ -4027,12 +4202,19 @@ export async function generateOnboardingQuestions(req: {
     `inside the chat, so the learner answers by opening the form and typing into fields or picking options ` +
     `instead of writing numbered lines of reply.\n\n` +
     `Rules:\n` +
-    `- Ask AT MOST ${MAX_ONBOARDING_QUESTIONS} questions, and no fewer than ${MIN_ONBOARDING_QUESTIONS}. Ask fewer when fewer will do; do not pad to reach the maximum.\n` +
-    `- Probe what actually matters for teaching this material: current grasp, which sub-parts they expect to struggle with, prior background the concept depends on, pace/deadline pressure, and how they want to be taught.\n` +
-    `- The FIRST question must be a choice footing question with exactly three options, one each for a learner who is new, shaky, or confident. Attach familiarityOptions mapping every option exactly once to "new", "shaky", or "confident". It is the only question allowed to carry familiarityOptions; phrase the visible labels naturally for this concept.\n` +
+    `- Ask AT MOST ${MAX_ONBOARDING_QUESTIONS} questions, and no fewer than ${MIN_ONBOARDING_QUESTIONS}. The expanded intake covers five areas: footing (new/shaky/confident), misconceptions, learning goal, time available, and learning style.\n` +
+    `- Structure your questions in this order:\n` +
+    `  1. FOOTING (required, first): a choice question with exactly three options — new, shaky, or confident. Attach familiarityOptions mapping each to "new", "shaky", or "confident".\n` +
+    `  2. MISCONCEPTION PROBE: "What do you find most confusing about [concept]?" or "What common mistake do you think students make with this?" — free text. This surfaces pre-existing gaps so the tutor can address them immediately.\n` +
+    `  3. LEARNING GOAL: "By the end of this session, you should be able to..." — free text. Make it concrete and observable: not "understand calculus" but "find the derivative of any polynomial".\n` +
+    `  4. TIME AVAILABLE: choice with 20 min / 45 min / 90 min / no limit. This shapes pacing — shorter sessions need narrower goals.\n` +
+    `  5. PRIOR ATTEMPTS: "What have you already tried that didn't work?" or "Where did you get stuck last time?" — free text, gated on "shaky" footing.\n` +
+    `  6-8. FURTHER PROBES as needed: prior background, specific sub-topics to emphasize, learning style preference.\n` +
+    `- The FOOTING question (question 1) is the only one that may carry familiarityOptions.\n` +
+    `- Misconception and prior-attempt questions are the highest-ROI questions — do not skip them.\n` +
     `- Ask about the learner, never quiz them on the content — this is calibration, not assessment.\n` +
-    `- Pick the answer format that fits each question: kind "choice" when two to six options genuinely cover the space (each a short phrase, ordered sensibly), kind "free" when the honest answer is a line of the learner's own words. A good intake mixes both.\n` +
-    `- Respect constraints: a follow-up probe must make sense to the particular learner reading it. When a question only applies given a certain earlier answer — e.g. "which part feels shakiest?" means nothing to someone who just said they have never met the concept at all — gate it with onlyIf on that earlier choice question and the option labels under which it applies, rather than asking it unconditionally.\n` +
+    `- Pick the answer format that fits each question: kind "choice" when two to six options genuinely cover the space (each a short phrase, ordered sensibly), kind "free" when the honest answer is a line of the learner's own words.\n` +
+    `- Gate follow-up probes with onlyIf so they only appear for the relevant learner. "Which part feels shakiest?" only makes sense for someone who said shaky or new — not for a confident learner who has already mastered it.\n` +
     `- Free-text questions must be answerable in one short line.\n` +
     `- Be specific to the concept. Do not emit generic filler that would fit any subject, and do not use the same option list twice.\n` +
     `- Do not number the questions; numbering is added by the app.\n` +

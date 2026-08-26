@@ -30,6 +30,7 @@ import {
   bindBlockToActivity,
   getActivityForBlock,
   getLatestSessionActivity,
+  recordPrerequisiteCovered,
 } from "../../lib/learning/store";
 import {
   clampPageSize,
@@ -52,6 +53,8 @@ import { ContextMenu, ContextMenuTarget } from "../ContextMenu";
 import { toPng } from "html-to-image";
 import { hydrateStudyBoards, saveStudySession, type StoredStudySession } from "../../state/studySessionStore";
 import type { OnboardingAnswers } from "../../data/tutor";
+import type { TurnContract } from "../../lib/contracts/types";
+import { getActiveContract } from "../../lib/contracts/store";
 import { ErrorBoundary } from "../ErrorBoundary";
 import {
   PREFERENCES_CHANGED_EVENT,
@@ -68,6 +71,11 @@ type TurnKind = "chat" | "greeting" | "widget" | "plan_start";
 interface Props {
   initialBoard: BoardDoc;
   initialSession?: StoredStudySession;
+  /** Stable session id minted in SessionCard for fresh sessions, so the
+   *  contract's revision lineage and the persisted board session share one
+   *  id. When omitted, StudyRoom falls back to `initialSession?.id` or mints
+   *  its own (the historical path). */
+  sessionId?: string;
   /** Curriculum node ids the tutor may ground its replies on. Restored from
    *  the stored session when reopening; empty means no curriculum is bound. */
   boundNodes?: string[];
@@ -75,11 +83,28 @@ interface Props {
    *  every tutor turn as a consistent system reminder. Undefined for a restored
    *  session — that interview already ran. */
   onboarding?: OnboardingAnswers;
+  /** Learner-approved contract from the onboarding review sheet (fresh
+   *  sessions only). Restored sessions load theirs from the contracts store
+   *  via `getActiveContract` on mount. */
+  turnContract?: TurnContract;
+  /** Learner identity for the contracts store and evidence ledger. Defaults
+   *  to `DEFAULT_LEARNER_ID` to match the rest of the app. */
+  learnerId?: string;
   onLeave: () => void;
   notify: (t: string) => void;
 }
 
-export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding, onLeave, notify }: Props) {
+export function StudyRoom({
+  initialBoard,
+  initialSession,
+  sessionId: sessionIdProp,
+  boundNodes,
+  onboarding,
+  turnContract,
+  learnerId,
+  onLeave,
+  notify,
+}: Props) {
   // Hydrate on first paint so a restored Past Note never mounts a widget whose
   // state/intent still carries a one-throw-away payload from an older save.
   const [boards, setBoards] = useState<BoardDoc[]>(() => {
@@ -174,12 +199,36 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
   const boardRootRef = useRef<HTMLDivElement | null>(null);
 
   /* One persisted chalkboard session per room entry; the tutor harness writes
-     both sides of the conversation into session_messages under this id. */
-  const [sessionId] = useState(() => initialSession?.id ?? `session-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+     both sides of the conversation into session_messages under this id. The
+     SessionCard-minted id is preferred so the contract's session lineage
+     matches the board session row. */
+  const [sessionId] = useState(
+    () => sessionIdProp ?? initialSession?.id ?? `session-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+  );
   const resolvedBoundNodes = useMemo(
     () => boundNodes ?? initialSession?.boundNodes ?? [],
     [boundNodes, initialSession?.boundNodes]
   );
+  const resolvedLearnerId = learnerId ?? DEFAULT_LEARNER_ID;
+  // A restored session loads its active contract from the durable store on
+  // mount (fresh sessions receive theirs via the `turnContract` prop). Loaded
+  // lazily so a restored Past Note with no contract simply tutors without one.
+  const [loadedContract, setLoadedContract] = useState<TurnContract | null>(null);
+  useEffect(() => {
+    if (!initialSession || turnContract) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const active = await getActiveContract(resolvedLearnerId, initialSession.id);
+        if (!cancelled && active) setLoadedContract(active);
+      } catch (error) {
+        console.warn("[studyroom] could not load learner contract for restored session", error);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSession?.id, turnContract]);
+  const activeContract = turnContract ?? loadedContract ?? undefined;
 
   useEffect(() => {
     const onPreferencesChanged = (event: Event) => {
@@ -893,6 +942,8 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           board,
           boundNodes: resolvedBoundNodes,
           onboarding: onboarding ?? undefined,
+          turnContract: activeContract,
+          learnerId: resolvedLearnerId,
           turnKind,
           learnerMessage: text,
           attachments: attachments.map((a) => ({
@@ -938,6 +989,28 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
                 notify(`Tutor created thread: ${thread.title}`);
               } catch {
                 notify("The agent thread could not be logged, so it was not created");
+              }
+              continue;
+            }
+
+            if (op.op === "spawn_prerequisite_thread") {
+              const threadBoard = buildPrerequisiteThread(board, op);
+              try {
+                await recordSessionThread({
+                  sessionId,
+                  boardId: threadBoard.id,
+                  parentBoardId: boardsRef.current[activeIdRef.current].id,
+                  title: threadBoard.title,
+                  reason: threadBoard.thread!.reason,
+                  createdBy: "agent",
+                  createdAt: threadBoard.thread!.createdAt,
+                });
+                if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
+                setBoards((current) => current.some((item) => item.id === threadBoard.id) ? current : [...current, threadBoard]);
+                notify(`Teaching prerequisite: ${op.prerequisiteLabel}`);
+                setActiveId(threadBoard.id);
+              } catch {
+                notify("The prerequisite thread could not be logged, so it was not created");
               }
               continue;
             }
@@ -1040,7 +1113,7 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [attachments, board, logThread, notify, onboarding, sessionId, resolvedBoundNodes, speakTutorText]
+    [attachments, board, logThread, notify, onboarding, sessionId, resolvedBoundNodes, speakTutorText, activeContract, resolvedLearnerId]
   );
 
   handleSendRef.current = handleSend;
@@ -1240,9 +1313,16 @@ export function StudyRoom({ initialBoard, initialSession, boundNodes, onboarding
           activeId={activeId}
           onPick={async (id) => {
             await captureActive();
-            setActiveId(id);
+            // If switching away from an agent-created prerequisite thread,
+            // record the coverage and navigate back to parent
+            const currentBoard = boards.find(b => b.id === activeId);
+            if (currentBoard?.thread?.createdBy === "agent" && currentBoard.thread.prerequisiteSkillId) {
+              handleThreadComplete(activeId, boards, setActiveId, notify);
+            } else {
+              setActiveId(id);
+              notify("Board brought on screen");
+            }
             setPanel(null);
-            notify("Board brought on screen");
           }}
           onClose={() => setPanel(null)}
         />
@@ -1310,6 +1390,25 @@ function trim(s: string) {
   return s.length > 40 ? s.slice(0, 40) + "…" : s;
 }
 
+/**
+ * Handle completion of a prerequisite thread.
+ * Records the coverage in the store and navigates back to the parent board
+ * if resumeAfterComplete is set.
+ */
+function handleThreadComplete(threadId: string, boards: BoardDoc[], setActiveId: (id: string) => void, notify: (t: string) => void): void {
+  const threadBoard = boards.find((b) => b.id === threadId);
+  if (threadBoard?.thread?.createdBy === "agent" && threadBoard.parentId) {
+    if (threadBoard.thread.prerequisiteSkillId) {
+      recordPrerequisiteCovered(threadBoard.thread.prerequisiteSkillId);
+    }
+    // Only navigate back if resumeAfterComplete is true (default for prereq threads)
+    if (threadBoard.thread.resumeAfterComplete !== false) {
+      setActiveId(threadBoard.parentId);
+      notify("Prerequisite review complete — returning to lesson");
+    }
+  }
+}
+
 function mergeThreadLogs(...groups: SessionThreadLog[][]): SessionThreadLog[] {
   const byBoard = new Map<string, SessionThreadLog>();
   for (const group of groups) {
@@ -1334,6 +1433,42 @@ function buildAgentThread(parent: BoardDoc, op: Extract<BoardOp, { op: "spawn_th
       createdBy: "agent",
       reason: op.reason,
       createdAt,
+    },
+  };
+}
+
+/**
+ * Build a prerequisite review thread for a missing foundational concept.
+ * Tracks the prerequisiteSkillId so completion can be recorded in the store.
+ */
+function buildPrerequisiteThread(
+  parent: BoardDoc,
+  op: Extract<BoardOp, { op: "spawn_prerequisite_thread" }>
+): BoardDoc {
+  const createdAt = new Date().toISOString();
+  const blocks = op.teachingBlocks
+    .map((spec) => blockSpecToBlock(spec as unknown as Record<string, unknown>, parent.domain))
+    .filter((block): block is NonNullable<typeof block> => block !== null);
+
+  return {
+    id: `board-prereq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    title: `Review: ${op.prerequisiteLabel}`,
+    subtitle: `Prerequisite review · ${parent.title}`,
+    domain: parent.domain,
+    blocks: [
+      // Title block as the first element
+      { id: `prereq-title-${Date.now()}`, kind: "title" as const, text: op.prerequisiteLabel },
+      ...blocks,
+    ],
+    parentId: parent.id,
+    thread: {
+      createdBy: "agent",
+      reason: `Teaching prerequisite: ${op.prerequisiteSkillId}`,
+      createdAt,
+      // Store the prerequisite skill id for completion tracking
+      prerequisiteSkillId: op.prerequisiteSkillId,
+      // Whether to return to parent after completing this review
+      resumeAfterComplete: op.resumeAfterComplete,
     },
   };
 }
@@ -1409,6 +1544,13 @@ function activityForBoardOp(op: BoardOp, index: number, total: number): AgentAct
         kind: "spawning",
         label: "Creating a study thread",
         detail: `Logging “${op.title}” in Threads`,
+        progress,
+      };
+    case "spawn_prerequisite_thread":
+      return {
+        kind: "spawning",
+        label: "Reviewing prerequisite",
+        detail: `Opening prerequisite review: ${op.prerequisiteLabel}`,
         progress,
       };
     case "write_latex":

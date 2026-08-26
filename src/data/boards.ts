@@ -42,6 +42,10 @@ export interface ThreadMetadata {
   createdBy: "learner" | "agent";
   reason: string;
   createdAt: string;
+  /** For prerequisite threads: the skill id that was covered. */
+  prerequisiteSkillId?: string;
+  /** Whether to return to the parent board after this thread completes */
+  resumeAfterComplete?: boolean;
 }
 
 export interface BoardDoc {

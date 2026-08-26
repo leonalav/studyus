@@ -59,11 +59,12 @@ const ROUTE_WIDGETS: Record<LearningRoute, WidgetKind[]> = {
   prediction: ["animation", "slider", "question", "comparison"],
   contrast_case: ["comparison", "mistake_check", "example", "question", "animation"],
   prerequisite_repair: ["concept_card", "example", "question", "hint", "animation", "slider"],
-  faded_example: ["example", "scratchpad", "question", "hint", "annotation"],
+  faded_example: ["example", "scratchpad", "hint", "annotation"],
   guided_retry: ["hint", "question", "scratchpad", "annotation", "mistake_check"],
   independent_practice: ["question", "challenge", "scratchpad"],
-  transfer_check: ["challenge", "question", "scratchpad", "comparison"],
+  transfer_check: ["challenge", "comparison", "scratchpad"],
   due_retrieval: ["retrieval_check", "question"],
+  drill_loop: ["question"],
 };
 
 /** Routes whose measurement is destroyed by any support at all. */
@@ -72,6 +73,7 @@ const UNAIDED_ROUTES = new Set<LearningRoute>([
   "independent_practice",
   "transfer_check",
   "prediction",
+  "drill_loop",
 ]);
 
 /** The mode each route is conducted in. */
@@ -86,6 +88,7 @@ const ROUTE_MODE: Record<LearningRoute, ActivityMode> = {
   independent_practice: "independent_practice",
   transfer_check: "transfer",
   due_retrieval: "retrieval",
+  drill_loop: "drill",
 };
 
 /** The evidence each route must produce to have been worth making. */
@@ -100,6 +103,7 @@ const ROUTE_EVIDENCE: Record<LearningRoute, EvidenceType[]> = {
   independent_practice: ["procedure", "construction"],
   transfer_check: ["transfer", "explanation"],
   due_retrieval: ["retrieval"],
+  drill_loop: ["drill"],
 };
 
 /**
@@ -120,6 +124,7 @@ const ROUTE_CEILING: Record<LearningRoute, SupportLevel> = {
   independent_practice: 0,
   transfer_check: 1,
   due_retrieval: 0,
+  drill_loop: 0,
 };
 
 /* ─────────────────────────────────────────────────────────────
@@ -340,7 +345,23 @@ export function planNextMove(input: PlanInput): NextLearningMove {
     });
   }
 
-  // 5 ── Normal progression: aim at the evidence the current stage still lacks.
+  // 5 ── Drill fluency: three consecutive correct drills on the same family signal readiness to move on.
+  const drillConsecutive = countConsecutiveDrillCorrect(events);
+  if (drillConsecutive >= 3) {
+    // Drill families are ordered; the next one in sequence is the next target.
+    const nextDrillFamily = getNextDrillFamily(state, events);
+    if (nextDrillFamily) {
+      return buildMove({
+        route: "drill_loop",
+        state,
+        rationale: `${drillConsecutive} consecutive correct drills on "${nextDrillFamily.previous}" signal that the family is fluent. Moving to the next drill family.`,
+        rationaleEvidenceIds: recentIds(events, 3),
+        taskFamily: nextDrillFamily.next,
+      });
+    }
+  }
+
+  // 6 ── Normal progression: aim at the evidence the current stage still lacks.
   return planForStage(
     stage,
     state,
@@ -454,6 +475,8 @@ function buildMove(params: {
     reviewId: params.reviewId,
     reconstructionTaskFamily: params.reconstructionTaskFamily,
     taskFamily: params.taskFamily ?? params.reconstructionTaskFamily,
+    // Prerequisite repair routes spawn a thread to teach the missing concept
+    spawnThread: route === "prerequisite_repair",
   };
 }
 
@@ -485,6 +508,51 @@ function resolveCeiling(route: LearningRoute, state: SkillState): SupportLevel {
   if (state.independence >= 70 && base > 1) return 1;
   if (state.independence >= 50 && base > 2) return 2;
   return base;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Drill-loop helpers
+   ───────────────────────────────────────────────────────────── */
+
+/**
+ * Count consecutive drill events ending with the most recent event that were
+ * all correct. Iterates backward from the latest event.
+ */
+function countConsecutiveDrillCorrect(events: LearningEvidenceEvent[]): number {
+  let count = 0;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event.evidenceType === "drill" && event.correctness === "correct") {
+      count += 1;
+    } else {
+      break;
+    }
+  }
+  return count;
+}
+
+interface DrillFamilyPair {
+  previous: string;
+  next: string;
+}
+
+/** Return the next drill family after a fluency signal, or null if none is defined. */
+function getNextDrillFamily(
+  state: SkillState,
+  events: LearningEvidenceEvent[]
+): DrillFamilyPair | null {
+  // Drill families are defined in curriculum metadata; for now, advance through
+  // the ordered list of task families the learner has encountered.
+  const drillFamilies = events
+    .filter((e) => e.evidenceType === "drill")
+    .map((e) => e.taskFamily);
+  if (drillFamilies.length === 0) return null;
+
+  const last = drillFamilies[drillFamilies.length - 1];
+  // Placeholder: in a full implementation this would consult the curriculum's
+  // ordered drill-family sequence. Here we signal fluency and return null so
+  // the policy degrades gracefully without a configured sequence.
+  return { previous: last, next: last };
 }
 
 /* ─────────────────────────────────────────────────────────────

@@ -391,6 +391,15 @@ export function nextReviewDueAt(state: SkillState, from: Date = new Date()): Dat
   return next;
 }
 
+/** True when an event represents a cover: retrieval with no support
+ *  and no board artifacts visible. */
+export function isCoverEvent(event: LearningEvidenceEvent): boolean {
+  return (
+    (event.evidenceType === "cover") ||
+    (event.evidenceType === "retrieval" && event.supportLevel === 0)
+  );
+}
+
 /** Strip derived-only fields for rendering as widget-shaped evidence. */
 export function toMasteryEvidence(state: SkillState): MasteryEvidence {
   return {

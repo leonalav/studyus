@@ -1,11 +1,14 @@
 import { useMemo } from "react";
-import { renderMath } from "../../lib/latex/render";
+import { renderMath as renderMathUtil } from "../../lib/latex/render";
+import { MACROS } from "../../lib/latex/katexConfig";
+
+export { MACROS as KATEX_MACROS };
 
 /* ── LaTeX ── */
 
 export function Latex({ tex, color, size = 26 }: { tex: string; color: string; size?: number }) {
   const html = useMemo(() => {
-    const r = renderMath(tex, true, {});
+    const r = renderMathUtil(tex, true, {});
     return r.html;
   }, [tex]);
   return (
@@ -15,6 +18,12 @@ export function Latex({ tex, color, size = 26 }: { tex: string; color: string; s
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
+}
+
+/* ── Standalone math rendering helper (for use in widgets) ── */
+export function renderMath(tex: string, displayMode = true): string {
+  const r = renderMathUtil(tex, displayMode, {});
+  return r.html;
 }
 
 /* ── Shared plot helpers & Tick Generator ──

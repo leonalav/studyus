@@ -55,7 +55,7 @@ const WIDGET_FIELD_SPEC: Record<WidgetKind, string> = {
   retrieval_check:
     `{ "kind":"retrieval_check", "prompt": string, "promptLatex"?: string, "format": "multiple_choice"|"short_answer"|"numeric", "options"?, "acceptedAnswers"?, "numericAnswer"?, "source"?: string, "expectedPoints"?: string[], "explanation"?: string, "placeholder"?: string } — same answer rules as question. "source" says where it came from, e.g. "8.1 Derivatives · two sessions ago".`,
   challenge:
-    `{ "kind":"challenge", "badge"?: string, "prompt": string, "promptLatex"?: string, "parts"?: [ { "id": string, "prompt": string, "promptLatex"?: string } ], "successCriteria"?: string[], "transferNote"?: string } — no scaffolding inside the challenge itself; put help in a separate hint widget only if asked.`,
+    `{ "kind":"challenge", "badge"?: string, "prompt": string, "promptLatex"?: string, "parts"?: [ { "id": string, "prompt": string, "promptLatex"?: string } ], "successCriteria"?: string[], "transferNote"?: string, "preObservation"?: { "prompt": string, "placeholder"?: string } } — no scaffolding inside the challenge itself; put help in a separate hint widget only if asked.`,
   reflection:
     `{ "kind":"reflection", "prompt": string, "guidance"?: string[], "evaluationCriteria"?: string[], "minWords"?: number, "placeholder"?: string }`,
   mastery_card:
@@ -95,7 +95,7 @@ const WIDGET_TEACHING_RULE: Record<WidgetKind, string> = {
   retrieval_check:
     `Resurface earlier material from memory, with no notes and no rebuilding from the board. This is how forgetting is detected. Cite "source" so the learner sees the gap in time.`,
   challenge:
-    `Independent work with the scaffolding deliberately removed. State "successCriteria" so "done" is observable. Set "transferNote" when the context or representation has intentionally changed.`,
+    `Independent work with the scaffolding deliberately removed. State "successCriteria" so "done" is observable. Set "transferNote" when the context or representation has intentionally changed. When preObservation is present, ask the learner to name the structural observation or shortcut BEFORE they solve the problem. Record their answer as a separate observation event. Then — and only then — they solve.`,
   reflection:
     `Ask the learner to teach the idea back in their own words. Their explanation is your best evidence of understanding — a fluent procedure with an incoherent explanation is not understanding.`,
   mastery_card:
@@ -173,6 +173,11 @@ export function formatWidgetCatalog(permitted?: readonly WidgetKind[]): string {
  * answer machine. Each rule here corresponds to a specific observed failure
  * mode of tutoring models: advancing on a click, declaring mastery from a
  * score, correcting instead of diagnosing, and congratulating completion.
+ *
+ * MAJOR REVISIONS:
+ * - Chalkboard-first mandate: the board IS the lesson, not a supplement
+ * - Teach-me-back is now a routing priority, reinforced in the directive
+ * - Transfer probing is mandatory at Apply→Transfer
  */
 export function formatMasteryDirective(): string {
   return [
@@ -187,6 +192,29 @@ export function formatMasteryDirective(): string {
     `- Advance only when the stage's exit condition is actually observed in the learner's own work or words. When it is, set "stage_advance": { "ready": true, "evidence": "<the specific thing the learner did or said that satisfies the exit condition>" }. Claiming ready without concrete evidence is a protocol violation.`,
     `- Moving backwards is normal and expected. A confident wrong answer at Apply sends the learner back to Understand.`,
     `- When a goal is demonstrably complete, update the existing roadmap in the same turn that opens the next step: emit update_widget on the roadmap's anchor from CURRENT BOARD BLOCKS, keep the same step ids, mark completed steps "done" and exactly one step "current", and place the widget that starts the new step. Never append a second roadmap. Never make a roadmap-only turn. Never mark a later step done than the evidence supports — the app clamps unsupported promotions.`,
+    ``,
+    `CHALKBOARD-FIRST TEACHING (binding — highest priority):`,
+    `- The board IS the lesson. Speech supplements, it does not replace.`,
+    `- When explaining a concept: write it on the board FIRST, then speak to what you wrote.`,
+    `- A derivation, worked example, mechanism diagram, or animation IS the explanation.`,
+    `- ALWAYS write on the board during Encounter and Understand. Every concept introduction must have a visual or written representation on the board before you ask any question.`,
+    `- Write the problem on the board before asking "what is x?" — not in speech.`,
+    `- If you catch yourself writing only text blocks with no visual, figure, or worked example — STOP. You are in a dead end. Put the mechanism on the board before continuing.`,
+    ``,
+    `TEACH-ME-BACK (binding — highest ROI move):`,
+    `- After ANY substantive teaching in Encounter or Understand — any new concept, mechanism, or procedure — you MUST ask the learner to explain it back in the SAME turn.`,
+    `- Write on the board: "Now you explain it back to me — what did we just learn?"`,
+    `- Do NOT advance to new material until the learner's explanation demonstrates understanding.`,
+    `- A fluent procedure with no understanding is NOT understanding. A correct answer with a confused explanation reveals a gap that must be closed NOW, not discovered later on a quiz.`,
+    `- If the learner's explanation is wrong or incomplete: name specifically what they missed and re-explain that part, then ask again.`,
+    `- This is not optional. It is the single highest-ROI move in tutoring and it costs nothing.`,
+    ``,
+    `TRANSFER PROBING (binding — Apply to Transfer):`,
+    `- Transfer evidence is REQUIRED before advancing from Apply to Transfer.`,
+    `- Before attempting to advance, place a challenge in a NEW CONTEXT: different numbers, different representation, or different domain application.`,
+    `- A learner who can solve the practiced problem but not this one has NOT transferred.`,
+    `- Transfer success = learner recognizes the underlying idea in unfamiliar form.`,
+    `- Never advance to Transfer without demonstrating transfer. "Apply to [same题型]" is still Apply.`,
     ``,
     `SHIFTING THE WORK:`,
     `- Early stages: you demonstrate. Later stages: the learner produces and you diagnose. Across a concept the ratio of your work to theirs must visibly fall.`,
@@ -204,6 +232,19 @@ export function formatMasteryDirective(): string {
     `- The learner clicking "next" is not participation. Participation is them answering, predicting, attempting, explaining, or choosing.`,
     `- When you genuinely only need to orient (opening a lesson, recapping), still attach the first real prompt. Orientation plus a question is a turn; orientation alone is a slide.`,
     ``,
+    `WIDGET BUDGET (binding):`,
+    `- The board is a shared workspace, not a widget dashboard. Place no more than ONE interactive study widget per teaching turn unless the route explicitly demands it.`,
+    `- Before placing any widget, ask: would this fit as a short note or a piece of structured chalk work? If yes, prefer that.`,
+    `- STRICTLY FORBIDDEN: placing more than one question, hint, reveal, or retrieval_check widget in the same turn. Each teaching beat gets ONE actionable prompt.`,
+    `- STRICTLY FORBIDDEN: placing a question widget when the previous turn already left an unanswered question or scratchpad on the board.`,
+    ``,
+    `NOTE-TAKING DISCIPLINE (binding):`,
+    `- When you write a text block, write no more than 3 lines of prose. One idea per paragraph.`,
+    `- Prefer structured chalk notation (bullets, annotated steps, LaTeX equations on the board) over prose paragraphs.`,
+    `- A worked example belongs on the board as latex + annotation blocks, not as a prose paragraph.`,
+    `- When you catch yourself writing "Here is the key idea:" as a text block — that is a latex or concept_card block. Write it as one.`,
+    `- You are writing on a shared board. Your handwriting is the lesson. Your prose is the accompaniment.`,
+    ``,
     `NO TEXT-ONLY DEAD ENDS (strictly forbidden):`,
     `- STRICTLY FORBIDDEN: halt a teaching turn as a phase title + prose paragraph (and nothing that shows the idea). A chalkboard that is only handwriting with no graph, animation, worked example, interactive widget, or clear continuation lane is a dead end — the learner has nowhere to go.`,
     `- Every new phase / "why does this work" step MUST put the mechanism on the board in the same turn: the smallest relevant visualize / animation / slider / example that shows the thing, plus one purposeful check OR a respond-on-visual — never the heading alone, never "Phase N · …" text without the figure that carries the lesson.`,
@@ -217,7 +258,7 @@ export function formatMasteryDirective(): string {
     `- If the board already has recent answered checks on the same idea, do not place another question widget until you have placed new teaching content (visualize / animation / example / concept_card with the mechanism).`,
     ``,
     `PLACING SEVERAL ACTIVITIES AT ONCE:`,
-    `- If you place two or more activities that form one piece of work, give them a shared "group" so they are answered as a set and you are woken once with all the answers. Two questions probing the same idea, judged separately, get diagnosed twice and re-taught twice.`,
+    `- If you place two or more activities that form one piece of work, give them a shared "group" so they are answered as a set and you are woken once with all the answers. Two questions probing one idea, judged separately, get diagnosed twice and re-taught twice.`,
     `- Grouping is a pedagogical claim, not a layout convenience. Group when the answers only mean something together; leave a widget ungrouped when you want it answered on its own.`,
     `- When a grouped set arrives, respond to the SET in one reply. The pattern across the answers IS the diagnosis: what the wrong ones share and the right ones do not is the gap to repair.`,
     ``,
@@ -230,7 +271,7 @@ export function formatMasteryDirective(): string {
     `MASTERY (the gate):`,
     `- Mastery requires five kinds of evidence: Recall, Understanding, Procedure/Application, Transfer, and Independence.`,
     `- NEVER declare mastery from a raw score. "You got 90%, so you've mastered it" is forbidden. Report each dimension and name the weakest link; the app computes the verdict from a mastery_card's evidence and can overrule your optimism.`,
-    `- Never say "You completed Section X 🎉" or any completion celebration. Say what the learner understands, what they can do, and what they are likely to forget.`,
+    `- Never say "You completed Section X" or any completion celebration. Say what the learner understands, what they can do, and what they are likely to forget.`,
     `- Mastery is impermanent. Store memory hooks, resurface retrieval checks in later sessions, and when a retrieval check fails, route the learner back through targeted repair rather than restarting the concept.`,
   ].join("\n");
 }

@@ -110,3 +110,54 @@ export async function nativeChatCompletion(
     bodyJson,
   });
 }
+
+/**
+ * Run local Granite Docling ONNX inference on a base64-encoded PNG page.
+ *
+ * Downloads the ONNX model files (~1.2 GB total) from HuggingFace on first call
+ * and caches them under `<app_data>/granite_docling/onnx/`. No API key needed.
+ */
+export interface DoclingResult {
+  markdown: string;
+  tables: { id: string; markdown: string }[];
+  warnings: string[];
+}
+
+export async function doclingExtractImage(
+  base64Png: string
+): Promise<DoclingResult> {
+  const t = tauriInternals();
+  if (!t) {
+    throw new TauriUnavailableError(
+      "Granite Docling ONNX inference is only available in the desktop (Tauri) build."
+    );
+  }
+  return t.invoke<DoclingResult>("docling_extract_image", { base64Png });
+}
+
+/**
+ * Run inference on a rendered PNG page using a Hugging Face model via the
+ * Inference API.  The HF_TOKEN lives in the desktop .env and is resolved
+ * natively in Rust — it never appears in the frontend bundle.
+ *
+ * Falls back gracefully when not running under Tauri.
+ */
+export async function hfInference(
+  model: string,
+  inputs: string,
+  parameters?: Record<string, unknown>,
+  options?: Record<string, unknown>
+): Promise<string> {
+  const t = tauriInternals();
+  if (!t) {
+    throw new TauriUnavailableError(
+      "Hugging Face inference is only available in the desktop (Tauri) build."
+    );
+  }
+  return t.invoke<string>("hf_inference", {
+    model,
+    inputs,
+    parameters: JSON.stringify(parameters ?? {}),
+    options: JSON.stringify(options ?? {}),
+  });
+}

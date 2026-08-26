@@ -1095,3 +1095,98 @@ export async function getSkillNodes(): Promise<SkillNode[]> {
     description: row[4] ? String(row[4]) : undefined,
   }));
 }
+
+/* ─────────────────────────────────────────────────────────────
+   Learning plans
+   ───────────────────────────────────────────────────────────── */
+
+import type { LearningPlan } from "./plan";
+
+const ACTIVE_PLANS_KEY = "studyus_active_plans";
+
+export function savePlan(plan: LearningPlan): void {
+  const plans = getAllPlans();
+  const index = plans.findIndex((p) => p.id === plan.id);
+  if (index >= 0) {
+    plans[index] = plan;
+  } else {
+    plans.push(plan);
+  }
+  localStorage.setItem(ACTIVE_PLANS_KEY, JSON.stringify(plans));
+}
+
+export function getPlan(planId: string): LearningPlan | undefined {
+  return getAllPlans().find((p) => p.id === planId);
+}
+
+export function getAllPlans(): LearningPlan[] {
+  const stored = localStorage.getItem(ACTIVE_PLANS_KEY);
+  return stored ? JSON.parse(stored) : [];
+}
+
+export function getActivePlanForSkill(skillId: string): LearningPlan | undefined {
+  return getAllPlans().find((p) => p.skillId === skillId && p.status === "active");
+}
+
+export function deletePlan(planId: string): void {
+  const plans = getAllPlans().filter((p) => p.id !== planId);
+  localStorage.setItem(ACTIVE_PLANS_KEY, JSON.stringify(plans));
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Prerequisite coverage
+   ───────────────────────────────────────────────────────────── */
+
+/**
+ * Record that a prerequisite skill was covered by an agent-spawned review thread.
+ * Uses ON CONFLICT to update the timestamp if the skill was already covered.
+ */
+export function recordPrerequisiteCovered(skillId: string, source = "thread"): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  db.run(`
+    INSERT INTO prerequisite_coverage (skill_id, covered_at, source)
+    VALUES (?, ?, ?)
+    ON CONFLICT(skill_id) DO UPDATE SET covered_at = excluded.covered_at, source = excluded.source;
+  `, [normalizeSkillId(skillId), now, source]);
+
+  saveDbSync();
+}
+
+export interface PrerequisiteCoverage {
+  skillId: string;
+  coveredAt: string;
+  source: string;
+}
+
+/**
+ * Get all prerequisite skills that have been covered by agent-spawned threads.
+ */
+export function getPrerequisiteCoverages(): PrerequisiteCoverage[] {
+  const db = getDb();
+  const res = db.exec("SELECT skill_id, covered_at, source FROM prerequisite_coverage ORDER BY covered_at DESC;");
+  return (res[0]?.values ?? []).map((row) => ({
+    skillId: String(row[0]),
+    coveredAt: String(row[1]),
+    source: String(row[2]),
+  }));
+}
+
+/**
+ * Check if a specific prerequisite skill has been covered.
+ */
+export function isPrerequisiteCovered(skillId: string): boolean {
+  const db = getDb();
+  const res = db.exec("SELECT 1 FROM prerequisite_coverage WHERE skill_id = ? LIMIT 1;", [normalizeSkillId(skillId)]);
+  return (res[0]?.values?.length ?? 0) > 0;
+}
+
+export function wasPrerequisiteRecentlyCovered(skillId: string, withinDays = 7): boolean {
+  const coverage = getPrerequisiteCoverages().find((c) => c.skillId === normalizeSkillId(skillId));
+  if (!coverage) return false;
+
+  const coveredDate = new Date(coverage.coveredAt);
+  const daysSince = (Date.now() - coveredDate.getTime()) / (1000 * 60 * 60 * 24);
+  return daysSince <= withinDays;
+}

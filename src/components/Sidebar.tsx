@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ShoppingCart,
   ChevronDown,
+  CloudDownload,
   FileText,
   GraduationCap,
   ClipboardCheck,
@@ -31,6 +32,7 @@ interface Props {
   onNotify: (text: string) => void;
   onOpenSearch: () => void;
   onOpenSettings: () => void;
+  onOpenDownloads: () => void;
   onOpenHelp: () => void;
   onOpenMarketplace: () => void;
   onOpenTab: (tab: { id: string; title: string; kind: "curriculum" | "test" | "note" }) => void;
@@ -51,6 +53,7 @@ export function Sidebar({
   onNotify,
   onOpenSearch,
   onOpenSettings,
+  onOpenDownloads,
   onOpenHelp,
   onOpenMarketplace,
   onOpenTab,
@@ -342,6 +345,13 @@ export function Sidebar({
 
       {/* Bottom utilities (Trash & Invite buttons removed) */}
       <div className="space-y-[1px] border-t border-edge-soft px-2 py-2">
+        <button
+          onClick={onOpenDownloads}
+          className="flex w-full items-center gap-2 rounded-[4px] px-2 py-[5px] text-left text-[13px] text-mut transition-colors hover:bg-white/[0.055] hover:text-fg"
+        >
+          <CloudDownload size={14} />
+          Downloads
+        </button>
         <button
           onClick={onOpenSettings}
           className="flex w-full items-center gap-2 rounded-[4px] px-2 py-[5px] text-left text-[13px] text-mut transition-colors hover:bg-white/[0.055] hover:text-fg"

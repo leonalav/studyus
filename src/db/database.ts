@@ -796,6 +796,106 @@ function runMigrations(db: Database) {
     db.run("COMMIT;");
   }
 
+  // ────────────────────────────────────────────────────────────
+  // Migration v10: Learner-owned Turn Contract revisions
+  // ────────────────────────────────────────────────────────────
+  if (currentVersion < 10) {
+    db.run("BEGIN TRANSACTION;");
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS turn_contract_revisions (
+        id                 TEXT PRIMARY KEY NOT NULL,
+        revision           INTEGER NOT NULL CHECK (revision >= 1),
+        learner_id         TEXT NOT NULL,
+        session_id         TEXT,
+        activity_id        TEXT,
+        source             TEXT,
+        schema_version     INTEGER NOT NULL DEFAULT 1,
+        commitments_json   TEXT NOT NULL,
+        created_at         TEXT NOT NULL,
+        active             INTEGER NOT NULL DEFAULT 1,
+        revoked_at         TEXT,
+        revoked_reason     TEXT
+      );
+    `);
+
+    db.run(`
+      CREATE INDEX IF NOT EXISTS idx_tc_active_learner
+        ON turn_contract_revisions (learner_id, revision DESC)
+        WHERE active = 1;
+    `);
+
+    db.run(`
+      CREATE INDEX IF NOT EXISTS idx_tc_active_session
+        ON turn_contract_revisions (learner_id, session_id, revision DESC)
+        WHERE active = 1;
+    `);
+
+    const v10Now = new Date().toISOString();
+    db.run(
+      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
+      [
+        10,
+        "Learner-owned Turn Contract revision persistence with engine-policy rejection",
+        v10Now,
+        "Rule: turn_contract_revisions stores learner-authored commitments (scope, representation, pace, notation, example_domain, goal) and never engine-owned decisions (support level, hint depth, mastery, evidence sufficiency, stage exit, advancement). Revoked revisions are preserved for auditability. Engine policy is authoritative and never weakened by learner contract preferences.",
+      ]
+    );
+
+    db.run("PRAGMA user_version = 10;");
+    db.run("COMMIT;");
+  }
+
+  // ── v11: Docling OCR — Granite-based full-page extraction for curriculum chunks
+  if (currentVersion < 11) {
+    db.run("BEGIN TRANSACTION;");
+
+    db.run(`ALTER TABLE curriculum_chunks ADD COLUMN docling_markdown TEXT;`);
+    db.run(`ALTER TABLE curriculum_chunks ADD COLUMN extracted_images TEXT;`);
+    db.run(`ALTER TABLE curriculum_chunks ADD COLUMN extracted_tables TEXT;`);
+
+    const v11Now = new Date().toISOString();
+    db.run(
+      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
+      [
+        11,
+        "Granite Docling OCR full-page extraction fields on curriculum_chunks",
+        v11Now,
+        "Rule: docling_markdown stores the verbatim full-page markdown from Granite Docling. extracted_images and extracted_tables store JSON arrays of figure/table metadata. These supplement (not replace) the existing vision-transcription text_content field.",
+      ]
+    );
+
+    db.run("PRAGMA user_version = 11;");
+    db.run("COMMIT;");
+  }
+
+  // ── v12: Prerequisite coverage tracking for agent-spawned review threads
+  if (currentVersion < 12) {
+    db.run("BEGIN TRANSACTION;");
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS prerequisite_coverage (
+        skill_id TEXT PRIMARY KEY,
+        covered_at TEXT NOT NULL,
+        source TEXT NOT NULL
+      );
+    `);
+
+    const v12Now = new Date().toISOString();
+    db.run(
+      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
+      [
+        12,
+        "Track prerequisite skills covered by agent-spawned review threads",
+        v12Now,
+        "Rule: prerequisite_coverage records when an agent-spawned thread taught a prerequisite concept. It is used to avoid re-teaching the same prerequisite and to inform the weak prerequisites list for policy routing.",
+      ]
+    );
+
+    db.run("PRAGMA user_version = 12;");
+    db.run("COMMIT;");
+  }
+
   // No legacy assessment fixtures are seeded in production. A fresh profile
   // starts with no forms/attempts so AvailableTests shows its empty state
   // (see plan §3 / verification: "Fresh profile shows no … seeded recent

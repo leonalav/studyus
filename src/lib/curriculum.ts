@@ -24,6 +24,7 @@ For each page image, return the page's instructional content as clean prose with
 - If a page is blank or non-instructional (cover, toc, license), return the single word: BLANK`;
 
 import { seedSkillGraphFromCurriculum } from "./learning/skillGraph";
+import { ExtractedPage } from "./curriculum/docling";
 
 export interface CurriculumNodeRecord {
   id: string;
@@ -59,6 +60,12 @@ export interface CurriculumChunkRecord {
   textContent: string;
   excerptHash: string;
   chunkKind: "definition" | "theorem" | "worked_example" | "prose" | "figure_caption";
+  /** Full-page markdown extracted by Granite Docling OCR (verbatim transcription). */
+  doclingMarkdown?: string;
+  /** JSON array of extracted figure metadata: { id, caption }[] */
+  extractedImages?: string;
+  /** JSON array of extracted table metadata: { id, markdown }[] */
+  extractedTables?: string;
 }
 
 /* Hash helper */
@@ -468,7 +475,7 @@ export async function getEvidenceForSelectedNodes(nodeIds: string[]): Promise<{
       FROM curriculum_nodes n
       JOIN scoped_nodes parent ON n.parent_node_id = parent.id
     )
-    SELECT c.id, c.node_id, c.page, c.chunk_ordinal, c.text_content, c.excerpt_hash, c.chunk_kind
+    SELECT c.id, c.node_id, c.page, c.chunk_ordinal, c.text_content, c.excerpt_hash, c.chunk_kind, c.docling_markdown, c.extracted_images, c.extracted_tables
     FROM curriculum_chunks c
     JOIN scoped_nodes scoped ON scoped.id = c.node_id
     ORDER BY c.node_id ASC, c.chunk_ordinal ASC;
@@ -497,6 +504,9 @@ export async function getEvidenceForSelectedNodes(nodeIds: string[]): Promise<{
     textContent: r[4] as string,
     excerptHash: r[5] as string,
     chunkKind: r[6] as any,
+    doclingMarkdown: r[7] as string | undefined,
+    extractedImages: r[8] as string | undefined,
+    extractedTables: r[9] as string | undefined,
   }));
 
   return { nodes, chunks };
@@ -825,4 +835,60 @@ export function splitTranscriptionByPage(normalized: string, startPage: number, 
   // Suppress unused-param lint when pageCount differs from resolved count.
   void pageCount;
   return out;
+}
+
+/**
+ * Persist Granite Docling OCR extraction results to the curriculum_chunks table.
+ * Each extracted page becomes a chunk row with the full markdown and structured
+ * metadata for images/tables. This supplements (not replaces) the existing
+ * vision-transcription text_content field — both may coexist for a given chunk.
+ *
+ * @param nodeId  - The curriculum node these pages belong to
+ * @param pages    - Array of extracted pages from docling.ts
+ * @returns        - Number of chunks written
+ */
+export async function storeDoclingExtraction(
+  nodeId: string,
+  pages: ExtractedPage[]
+): Promise<number> {
+  if (pages.length === 0) return 0;
+
+  const db = await getDb();
+  let inserted = 0;
+
+  for (const page of pages) {
+    // Use nodeId + pageNumber as stable chunk id for upsert semantics
+    const chunkId = `chunk-docling-${nodeId}-p${page.pageNumber}`;
+    const doclingMarkdown = page.markdown;
+    const extractedImages = JSON.stringify(page.images);
+    const extractedTables = JSON.stringify(page.tables);
+    const excerptHash = simpleHash(doclingMarkdown);
+
+    // Upsert: replace any existing docling content for this page
+    // Preserve the original text_content if it came from a prior vision pass
+    db.run(
+      `INSERT INTO curriculum_chunks
+         (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind, docling_markdown, extracted_images, extracted_tables)
+       VALUES (?, ?, ?, ?, ?, ?, 'prose', ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         docling_markdown = excluded.docling_markdown,
+         extracted_images = excluded.extracted_images,
+         extracted_tables = excluded.extracted_tables;`,
+      [
+        chunkId,
+        nodeId,
+        page.pageNumber,
+        page.pageNumber, // ordinal mirrors page number for docling chunks
+        doclingMarkdown,
+        excerptHash,
+        doclingMarkdown,
+        extractedImages,
+        extractedTables,
+      ]
+    );
+    inserted++;
+  }
+
+  if (inserted > 0) saveDbSync();
+  return inserted;
 }
