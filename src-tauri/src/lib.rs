@@ -73,16 +73,16 @@ async fn save_source_pdf(
 
 /// Predetermined default API key for Studyus models. 
 /// Replace this value or set the `STUDYUS_API_KEY` environment variable.
-const DEFAULT_STUDYUS_API_KEY: &str = "sk-264056c1bf073233f3a282e18c133b2117c75344409a4bd91d9687d88d3d5000";
+const DEFAULT_STUDYUS_API_KEY: &str = "sk-qzzjQ55a5y67zhimBNmi0FdsCdVd1j2fOL866WG0j12JJ0fa";
 
 /// Custom endpoint URL redirection for the default models.
 /// Change this to target your custom API endpoint (e.g., OpenAI, OpenRouter, self-hosted proxy, etc.).
-const CUSTOM_ENDPOINT_URL: &str = "https://api.xah.io";
+const CUSTOM_ENDPOINT_URL: &str = "https://modelapi.vn/v1";
 
 /// Model IDs mapping to redirect standard Studyus tiers to your custom models.
-const CUSTOM_MODEL_TIER_1: &str = "phuocanh421994/Qwen3.7_max"; // Fastest / cheapest
-const CUSTOM_MODEL_TIER_2: &str = "deepseek-v4-flash-0731";      // Balanced
-const CUSTOM_MODEL_TIER_3: &str = "jjfkphong/grok-4.5";     // Reasoning / heavy
+const CUSTOM_MODEL_TIER_1: &str = "deepseek-v4-flash"; // Fastest / cheapest
+const CUSTOM_MODEL_TIER_2: &str = "deepseek-v4-flash";      // Balanced
+const CUSTOM_MODEL_TIER_3: &str = "deepseek-v4-pro";     // Reasoning / heavy
 
 /// Native transport for one OpenAI-compatible chat-completion POST.
 ///
@@ -279,6 +279,45 @@ async fn docling_extract_image(
     granite_docling::docling_extract(&app_data, &base64_png)
 }
 
+/// Kick off or resume download of the three Granite Docling ONNX model files.
+///
+/// Downloads are streamed in chunks so the frontend can track progress. Files
+/// already on disk are skipped. The Rust side also pre-loads the ONNX sessions
+/// at the end so the first `docling_extract_image` call is instant.
+///
+/// Call `docling_get_download_state` to poll progress after this resolves.
+#[tauri::command]
+async fn docling_prepare_model(app: tauri::AppHandle) -> Result<granite_docling::DownloadState, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+
+    // Move app_data into the closure so the async fn future doesn't hold any
+    // borrows of the AppHandle after the await point (avoids self-referential futures).
+    let handle = tauri::async_runtime::spawn_blocking(move || {
+        granite_docling::prepare_model(&app_data, |_progress, _status, _bytes| {
+            // Progress is captured in the shared state; the frontend polls it.
+        })
+    });
+
+    // Flatten: handle.await → Result<(), String> → unwrap inner Ok, propagate Err.
+    handle
+        .await
+        .map_err(|e| format!("prepare_model task: {e}"))?
+        .map_err(|e| e)?;
+
+    Ok(granite_docling::get_download_state())
+}
+
+/// Read the current Granite Docling model download / warm-up progress.
+/// Poll this every ~1 s after calling `docling_prepare_model` to update the
+/// Downloads modal UI until `completed` is `true`.
+#[tauri::command]
+fn docling_get_download_state() -> granite_docling::DownloadState {
+    granite_docling::get_download_state()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Load HF_TOKEN from .env so it is available to hf_inference without
@@ -293,6 +332,8 @@ pub fn run() {
             chat_completion,
             hf_inference,
             docling_extract_image,
+            docling_prepare_model,
+            docling_get_download_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Studyus");

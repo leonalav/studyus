@@ -1,6 +1,6 @@
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { getDb, saveDbSync } from "../db/database";
-import { renderPageRange, saveSourcePdf, TauriUnavailableError } from "./tauri";
+import { renderPageRange, saveSourcePdf, TauriUnavailableError, doclingExtractImage, isTauriRuntime } from "./tauri";
 import { resolveRoleEndpoint, chatCompletion, type ContentPart, type RuntimeMessage } from "./agentRuntime";
 import { normalize } from "./latex/normalize";
 import { TEST_GENERATION_AGENT_PROMPT_V1 } from "./llm";
@@ -25,6 +25,25 @@ For each page image, return the page's instructional content as clean prose with
 
 import { seedSkillGraphFromCurriculum } from "./learning/skillGraph";
 import { ExtractedPage } from "./curriculum/docling";
+
+// #region agent log
+const _log = (msg: string, data?: Record<string, unknown>) => {
+  const payload = {
+    sessionId: "b2df54",
+    location: "curriculum.ts:transcribeNode",
+    message: msg,
+    data: data ?? {},
+    timestamp: Date.now(),
+    runId: "pre-fix",
+    hypothesisId: "A",
+  };
+  fetch('http://127.0.0.1:7916/ingest/f536bebe-ec55-4017-9bbe-1f993193bba3', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'b2df54' },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+};
+// #endregion
 
 export interface CurriculumNodeRecord {
   id: string;
@@ -731,9 +750,15 @@ export async function transcribeNode(nodeId: string, onProgress?: (page: number,
     throw new Error(`transcribeNode: pdfium returned no pages for ${nodeId} (${startPage}..${endPage})`);
   }
 
-  // One chat completion: system instructs transcription, user carries the images
-  // interleaved with a small text part naming the section. jSON mode is OFF — we
-  // want prose+LaTeX, not a structured object; the repair loop is not applicable.
+  // Use local ONNX inference if available (desktop with prepared model),
+  // otherwise fall back to cloud vision API.
+  if (isTauriRuntime()) {
+    _log("Using LOCAL ONNX inference for transcribeNode", { nodeId, pageCount: pngBase64.length });
+    return await transcribeWithLocalOnnx(db, nodeId, sourceId, pngBase64, startPage, endPage, onProgress);
+  }
+
+  // Cloud vision fallback
+  _log("Using CLOUD vision API for transcribeNode", { nodeId, pageCount: pngBase64.length });
   const endpoint = await resolveRoleEndpoint("generation");
   if (!endpoint.capabilities.vision) {
     throw new Error(
@@ -835,6 +860,97 @@ export function splitTranscriptionByPage(normalized: string, startPage: number, 
   // Suppress unused-param lint when pageCount differs from resolved count.
   void pageCount;
   return out;
+}
+
+/**
+ * Transcribe curriculum pages using local ONNX inference (Granite Docling).
+ * This runs entirely offline after the model files are downloaded.
+ *
+ * @param db           - SQLite database instance
+ * @param nodeId       - Curriculum node ID for chunk IDs
+ * @param sourceId      - Curriculum source ID (for download state tracking)
+ * @param pngBase64     - Array of base64-encoded PNG page images
+ * @param startPage     - First page number (1-based)
+ * @param endPage       - Last page number
+ * @param onProgress    - Progress callback (page, total)
+ * @returns Number of pages successfully transcribed
+ */
+async function transcribeWithLocalOnnx(
+  db: import("sql.js").Database,
+  nodeId: string,
+  sourceId: string,
+  pngBase64: string[],
+  startPage: number,
+  endPage: number,
+  onProgress?: (page: number, total: number) => void,
+): Promise<number> {
+  let successCount = 0;
+
+  for (let i = 0; i < pngBase64.length; i++) {
+    const pageNumber = startPage + i;
+    _log(`ONNX processing page ${pageNumber}/${endPage}`, { nodeId, sourceId });
+
+    try {
+      const result = await doclingExtractImage(pngBase64[i]);
+
+      // Write the docling markdown as the text content for this page
+      const chunkId = `chunk-docling-${nodeId}-p${pageNumber}`;
+      const excerptHash = simpleHash(result.markdown);
+      const extractedTables = JSON.stringify(result.tables);
+
+      db.run(
+        `INSERT OR REPLACE INTO curriculum_chunks
+           (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind, docling_markdown, extracted_tables)
+         VALUES (?, ?, ?, ?, ?, ?, 'prose', ?, ?);`,
+        [
+          chunkId,
+          nodeId,
+          pageNumber,
+          i,
+          result.markdown,
+          excerptHash,
+          result.markdown,
+          extractedTables,
+        ]
+      );
+
+      successCount++;
+      onProgress?.(pageNumber, endPage);
+      _log(`ONNX extracted page ${pageNumber}`, { nodeId, markdownLength: result.markdown.length, tableCount: result.tables.length });
+      
+      // Write extracted content to a separate debug log for inspection
+      fetch('http://127.0.0.1:7916/ingest/content-b2df54', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'b2df54-content' },
+        body: JSON.stringify({
+          sessionId: "b2df54",
+          location: "curriculum.ts:transcribeWithLocalOnnx",
+          message: `ONNX extracted content for page ${pageNumber}`,
+          data: {
+            nodeId,
+            sourceId,
+            pageNumber,
+            markdown: result.markdown,
+            tables: result.tables,
+            warnings: result.warnings || [],
+          },
+          timestamp: Date.now(),
+          runId: "pre-fix",
+          hypothesisId: "A",
+        }),
+      }).catch(() => {});
+
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      _log(`ONNX failed page ${pageNumber}`, { nodeId, error: msg });
+      console.warn(`[curriculum] ONNX extraction failed for page ${pageNumber}:`, err);
+    }
+  }
+
+  saveDbSync();
+  NODE_TRANSCRIBE_CACHE.add(nodeId);
+  _log(`ONNX transcription complete`, { nodeId, successCount, totalPages: pngBase64.length });
+  return successCount;
 }
 
 /**

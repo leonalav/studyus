@@ -9,11 +9,9 @@ import {
   X,
 } from "lucide-react";
 import {
-  completeDownload,
   pruneDownloads,
   removeDownload,
   subscribeDownloads,
-  updateDownloadProgress,
   type DownloadItem,
 } from "../state/downloadStore";
 
@@ -21,6 +19,8 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onNotify: (text: string) => void;
+  /** Called when the user clicks Retry for the Granite Docling model. */
+  onRetryDocling?: () => void;
 }
 
 /** Kind → icon + badge color */
@@ -54,7 +54,11 @@ function formatAge(iso: string): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-function DownloadCard({ item, onNotify }: { item: DownloadItem; onNotify: (text: string) => void }) {
+function DownloadCard({ item, onNotify, onRetry }: {
+  item: DownloadItem;
+  onNotify: (text: string) => void;
+  onRetry?: () => void;
+}) {
   const kind = KIND_META[item.kind];
   const isPending = item.phase === "pending";
   const isFailed = item.phase === "failed";
@@ -62,22 +66,12 @@ function DownloadCard({ item, onNotify }: { item: DownloadItem; onNotify: (text:
   const isIndeterminate = Number.isNaN(item.progress) || item.bytesTotal < 0;
 
   const handleRetry = useCallback(() => {
-    if (item.kind === "docling") {
-      onNotify(`Retrying Docling extraction for "${item.label}"…`);
-      // Re-inject into the pending queue by resetting phase
-      updateDownloadProgress(item.id, {
-        status: "Retrying…",
-        progress: 0,
-        bytesSoFar: 0,
-      });
-      // Re-trigger the extraction (callers must re-queue via the same mechanism)
-      // For now just reset — the actual retry logic lives in the curriculum pipeline
-      completeDownload(item.id);
-      setTimeout(() => removeDownload(item.id), 500);
+    if (item.kind === "docling" && onRetry) {
+      onRetry();
     } else {
       onNotify(`Retry is not yet implemented for ${kind.label} downloads`);
     }
-  }, [item, kind, onNotify]);
+  }, [item, kind, onNotify, onRetry]);
 
   return (
     <div className={`group rounded-lg border px-3 py-2.5 transition-colors ${
@@ -170,7 +164,7 @@ function EmptyPhase({ phase }: { phase: Phase }) {
   );
 }
 
-export function DownloadsModal({ open, onClose, onNotify }: Props) {
+export function DownloadsModal({ open, onClose, onNotify, onRetryDocling }: Props) {
   const [activePhase, setActivePhase] = useState<Phase>("pending");
   const [items, setItems] = useState<DownloadItem[]>([]);
 
@@ -262,7 +256,7 @@ export function DownloadsModal({ open, onClose, onNotify }: Props) {
           ) : (
             <div className="space-y-2">
               {visibleItems.map((item) => (
-                <DownloadCard key={item.id} item={item} onNotify={onNotify} />
+                <DownloadCard key={item.id} item={item} onNotify={onNotify} onRetry={onRetryDocling} />
               ))}
             </div>
           )}

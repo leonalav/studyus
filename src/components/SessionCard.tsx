@@ -805,12 +805,12 @@ export function SessionCard({
               onboardingStage === "generating"
                 ? "Studyus is preparing your intake form…"
                 : onboardingStage === "asking"
-                  ? "The form above comes first — open it to answer a few quick questions"
+                  ? "Answering the form helps us understand your needs and prepare the environment for you."
                   : onboardingStage === "preparing"
                     ? "Studyus is reading your curriculum and setting up the chalkboard…"
                     : busy
                       ? "Studyus is drafting..."
-                      : "Tell Studyus your needs and other things, it will prepare you the environment..."
+                      : "@study to quick-start a study session."
             }
             rows={5}
             className="min-h-[180px] w-full resize-none bg-transparent px-3.5 pb-3 pt-8 text-[14px] leading-relaxed text-fg outline-none placeholder:text-faint disabled:cursor-not-allowed"

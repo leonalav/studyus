@@ -28,14 +28,21 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # posts them as `data:image/png;base64,...` URLs in vision LLM image_url parts.
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# HuggingFace Hub download API — handles Xet storage, redirects, CDN resolution,
+# and auth headers correctly. The blocking feature provides HFClientSync which
+# manages its own multi-threaded tokio runtime (needed for Xet transfers) so it
+# works safely inside Tauri's async runtime without conflicts.
+hf-hub = { version = "1.0.0", features = ["blocking"] }
 dotenvy = "0.15"
 # ONNX Runtime for local Granite Docling inference (CPU-only).
 # ort is the official Rust binding; 2.0-rc.12 has a clean session-builder API.
 # We disable default features and enable only the CPU execution provider to keep
 # the binary lean and avoid pulling in CUDA/DirectML/TensorRT kernels.
-ort = "2.0.0-rc.12"
+ort = { version = "2.0.0-rc.12", features = ["half"] }
 ndarray = "0.17"
 regex-lite = "0.1"
+tokenizers = "0.23.1"
+half = "2.4.1"
 
 [profile.release]
 panic = "abort"

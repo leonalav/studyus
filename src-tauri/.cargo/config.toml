@@ -5,3 +5,8 @@
 # fight. (This file only matters for direct `cd src-tauri && cargo …` runs.)
 [build]
 target-dir = "target"
+
+# ONNX Runtime is distributed with the dynamic MSVC runtime. Its C++ transitive
+# dependency must use the same runtime or the Windows linker rejects the binary.
+[env]
+CXXFLAGS = "/MD"

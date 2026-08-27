@@ -136,6 +136,61 @@ export async function doclingExtractImage(
 }
 
 /**
+ * Download and warm up the three Granite Docling ONNX model files.
+ *
+ * On first run this streams ~900 MB down from HuggingFace (~3-5 min on fast
+ * broadband, longer on slower connections). The Rust side caches each file
+ * individually under `<app_data>/granite_docling/onnx/`, so interrupted
+ * downloads resume from where they left off.
+ *
+ * Call `doclingGetDownloadState()` while this is running (polling ~1×/s) to
+ * surface progress in the Downloads modal.
+ *
+ * Returns the final download state once all three files are on disk and the
+ * ONNX sessions have been pre-loaded. Subsequent calls to `doclingExtractImage`
+ * are instant because the sessions are already hot.
+ *
+ * Safe to call multiple times — subsequent calls return immediately once the
+ * sessions are ready.
+ */
+export interface DoclingDownloadState {
+  /** 0.0 – 1.0 overall progress across all three files. */
+  progress: number;
+  /** Human-readable status string, e.g. "Downloading vision_encoder.onnx…" */
+  status: string;
+  bytesSoFar: number;
+  bytesTotal: number;
+  /** `true` once all files are on disk and sessions are pre-loaded. */
+  completed: boolean;
+}
+
+export async function doclingPrepareModel(): Promise<DoclingDownloadState> {
+  const t = tauriInternals();
+  if (!t) {
+    throw new TauriUnavailableError(
+      "Granite Docling model preparation is only available in the desktop (Tauri) build."
+    );
+  }
+  return t.invoke<DoclingDownloadState>("docling_prepare_model");
+}
+
+/**
+ * Poll the current Granite Docling model download / warm-up progress.
+ *
+ * Use this after `doclingPrepareModel()` to update the Downloads modal UI
+ * until `completed` is `true`.
+ */
+export async function doclingGetDownloadState(): Promise<DoclingDownloadState> {
+  const t = tauriInternals();
+  if (!t) {
+    throw new TauriUnavailableError(
+      "Granite Docling model preparation is only available in the desktop (Tauri) build."
+    );
+  }
+  return t.invoke<DoclingDownloadState>("docling_get_download_state");
+}
+
+/**
  * Run inference on a rendered PNG page using a Hugging Face model via the
  * Inference API.  The HF_TOKEN lives in the desktop .env and is resolved
  * natively in Rust — it never appears in the frontend bundle.

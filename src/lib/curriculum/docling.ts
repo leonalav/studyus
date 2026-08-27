@@ -1,19 +1,31 @@
 /**
  * Granite Docling curriculum extraction pipeline.
  *
- * Runs on the desktop (Tauri) build only.  The HF_TOKEN lives in .env and
- * never reaches the frontend bundle — it is resolved natively in Rust.
+ * Runs on the desktop (Tauri) build only. Uses local ONNX inference via
+ * the Rust backend for zero-latency, offline-capable document extraction.
  *
  * Pipeline:
  *   PDF page  →  PDFium rasterisation (Rust)  →  base64 PNG
- *   PNG  →  Granite Docling vision model (HF Inference API via Rust)
+ *   PNG  →  Granite Docling ONNX models (local CPU via ONNX Runtime)
  *   →  Markdown + tables
  */
 
-import { doclingExtractImage, isTauriRuntime } from "../tauri";
+import { doclingExtractImage, isTauriRuntime, TauriUnavailableError } from "../tauri";
 import { renderPageRange } from "../tauri";
 
-const DOCLING_MODEL = "ds4sd/granite-docling-258M";
+/** A table extracted from a page during Docling OCR. */
+export interface ExtractedPage {
+  pageNumber: number;
+  markdown: string;
+  tables: Array<{ id: string; markdown: string }>;
+  images: Array<{ id: string; caption: string }>;
+}
+
+/** Result from extracting a page range. */
+export interface SubsectionExtractionResult {
+  pages: ExtractedPage[];
+  skippedPages: number[];
+}
 
 /**
  * Extract an inclusive page range from a curriculum PDF into structured Markdown.
@@ -44,22 +56,22 @@ export async function extractCurriculumSubsection(
     return { pages: [], skippedPages: [] };
   }
 
-  // 2. Send each page to Granite Docling on the HF Inference API
+  // 2. Extract content from each page using local ONNX inference
   const pages: ExtractedPage[] = [];
   const skippedPages: number[] = [];
 
   for (let i = 0; i < pngBuffers.length; i++) {
     const pageNumber = start + i;
     try {
-      const result = await extractPageWithGraniteDocling(pngBuffers[i]);
+      const result = await extractPageWithLocalOnnx(pngBuffers[i]);
       pages.push({ pageNumber, ...result });
     } catch (err) {
-      // If the model is still loading (503), retry once after a brief wait
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("503") || msg.includes("loading")) {
-        await sleep(25_000);
+      // Retry once on transient errors
+      if (msg.includes("lock") || msg.includes("timeout") || msg.includes("503")) {
+        await sleep(5000);
         try {
-          const result = await extractPageWithGraniteDocling(pngBuffers[i]);
+          const result = await extractPageWithLocalOnnx(pngBuffers[i]);
           pages.push({ pageNumber, ...result });
         } catch {
           skippedPages.push(pageNumber);
@@ -73,40 +85,18 @@ export async function extractCurriculumSubsection(
   return { pages, skippedPages };
 }
 
-/** One call to Granite Docling for a single PNG buffer. */
-async function extractPageWithGraniteDocling(
+/** One call to local ONNX inference for a single PNG buffer. */
+async function extractPageWithLocalOnnx(
   base64Png: string
 ): Promise<Omit<ExtractedPage, "pageNumber">> {
-  // HF Inference API format for vision: the "inputs" is a dict with
-  // image (base64) and text (prompt). Parameters go in the "parameters" field.
-  const inputs = JSON.stringify({
-    image: `data:image/png;base64,${base64Png}`,
-  });
+  // Call the Rust backend which runs local ONNX inference
+  const result = await doclingExtractImage(base64Png);
 
-  const parameters = {
-    return_text: true,
-    return_images: false,
-    max_new_tokens: 4096,
-    temperature: 0.1,
-  };
-
-  const response = await hfInference(DOCLING_MODEL, inputs, parameters);
-
-  // The response is a JSON string produced by our Rust hf_inference command.
-  // Granite Docling returns an object with a "text" field containing the markdown.
-  let parsed: { text?: string };
-  try {
-    parsed = JSON.parse(response);
-  } catch {
-    parsed = { text: response };
-  }
-
-  const markdown = parsed.text ?? response;
-  const { tables, cleanedMarkdown } = parseDoclingMarkdown(markdown);
+  const { tables, cleanedMarkdown } = parseDoclingMarkdown(result.markdown);
 
   return {
     markdown: cleanedMarkdown,
-    images: [],
+    images: result.tables.map((t) => ({ id: t.id, caption: "" })),
     tables,
   };
 }

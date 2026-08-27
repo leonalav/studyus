@@ -141,6 +141,21 @@ export function failDownload(id: string, error: string): void {
   });
 }
 
+/** Reset a failed (or completed) item back to pending, clearing error state. */
+export function retryDownload(id: string): void {
+  const item = _items.find((x) => x.id === id);
+  if (!item) return;
+  _upsert({
+    ...item,
+    phase: "pending",
+    status: "Queued",
+    progress: 0,
+    bytesSoFar: 0,
+    error: null,
+    endedAt: null,
+  });
+}
+
 /** Remove a download from the store (clears the list). */
 export function removeDownload(id: string): void {
   const before = _items.length;

@@ -33,6 +33,19 @@ import {
   startNotificationRuntime,
   type InAppNotificationDetail,
 } from "./lib/notifications";
+import {
+  doclingPrepareModel,
+  doclingGetDownloadState,
+  isTauriRuntime,
+  type DoclingDownloadState,
+} from "./lib/tauri";
+import {
+  completeDownload,
+  enqueueDownload,
+  failDownload,
+  getDownloads,
+  updateDownloadProgress,
+} from "./state/downloadStore";
 
 function useClock() {
   const [now, setNow] = useState(() => new Date());
@@ -136,6 +149,75 @@ export default function App() {
       window.removeEventListener(IN_APP_NOTIFICATION_EVENT, onNotification);
     };
   }, [notify]);
+
+  /* ── Granite Docling ONNX model preparation (startup + retry) ─────────────── */
+  const prepareDoclingModel = useCallback(() => {
+    if (!isTauriRuntime()) return;
+
+    const MODEL_ID = "docling-granite-onnx";
+
+    // Register (or re-register) the item so it always starts in Pending.
+    // If it was already completed we overwrite it back to Pending so retry works.
+    enqueueDownload({
+      id: MODEL_ID,
+      kind: "docling",
+      label: "Granite Docling 258M q4f16 (~265 MB)",
+      bytesTotal: 265_000_000,
+    });
+
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+
+    const startPolling = () => {
+      if (pollInterval) return;
+      pollInterval = setInterval(async () => {
+        try {
+          const state: DoclingDownloadState = await doclingGetDownloadState();
+          updateDownloadProgress(MODEL_ID, {
+            status: state.status,
+            progress: state.progress,
+            bytesSoFar: state.bytesSoFar,
+            bytesTotal: state.bytesTotal,
+          });
+          if (state.completed) clearInterval(pollInterval!);
+        } catch {
+          // non-fatal — Rust side is updating the shared state
+        }
+      }, 1_000);
+    };
+
+    doclingPrepareModel()
+      .then((state) => {
+        clearInterval(pollInterval!);
+        updateDownloadProgress(MODEL_ID, {
+          status: state.status,
+          progress: state.progress,
+          bytesSoFar: state.bytesSoFar,
+          bytesTotal: state.bytesTotal,
+        });
+        if (state.completed) {
+          completeDownload(MODEL_ID);
+        } else {
+          failDownload(MODEL_ID, "Session warm-up did not complete.");
+        }
+      })
+      .catch((err) => {
+        clearInterval(pollInterval!);
+        failDownload(MODEL_ID, err instanceof Error ? err.message : String(err));
+      });
+
+    startPolling();
+  }, []);
+
+  useEffect(() => {
+    // Skip re-downloading if the model was already successfully prepared.
+    const MODEL_ID = "docling-granite-onnx";
+    const alreadyDone = getDownloads().some(
+      (d) => d.id === MODEL_ID && d.phase === "completed"
+    );
+    if (!alreadyDone) {
+      prepareDoclingModel();
+    }
+  }, [prepareDoclingModel]);
 
   const startPrep = useCallback(
     (
@@ -644,6 +726,7 @@ export default function App() {
         open={downloadsOpen}
         onClose={() => setDownloadsOpen(false)}
         onNotify={notify}
+        onRetryDocling={prepareDoclingModel}
       />
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
