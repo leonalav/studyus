@@ -16,16 +16,18 @@ import { formatWidgetCatalog, formatMasteryDirective } from "./prompt";
  */
 
 describe("widget protocol — coverage", () => {
-  it("defines exactly the 18 widgets, with Graph/Geometry/Equation left to visualize", () => {
-    expect(WIDGET_KINDS).toHaveLength(18);
+  it("defines exactly the 19 widgets, with Graph/Geometry/Equation left to visualize", () => {
+    expect(WIDGET_KINDS).toHaveLength(19);
     // 3 (Graph), 4 (Point/Geometry) and 5 (Equation) stay visualization intents.
     const numbers = WIDGET_KINDS.map((kind) => WIDGET_BOARD_NUMBER[kind]);
     expect(numbers).not.toContain(3);
     expect(numbers).not.toContain(4);
     expect(numbers).not.toContain(5);
-    expect(new Set(numbers).size).toBe(18);
+    expect(new Set(numbers).size).toBe(19);
     // #21 is the plan — the session-opening agreement gate.
     expect(WIDGET_BOARD_NUMBER.plan).toBe(21);
+    // #22 is the overview — the comprehensive concept map placed alongside the plan.
+    expect(WIDGET_BOARD_NUMBER.overview).toBe(22);
   });
 
   it("gives every widget a label and a catalog entry the agent can act on", () => {
@@ -85,6 +87,109 @@ describe("widget validation — structural", () => {
       columns,
       rows: [{ id: "r1", label: "Interval", cells: ["finite"] }],
     }).valid).toBe(false);
+  });
+
+  it("accepts a comparison whose cells carry parallel LaTeX", () => {
+    expect(validateWidgetIntent({
+      kind: "comparison",
+      columns: [
+        { id: "sin", title: "sin(A+B)", items: ["sum"], itemsLatex: ["\\sin(A+B)"] },
+        { id: "cos", title: "cos(A+B)", items: ["sum"], itemsLatex: ["\\cos(A+B)"] },
+      ],
+      takeaway: "Same shape, opposite sign on the cross term.",
+    }).valid).toBe(true);
+
+    // itemsLatex length must match items length — a one-off LaTeX bullet
+    // misleads about what was compared.
+    expect(validateWidgetIntent({
+      kind: "comparison",
+      columns: [
+        { id: "a", title: "Column A", items: ["x", "y"], itemsLatex: ["x"] },
+        { id: "b", title: "Column B", items: ["x", "y"], itemsLatex: ["x", "y"] },
+      ],
+    }).valid).toBe(false);
+  });
+
+  it("accepts a fully specified overview for a trigonometric-functions concept", () => {
+    expect(validateWidgetIntent({
+      kind: "overview",
+      concept: "Trigonometric functions",
+      subtitle: "sin, cos, tan and their graphs",
+      summary: "The six trig functions describe ratios of sides of a right triangle, equivalently the coordinates of a point on the unit circle, equivalently the y-values of a periodic wave.",
+      summaryLatex: "\\sin^2(x) + \\cos^2(x) = 1",
+      vocabulary: [
+        { term: "amplitude", meaning: "peak height of the wave", latex: "A" },
+        { term: "period", meaning: "length of one full cycle", latex: "T = 2\\pi / B" },
+      ],
+      formulas: [
+        { id: "pyth", name: "Pythagorean identity", latex: "\\sin^2(x) + \\cos^2(x) = 1", essential: true, meaning: "The anchor identity, derived from the unit circle." },
+        { id: "sum", name: "Sine of a sum", latex: "\\sin(A+B) = \\sin A \\cos B + \\cos A \\sin B" },
+      ],
+      properties: [
+        { id: "period_sin", name: "Period of sin/cos", value: "2π", valueLatex: "2\\pi" },
+        { id: "period_tan", name: "Period of tan", value: "π", valueLatex: "\\pi" },
+        { id: "amp", name: "Amplitude of sin/cos", value: "1", valueLatex: "1" },
+      ],
+      graphs: [
+        {
+          id: "sin_graph",
+          name: "Sine",
+          shape: "A smooth wave that starts at 0, rises to 1 at π/2, returns to 0 at π, falls to -1 at 3π/2, and repeats every 2π.",
+          sketchLatex: "y = \\sin(x)",
+          xRange: "[-2π, 2π]",
+          yRange: "[-1, 1]",
+          keyPoints: [
+            { label: "Zero", valueLatex: "0" },
+            { label: "Max", valueLatex: "\\pi/2", description: "sin = 1" },
+            { label: "Min", valueLatex: "3\\pi/2", description: "sin = -1" },
+          ],
+        },
+      ],
+      pitfalls: [
+        { id: "sign", mistake: "Reading sin(π - x) as sin(x)", why: "sin is symmetric around π/2, not around 0", correctionLatex: "\\sin(\\pi - x) = \\sin(x)" },
+        { id: "degrees", mistake: "Plugging degrees into a calculator set to radians" },
+      ],
+      patterns: [
+        { id: "shift", latex: "\\sin(x + \\pi/2) = \\cos(x)", note: "The 90° phase shift identity." },
+      ],
+      youWillBeAbleTo: [
+        "Read the period, amplitude and phase shift off a trig equation.",
+        "Apply the Pythagorean identity and the sum/difference formulas.",
+      ],
+    }).valid).toBe(true);
+  });
+
+  it("rejects an overview missing the concept name or summary", () => {
+    expect(validateWidgetIntent({ kind: "overview", summary: "x" }).valid).toBe(false);
+    expect(validateWidgetIntent({ kind: "overview", concept: "x" }).valid).toBe(false);
+  });
+
+  it("accepts a minimal overview with just concept + summary", () => {
+    expect(validateWidgetIntent({
+      kind: "overview",
+      concept: "Vectors",
+      summary: "A quantity with magnitude and direction.",
+    }).valid).toBe(true);
+  });
+
+  it("accepts a hint step whose body is LaTeX", () => {
+    expect(validateWidgetIntent({
+      kind: "hint",
+      steps: [
+        { level: 1, label: "Nudge", body: "Look at the derivative of both sides.", bodyLatex: "\\frac{d}{dx}(uv) = u'v + uv'" },
+        { level: 2, label: "Lead", body: "Try the product rule." },
+        { level: 3, label: "Reveal", body: "Use the product rule and simplify." },
+      ],
+    }).valid).toBe(true);
+  });
+
+  it("accepts an annotation whose note has a parallel LaTeX form", () => {
+    expect(validateWidgetIntent({
+      kind: "annotation",
+      marks: [
+        { id: "m1", target: "h → 0", note: "The limit drives everything here.", noteLatex: "\\lim_{h \\to 0}" },
+      ],
+    }).valid).toBe(true);
   });
 });
 
@@ -240,10 +345,11 @@ describe("deterministic grading", () => {
     expect(gradeAnswerableWidget(intent, {})).toBeUndefined();
   });
 
-  it("grades short answers case- and punctuation-insensitively", () => {
+  it("accepts clear short-answer matches and leaves paraphrases neutral", () => {
     const intent = { format: "short_answer" as const, acceptedAnswers: ["the slope of the tangent"] };
     expect(gradeAnswerableWidget(intent, { responseText: "  The Slope of the Tangent. " })).toBe(true);
-    expect(gradeAnswerableWidget(intent, { responseText: "the area under the curve" })).toBe(false);
+    expect(gradeAnswerableWidget(intent, { responseText: "the tangent's steepness" })).toBeUndefined();
+    expect(gradeAnswerableWidget(intent, { responseText: "the area under the curve" })).toBeUndefined();
   });
 
   it("grades numeric answers within tolerance and tolerates a trailing unit", () => {

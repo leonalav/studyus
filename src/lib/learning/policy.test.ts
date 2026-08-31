@@ -330,6 +330,7 @@ describe("direct_instruction — the bounded cold-start route", () => {
     expect(move.supportCeiling).toBe(3);
     expect(move.permittedWidgetKinds).toEqual([
       "concept_card",
+      "overview",
       "example",
       "annotation",
       "animation",

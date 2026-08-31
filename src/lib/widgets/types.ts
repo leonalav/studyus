@@ -40,7 +40,8 @@ export type WidgetIntent =
   | RetrievalCheckWidget
   | ChallengeWidget
   | ReflectionWidget
-  | MasteryCardWidget;
+  | MasteryCardWidget
+  | OverviewWidget;
 
 export type WidgetKind = WidgetIntent["kind"];
 
@@ -49,6 +50,7 @@ export type WidgetKind = WidgetIntent["kind"];
 export const WIDGET_KINDS = [
   "roadmap",
   "plan",
+  "overview",
   "concept_card",
   "slider",
   "animation",
@@ -71,6 +73,7 @@ export const WIDGET_KINDS = [
 export const WIDGET_BOARD_NUMBER: Record<WidgetKind, number> = {
   roadmap: 1,
   plan: 21,
+  overview: 22,
   concept_card: 2,
   slider: 6,
   animation: 7,
@@ -92,6 +95,7 @@ export const WIDGET_BOARD_NUMBER: Record<WidgetKind, number> = {
 export const WIDGET_LABEL: Record<WidgetKind, string> = {
   roadmap: "Roadmap",
   plan: "Plan",
+  overview: "Overview",
   concept_card: "Concept Card",
   slider: "Slider",
   animation: "Animation",
@@ -182,9 +186,15 @@ export interface PlanStep {
   id: string;
   /** Phase headline, e.g. "Read the picture before the letters". */
   label: string;
+  /** Optional LaTeX form of the label, when the phase names a quantity rather
+   *  than a plain phrase. Renders beside or under `label` on the card. */
+  labelLatex?: string;
   /** One to three short numbered detail lines spelling out what the phase
    *  covers — the (1)(2)(3) sub-bullets under a phase. */
   details?: string[];
+  /** Optional LaTeX form for `details` items, parallel to `details`. Used when
+   *  a phase covers equations whose text form would be lossy. */
+  detailsLatex?: string[];
 }
 
 /**
@@ -209,6 +219,120 @@ export interface PlanWidget extends WidgetBase {
    *  this plan?" — override when the session needs a more specific ask, and
    *  only then. */
   agreementPrompt?: string;
+}
+
+/* ── 22 · Overview — the full concept map, placed alongside Plan ── */
+
+/** A formal statement rendered as LaTeX, with an optional caption explaining
+ *  what the formula says in words. Used by `OverviewWidget.formulas`. */
+export interface OverviewFormula {
+  id: string;
+  /** A short name for the formula, e.g. "Period of sin(x)" or "Pythagorean
+   *  identity". Rendered as the row header so the learner can scan the
+   *  formula list by name. */
+  name: string;
+  /** The formula body. KaTeX-rendered. */
+  latex: string;
+  /** Plain-language restatement of what the formula means. */
+  meaning?: string;
+  /** When true, the renderer flags this formula as a high-priority identity
+   *  the learner must memorise. */
+  essential?: boolean;
+}
+
+/** A measurable property of the concept, e.g. "period = 2π" for sin/cos. */
+export interface OverviewProperty {
+  id: string;
+  /** Property name, e.g. "Amplitude", "Period", "Domain", "Range". */
+  name: string;
+  /** Value of the property. Plain text when it's a phrase like "all reals";
+   *  LaTeX when it's a quantity. */
+  value: string;
+  valueLatex?: string;
+  /** Optional plain-language explanation of why the property holds. */
+  note?: string;
+}
+
+/** A graph or visual signature the learner must picture in their head.
+ *  Declared as a description rather than a render so the tutor can be
+ *  transparent about what the picture looks like (axes, shape, key points)
+ *  without forcing a hand-coded plot the validator can't gate. */
+export interface OverviewGraph {
+  id: string;
+  /** A short name, e.g. "Sine graph" or "Unit circle". */
+  name: string;
+  /** What the picture looks like. e.g. "A smooth wave that starts at 0,
+   *  rises to 1 at π/2, returns to 0 at π, falls to -1 at 3π/2, and
+   *  repeats every 2π." */
+  shape: string;
+  /** Optional formal axis information. */
+  xRange?: string;
+  yRange?: string;
+  /** Optional list of landmark points the learner should know, e.g. the
+   *  zeros and extrema of sin(x). Each can be plain text or LaTeX. */
+  keyPoints?: { label: string; valueLatex?: string; description?: string }[];
+  /** Optional LaTeX sketch — a formula that summarises the graph, e.g.
+   *  "y = A \sin(Bx + C) + D". Renders above the shape description. */
+  sketchLatex?: string;
+}
+
+/** A common error or misconception learners hit on this concept. Spelled out
+ *  so the tutor can be transparent about the traps ahead of time rather than
+ *  letting the learner walk into each one. */
+export interface OverviewPitfall {
+  id: string;
+  /** Plain description of the mistake. */
+  mistake: string;
+  /** The underlying misconception that produces the mistake. */
+  why?: string;
+  /** The correct formulation, often best given as LaTeX. */
+  correctionLatex?: string;
+  correction?: string;
+}
+
+/** The full-concept map that sits alongside the Plan card.
+ *
+ *  The Plan answers "how will we get there?" — it is the route from zero to
+ *  mastery. The Overview answers "what IS there?" — the entire surface of
+ *  the concept laid out so the learner sees the territory before stepping
+ *  onto it. The two cards together make a session's opening honest: the
+ *  learner has seen both what they are committing to AND the full scope
+ *  they are about to learn.
+ *
+ *  The Overview is deliberately comprehensive — a partial overview teaches
+ *  the wrong thing by omission. For trigonometric functions it lists the
+ *  identities, the graphs, the properties, the common pitfalls, and the
+ *  vocabulary. The agent is asked to be transparent: spit out the full
+ *  thing a learner has to know, not a curated highlight reel. */
+export interface OverviewWidget extends WidgetBase {
+  kind: "overview";
+  /** The concept being learned, e.g. "Trigonometric functions". */
+  concept: string;
+  /** Optional subtitle / domain hint, e.g. "sin, cos, tan and their graphs". */
+  subtitle?: string;
+  /** Short definition of the concept in plain language. */
+  summary: string;
+  /** Optional formal LaTeX definition that backs the plain summary. */
+  summaryLatex?: string;
+  /** Vocabulary the learner must be able to read and use, e.g.
+   *  ["amplitude", "period", "phase shift", "frequency"]. Each entry is a
+   *  short phrase, optionally with a LaTeX form. */
+  vocabulary?: { term: string; meaning?: string; latex?: string }[];
+  /** Formal identities, formulas and key relations. */
+  formulas?: OverviewFormula[];
+  /** Measurable properties — quantities the learner must be able to read
+   *  off the concept, with their values. */
+  properties?: OverviewProperty[];
+  /** The graph(s) the learner must picture. */
+  graphs?: OverviewGraph[];
+  /** Common pitfalls and misconceptions the learner is likely to hit. */
+  pitfalls?: OverviewPitfall[];
+  /** Optional patterns or rules-of-thumb, e.g. "sin(x+π/2) = cos(x)".
+   *  Each entry is a short LaTeX line with a plain-language caption. */
+  patterns?: { id: string; latex?: string; text?: string; note?: string }[];
+  /** Optional list of things the learner will be able to do after mastering
+   *  the concept. Used as a closure for the overview card. */
+  youWillBeAbleTo?: string[];
 }
 
 /* ── 2 · Concept Card — the durable definition ── */
@@ -579,14 +703,23 @@ export interface ComparisonColumn {
   title: string;
   /** Free-form bullets when the comparison is not a strict table. */
   items?: string[];
+  /** Optional LaTeX form parallel to `items`. Used when the column compares
+   *  quantities whose text form would be lossy, e.g. comparing the formulas
+   *  for sin(A+B) and cos(A+B). Renders below each `items` entry when both
+   *  are present. */
+  itemsLatex?: string[];
   accent?: "cyan" | "amber" | "violet" | "ember" | "neutral";
 }
 
 export interface ComparisonRow {
   id: string;
   label: string;
+  /** Optional LaTeX form of the row label. */
+  labelLatex?: string;
   /** One cell per column, in column order. */
   cells: string[];
+  /** Optional LaTeX forms parallel to `cells`. Used for numeric comparisons. */
+  cellsLatex?: string[];
 }
 
 export interface ComparisonWidget extends WidgetBase {
@@ -661,7 +794,12 @@ export interface HintStep {
   /** 1 = nudge, 2 = lead, 3 = reveal the idea. Never the final answer. */
   level: 1 | 2 | 3;
   label: string;
+  /** Optional LaTeX form of the label. Renders above `body`. */
+  labelLatex?: string;
   body: string;
+  /** Optional LaTeX fragment that goes with the body, e.g. when the hint
+   *  points at a relation whose typeset form is the actual lesson. */
+  bodyLatex?: string;
 }
 
 export interface HintWidget extends WidgetBase {
@@ -694,6 +832,9 @@ export interface AnnotationMark {
   target: string;
   /** What the agent wants noticed about it. */
   note: string;
+  /** Optional LaTeX form of the note, e.g. when the agent is highlighting a
+   *  particular factor of an expression. Renders below `note`. */
+  noteLatex?: string;
   emphasis?: "circle" | "underline" | "arrow" | "strike";
 }
 
@@ -735,6 +876,8 @@ export interface ExampleStep {
   latex?: string;
   /** Why this step happens. A step without a reason is a magic trick. */
   why: string;
+  /** Optional LaTeX form of `why`, when the reasoning IS the equation. */
+  whyLatex?: string;
 }
 
 export interface ExampleWidget extends WidgetBase {

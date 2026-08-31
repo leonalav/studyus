@@ -83,9 +83,10 @@ describe("A missing answer key means ungradeable, never wrong", () => {
     )).toBeUndefined();
   });
 
-  it("still grades honestly when a key exists", () => {
+  it("does not turn phrase mismatches into failures", () => {
     expect(gradeAnswerableWidget({ format: "short_answer", acceptedAnswers: ["4"] }, { responseText: "4" } as never)).toBe(true);
-    expect(gradeAnswerableWidget({ format: "short_answer", acceptedAnswers: ["4"] }, { responseText: "5" } as never)).toBe(false);
+    expect(gradeAnswerableWidget({ format: "short_answer", acceptedAnswers: ["four"] }, { responseText: "4" } as never)).toBeUndefined();
+    expect(gradeAnswerableWidget({ format: "short_answer", acceptedAnswers: ["4"] }, { responseText: "5" } as never)).toBeUndefined();
   });
 
   it("files a keyless answer as unknown with no asserted confidence", async () => {

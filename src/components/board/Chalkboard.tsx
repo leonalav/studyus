@@ -19,7 +19,6 @@ import {
   formulaAwarePageSlice,
   pageCountFor,
   pageIndexOf,
-  pageSlice,
 } from "../../lib/boardPagination";
 import { ErrorBoundary } from "../ErrorBoundary";
 
@@ -120,6 +119,7 @@ export interface Stroke {
   width: number;
   alpha: number;
   erase: boolean;
+  coordinateSpace?: "board";
 }
 
 export interface BoardView {
@@ -478,6 +478,7 @@ export function Chalkboard({
     if (!c) return;
     const ctx = c.getContext("2d");
     if (!ctx) return;
+    const camera = viewRef.current;
     ctx.clearRect(0, 0, c.width, c.height);
     for (const st of [...strokes.current, ...(cur.current ? [cur.current] : [])]) {
       if (st.pts.length < 2) continue;
@@ -485,12 +486,14 @@ export function Chalkboard({
       ctx.globalCompositeOperation = st.erase ? "destination-out" : "source-over";
       ctx.globalAlpha = st.alpha;
       ctx.strokeStyle = st.color;
-      ctx.lineWidth = st.width;
+      ctx.lineWidth = st.width * camera.s;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.beginPath();
-      ctx.moveTo(st.pts[0].x, st.pts[0].y);
-      for (let i = 1; i < st.pts.length; i++) ctx.lineTo(st.pts[i].x, st.pts[i].y);
+      ctx.moveTo(camera.x + st.pts[0].x * camera.s, camera.y + st.pts[0].y * camera.s);
+      for (let i = 1; i < st.pts.length; i++) {
+        ctx.lineTo(camera.x + st.pts[i].x * camera.s, camera.y + st.pts[i].y * camera.s);
+      }
       ctx.stroke();
       ctx.restore();
     }
@@ -519,7 +522,19 @@ export function Chalkboard({
   }, [onViewChange, readOnly, redraw]);
 
   useEffect(() => {
-    strokes.current = initialStrokes ? initialStrokes.map((stroke) => ({ ...stroke, pts: [...stroke.pts] })) : [];
+    const camera = viewRef.current;
+    strokes.current = initialStrokes
+      ? initialStrokes.map((stroke) => ({
+          ...stroke,
+          pts: stroke.coordinateSpace === "board"
+            ? [...stroke.pts]
+            : stroke.pts.map((point) => ({
+                x: (point.x - camera.x) / camera.s,
+                y: (point.y - camera.y) / camera.s,
+              })),
+          coordinateSpace: "board" as const,
+        }))
+      : [];
     cur.current = null;
     redraw();
   }, [strokesKey, redraw]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -532,22 +547,34 @@ export function Chalkboard({
     });
   }, [onClearRef, onStrokesChange, redraw]);
 
+  useEffect(() => {
+    redraw();
+  }, [view, redraw]);
+
+  const boardPointFromEvent = (e: React.MouseEvent) => {
+    const r = canvasRef.current!.getBoundingClientRect();
+    const camera = viewRef.current;
+    return {
+      x: (e.clientX - r.left - camera.x) / camera.s,
+      y: (e.clientY - r.top - camera.y) / camera.s,
+    };
+  };
+
   const annDown = (e: React.MouseEvent) => {
     if (readOnly || !annotating) return;
-    const r = canvasRef.current!.getBoundingClientRect();
-    const p = { x: e.clientX - r.left, y: e.clientY - r.top };
+    const p = boardPointFromEvent(e);
     cur.current = {
       pts: [p],
       color: penColor,
-      width: penTool === "highlighter" ? 18 : penTool === "eraser" ? 26 : 3,
+      width: (penTool === "highlighter" ? 18 : penTool === "eraser" ? 26 : 3) / viewRef.current.s,
       alpha: penTool === "highlighter" ? 0.32 : 1,
       erase: penTool === "eraser",
+      coordinateSpace: "board",
     };
   };
   const annMove = (e: React.MouseEvent) => {
     if (!annotating || !cur.current) return;
-    const r = canvasRef.current!.getBoundingClientRect();
-    cur.current.pts.push({ x: e.clientX - r.left, y: e.clientY - r.top });
+    cur.current.pts.push(boardPointFromEvent(e));
     redraw();
   };
   const annUp = () => {
@@ -560,7 +587,7 @@ export function Chalkboard({
   const gridSize = theme.id === "blueprint" ? 28 : 22;
 
   const { start: pageStart, end: pageEnd } = paginated
-    ? formulaAwarePageSlice(blocks, revealed, activePage, effectivePageSize)
+    ? formulaAwarePageSlice(board.blocks, revealed, activePage, effectivePageSize)
     : { start: 0, end: revealed };
   // `revealed` is the index of the NEXT block to appear. Camera and caret both
   // use followPage (last revealed block's page) so the pen does not blink off
@@ -725,7 +752,7 @@ export function Chalkboard({
             </button>
           </div>
           <div className="border-t border-white/8 px-3 py-1.5 font-mono text-[10px] text-white/30">
-            Opens a new board in Threads
+            Opens a new board accessible via Threads. Click the Threads button again to return to main board.
           </div>
         </div>
       )}
@@ -973,10 +1000,24 @@ function containsVisualization(block: Block): boolean {
     || (block.kind === "row" && block.children.some(containsVisualization));
 }
 
-/* `**bold**` and `*em*` markers become yellow-strong text in chalk. */
+/* `**bold**`, `*em*`, and `[[color]]text[[/color]]` markers become
+ * readable emphasis styles in chalk. Color names are deliberately allowlisted
+ * so model output cannot inject arbitrary CSS. */
+const CHALK_COLORS: Record<string, string> = {
+  amber: "#fde68a",
+  cyan: "#7dd3fc",
+  green: "#86efac",
+  coral: "#fca5a5",
+  violet: "#c4b5fd",
+};
+
 function renderTextWithStrong(text: string) {
-  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|\[\[(?:amber|cyan|green|coral|violet)\]\][\s\S]+?\[\[\/(?:amber|cyan|green|coral|violet)\]\])/g);
   return parts.map((part, i) => {
+    const colorMatch = part.match(/^\[\[(amber|cyan|green|coral|violet)\]\]([\s\S]+)\[\[\/\1\]\]$/);
+    if (colorMatch) {
+      return <span key={i} style={{ color: CHALK_COLORS[colorMatch[1]] }}>{colorMatch[2]}</span>;
+    }
     if (part.startsWith("**") && part.endsWith("**")) {
       return <ChalkStrong key={i}>{part.slice(2, -2)}</ChalkStrong>;
     }

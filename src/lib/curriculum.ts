@@ -1,6 +1,6 @@
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { getDb, saveDbSync } from "../db/database";
-import { renderPageRange, saveSourcePdf, TauriUnavailableError, doclingExtractImage, isTauriRuntime } from "./tauri";
+import { renderPageRange, saveSourcePdf, TauriUnavailableError, visionExtractImage, isTauriRuntime } from "./tauri";
 import { resolveRoleEndpoint, chatCompletion, type ContentPart, type RuntimeMessage } from "./agentRuntime";
 import { normalize } from "./latex/normalize";
 import { TEST_GENERATION_AGENT_PROMPT_V1 } from "./llm";
@@ -750,11 +750,10 @@ export async function transcribeNode(nodeId: string, onProgress?: (page: number,
     throw new Error(`transcribeNode: pdfium returned no pages for ${nodeId} (${startPage}..${endPage})`);
   }
 
-  // Use local ONNX inference if available (desktop with prepared model),
-  // otherwise fall back to cloud vision API.
+  // Use cloud vision API via Rust (hardcoded constants in lib.rs)
   if (isTauriRuntime()) {
-    _log("Using LOCAL ONNX inference for transcribeNode", { nodeId, pageCount: pngBase64.length });
-    return await transcribeWithLocalOnnx(db, nodeId, sourceId, pngBase64, startPage, endPage, onProgress);
+    _log("Using cloud vision API for transcribeNode", { nodeId, pageCount: pngBase64.length });
+    return await transcribeWithCloudVision(db, nodeId, sourceId, pngBase64, startPage, endPage, onProgress);
   }
 
   // Cloud vision fallback
@@ -863,19 +862,19 @@ export function splitTranscriptionByPage(normalized: string, startPage: number, 
 }
 
 /**
- * Transcribe curriculum pages using local ONNX inference (Granite Docling).
- * This runs entirely offline after the model files are downloaded.
+ * Transcribe curriculum pages using cloud vision API via Rust.
+ * The vision model configuration lives in src-tauri/src/lib.rs as hardcoded constants.
  *
  * @param db           - SQLite database instance
  * @param nodeId       - Curriculum node ID for chunk IDs
- * @param sourceId      - Curriculum source ID (for download state tracking)
- * @param pngBase64     - Array of base64-encoded PNG page images
- * @param startPage     - First page number (1-based)
- * @param endPage       - Last page number
- * @param onProgress    - Progress callback (page, total)
+ * @param sourceId     - Curriculum source ID (for logging)
+ * @param pngBase64    - Array of base64-encoded PNG page images
+ * @param startPage    - First page number (1-based)
+ * @param endPage      - Last page number
+ * @param onProgress   - Progress callback (page, total)
  * @returns Number of pages successfully transcribed
  */
-async function transcribeWithLocalOnnx(
+async function transcribeWithCloudVision(
   db: import("sql.js").Database,
   nodeId: string,
   sourceId: string,
@@ -888,20 +887,23 @@ async function transcribeWithLocalOnnx(
 
   for (let i = 0; i < pngBase64.length; i++) {
     const pageNumber = startPage + i;
-    _log(`ONNX processing page ${pageNumber}/${endPage}`, { nodeId, sourceId });
+    _log(`Processing page ${pageNumber}/${endPage}`, { nodeId, sourceId });
 
     try {
-      const result = await doclingExtractImage(pngBase64[i]);
+      // Call Rust's vision_extract_image with no parameters.
+      // The Rust side uses VISION_ENDPOINT_URL, VISION_MODEL_ID, and
+      // VISION_API_KEY / STUDYUS_VISION_API_KEY from hardcoded constants.
+      const result = await visionExtractImage(pngBase64[i], undefined, undefined);
+      _log(`Cloud vision extracted page ${pageNumber}`, { nodeId, markdownLength: result.markdown.length });
 
-      // Write the docling markdown as the text content for this page
-      const chunkId = `chunk-docling-${nodeId}-p${pageNumber}`;
+      // Write the markdown as the text content for this page
+      const chunkId = `chunk-vision-${nodeId}-p${pageNumber}`;
       const excerptHash = simpleHash(result.markdown);
-      const extractedTables = JSON.stringify(result.tables);
 
       db.run(
         `INSERT OR REPLACE INTO curriculum_chunks
-           (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind, docling_markdown, extracted_tables)
-         VALUES (?, ?, ?, ?, ?, ?, 'prose', ?, ?);`,
+           (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind, docling_markdown)
+         VALUES (?, ?, ?, ?, ?, ?, 'prose', ?);`,
         [
           chunkId,
           nodeId,
@@ -910,101 +912,34 @@ async function transcribeWithLocalOnnx(
           result.markdown,
           excerptHash,
           result.markdown,
-          extractedTables,
         ]
       );
 
       successCount++;
       onProgress?.(pageNumber, endPage);
-      _log(`ONNX extracted page ${pageNumber}`, { nodeId, markdownLength: result.markdown.length, tableCount: result.tables.length });
-      
-      // Write extracted content to a separate debug log for inspection
-      fetch('http://127.0.0.1:7916/ingest/content-b2df54', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'b2df54-content' },
-        body: JSON.stringify({
-          sessionId: "b2df54",
-          location: "curriculum.ts:transcribeWithLocalOnnx",
-          message: `ONNX extracted content for page ${pageNumber}`,
-          data: {
-            nodeId,
-            sourceId,
-            pageNumber,
-            markdown: result.markdown,
-            tables: result.tables,
-            warnings: result.warnings || [],
-          },
-          timestamp: Date.now(),
-          runId: "pre-fix",
-          hypothesisId: "A",
-        }),
-      }).catch(() => {});
-
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      _log(`ONNX failed page ${pageNumber}`, { nodeId, error: msg });
-      console.warn(`[curriculum] ONNX extraction failed for page ${pageNumber}:`, err);
+      _log(`Cloud vision failed for page ${pageNumber}`, { nodeId, error: String(err) });
+      console.warn(`[curriculum] Cloud vision failed for page ${pageNumber}:`, err);
     }
   }
 
   saveDbSync();
   NODE_TRANSCRIBE_CACHE.add(nodeId);
-  _log(`ONNX transcription complete`, { nodeId, successCount, totalPages: pngBase64.length });
+  _log(`Transcription complete`, { nodeId, successCount, totalPages: pngBase64.length });
   return successCount;
 }
 
 /**
- * Persist Granite Docling OCR extraction results to the curriculum_chunks table.
- * Each extracted page becomes a chunk row with the full markdown and structured
- * metadata for images/tables. This supplements (not replaces) the existing
- * vision-transcription text_content field — both may coexist for a given chunk.
+ * Legacy function kept for backward compatibility with existing code that may reference it.
+ * With ONNX removed, this is no longer used in the curriculum pipeline.
+ * All extraction now goes through cloud vision via transcribeWithCloudVision().
  *
- * @param nodeId  - The curriculum node these pages belong to
- * @param pages    - Array of extracted pages from docling.ts
- * @returns        - Number of chunks written
+ * @deprecated Use transcribeNode() which calls transcribeWithCloudVision() internally.
  */
 export async function storeDoclingExtraction(
   nodeId: string,
   pages: ExtractedPage[]
 ): Promise<number> {
-  if (pages.length === 0) return 0;
-
-  const db = await getDb();
-  let inserted = 0;
-
-  for (const page of pages) {
-    // Use nodeId + pageNumber as stable chunk id for upsert semantics
-    const chunkId = `chunk-docling-${nodeId}-p${page.pageNumber}`;
-    const doclingMarkdown = page.markdown;
-    const extractedImages = JSON.stringify(page.images);
-    const extractedTables = JSON.stringify(page.tables);
-    const excerptHash = simpleHash(doclingMarkdown);
-
-    // Upsert: replace any existing docling content for this page
-    // Preserve the original text_content if it came from a prior vision pass
-    db.run(
-      `INSERT INTO curriculum_chunks
-         (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind, docling_markdown, extracted_images, extracted_tables)
-       VALUES (?, ?, ?, ?, ?, ?, 'prose', ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         docling_markdown = excluded.docling_markdown,
-         extracted_images = excluded.extracted_images,
-         extracted_tables = excluded.extracted_tables;`,
-      [
-        chunkId,
-        nodeId,
-        page.pageNumber,
-        page.pageNumber, // ordinal mirrors page number for docling chunks
-        doclingMarkdown,
-        excerptHash,
-        doclingMarkdown,
-        extractedImages,
-        extractedTables,
-      ]
-    );
-    inserted++;
-  }
-
-  if (inserted > 0) saveDbSync();
-  return inserted;
+  console.warn('[curriculum] storeDoclingExtraction is deprecated. ONNX extraction has been removed.');
+  return 0;
 }

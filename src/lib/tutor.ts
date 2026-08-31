@@ -2229,8 +2229,11 @@ export function validateTutorPayload(
   if (!root) return { ok: false, errors };
 
   const speech = asNonEmptyString(root.speech, "speech", errors);
-  const rawOps = asArray(root.board_ops, "board_ops", errors);
-  if (!speech || !rawOps) return { ok: false, errors };
+  // board_ops is optional - default to empty array if missing
+  const rawOps = root.board_ops === undefined || root.board_ops === null
+    ? []
+    : asArray(root.board_ops, "board_ops", errors) ?? [];
+  if (!speech) return { ok: false, errors };
 
   if (rawOps.length > maxBoardOps) {
     errors.push(`board_ops has ${rawOps.length} operations; the maximum allowed per turn is ${maxBoardOps}`);
@@ -2275,16 +2278,18 @@ export function validateTutorPayload(
     }
   }
 
-  const evidenceRefs = asStringList(root.evidence_refs, "evidence_refs", errors);
-  if (!evidenceRefs) return { ok: false, errors };
+  // evidence_refs is optional - default to empty array if missing
+  const evidenceRefs = root.evidence_refs === undefined || root.evidence_refs === null
+    ? []
+    : asStringList(root.evidence_refs, "evidence_refs", errors) ?? [];
 
+  // Filter evidence refs to only allowed ones, but don't fail if none match
+  const validEvidenceRefs: string[] = [];
   for (const ref of evidenceRefs) {
-    if (!allowedEvidence.has(ref)) {
-      errors.push(
-        `evidence_refs contains "${ref}", which is not one of the supplied handles: ${[...allowedEvidence].join(", ")}. ` +
-          `Never cite a section that was not provided.`
-      );
+    if (allowedEvidence.has(ref)) {
+      validEvidenceRefs.push(ref);
     }
+    // Don't fail on invalid refs - just skip them (model may cite expired handles)
   }
 
   let requestedLevel: number | undefined;
@@ -2334,7 +2339,7 @@ export function validateTutorPayload(
     speech,
     boardOps,
     diagnosis,
-    evidenceRefs,
+    evidenceRefs: validEvidenceRefs,
     requestedLevel,
     stage,
     stageAdvance,
@@ -2531,11 +2536,16 @@ export function recoverTutorPayload(
   // so a control-character-only response still gets a useful continuation.
   speech = speech.replace(/\u0000/g, "").trim().slice(0, 8000);
   if (!speech) {
-    speech = boardOps.length > 0
-      ? "I've made the safe parts of that update on the board."
-      : learnerMessage.trim()
-        ? "Let's continue with that question. Please resend it in one short sentence so I can answer it cleanly."
-        : "What would you like to work through next?";
+    // When the endpoint returns completely empty content (rate limit, safety
+    // filter, internal error), we reach here with no speech and no board ops.
+    // Provide clear, actionable recovery messaging that preserves the session.
+    if (boardOps.length > 0) {
+      speech = "I've made the safe parts of that update on the board.";
+    } else if (learnerMessage.trim()) {
+      speech = "I'm having trouble generating a response right now. Could you rephrase that in a short sentence?";
+    } else {
+      speech = "I'm ready when you are. What would you like to work on?";
+    }
   }
 
   return { speech, boardOps, diagnosis, evidenceRefs, requestedLevel };
@@ -3098,10 +3108,23 @@ ${currentObjective ? `- Current objective pages: ${currentObjective.targetPageRa
       : `CURRENT BOARD BLOCKS: unavailable`
   );
 
+  // Inform the agent when they're on a learner-created thread board
+  if (params.board?.thread?.createdBy === "learner") {
+    parts.push(
+      `LEARNER-CREATED THREAD — The learner highlighted text on the parent board and opened this thread to understand it better. Your job: explain the concept they highlighted clearly and step-by-step on this board.\n` +
+      `- This is a focused explanation thread, not the main lesson. Stay on the highlighted topic.\n` +
+      `- Break down the concept layer by layer: start with what it means in plain language, then build up the formal details.\n` +
+      `- Use visualizations, examples, and widgets as needed to make it concrete.\n` +
+      `- The thread title shows what they selected; their question (if any) appears in LEARNER MESSAGE.\n` +
+      `- This thread is automatically saved in Threads so they can return to it anytime.`
+    );
+  }
+
   parts.push(`LEARNER MESSAGE:\n"""\n${params.learnerMessage}${params.attachmentsNote}\n"""`);
 
   parts.push(
     `GLOBAL BEHAVIOR: The chalkboard is the primary teaching surface and interactive lesson. Do not teach, explain the lesson, or ask instructional/content questions in speech. Put teaching steps, Socratic questions, checks for understanding, examples, definitions, and practice prompts onto the chalkboard using board_ops. Speech must stay to a brief acknowledgement or transition (for example, “I put that on the board”). Only use speech for a direct learner clarification when no board content is needed. ` +
+    `COLOR-CODED EXPLANATIONS: Use color markers in board text when they improve comprehension, especially to distinguish definitions, key terms, formulas, causes/effects, examples, warnings, and learner actions. Wrap only the relevant short phrase with [[amber]]...[[/amber]], [[cyan]]...[[/cyan]], [[green]]...[[/green]], [[coral]]...[[/coral]], or [[violet]]...[[/violet]]. Keep the normal chalk color for most prose; use color sparingly and consistently, never color an entire paragraph, and do not put markers in speech. ` +
     (params.presentationFirst
       ? `PRESENTATION-FIRST EXCEPTION — the policy selected direct_instruction for genuine first contact. For this bounded opening only, put the intuition, core representation or mechanism, essential terminology, and one canonical worked example on the board before requesting learner work. Do not force a filler check into those beats. This presentation is not learner evidence and cannot advance mastery; after it, the next policy move must obtain one focused prediction or observation. `
       : ``) +
@@ -3679,9 +3702,14 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     recover: ({ payload, raw }) => {
       try {
         return recoverTutorPayload(payload, raw, allowedEvidence, req.learnerMessage);
-      } catch {
+      } catch (err) {
+        // Ultimate fallback: if recovery itself fails (e.g., corrupted raw string),
+        // ensure the learner still gets a valid turn instead of an error screen.
+        console.error("[tutor] recovery callback failed", err);
         return {
-          speech: "Let's continue with that question. Please resend it in one short sentence so I can answer it cleanly.",
+          speech: learnerMessage.trim()
+            ? "I'm having trouble responding. Could you rephrase that in one short sentence?"
+            : "I'm ready when you are. What would you like to work on?",
           boardOps: [],
           evidenceRefs: [],
         };

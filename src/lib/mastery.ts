@@ -68,7 +68,7 @@ export const MASTERY_STAGE_SPECS: Record<MasteryStage, MasteryStageSpec> = {
     agentRole: "Introduce and visualize",
     studentRole: "Observe and predict",
     exitCondition: "The learner has a mental picture of what this thing is.",
-    widgets: ["roadmap", "concept_card", "question", "animation"],
+    widgets: ["roadmap", "overview", "concept_card", "question", "animation"],
     visualizations: ["function", "geometry"],
   },
   understand: {

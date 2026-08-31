@@ -427,9 +427,20 @@ export async function chatCompletion({
     const choice = data.choices?.[0];
     const message = choice?.message;
     const content = extractAssistantContent(message?.content ?? message?.parsed ?? choice?.text);
+    
+    // Empty responses can happen when:
+    // - The model returns an empty string (rate limit, internal error, safety filter)
+    // - The model returns a stop sequence immediately
+    // - The endpoint truncates output to exactly zero tokens
+    // Throw a specific error so callStructuredAgent can skip repair attempts and go
+    // straight to recovery, avoiding wasted API calls that might trigger rate limits.
     if (!content.trim()) {
+      console.warn(
+        `[agentRuntime] ${ROLE_LABEL[endpoint.role]} endpoint returned empty content. Response:`,
+        res.text.slice(0, 240)
+      );
       throw new AgentRuntimeError(
-        `${ROLE_LABEL[endpoint.role]} endpoint returned an empty message.`,
+        `${ROLE_LABEL[endpoint.role]} endpoint returned empty content.`,
         "empty_response",
         res.text.slice(0, 240)
       );
@@ -456,7 +467,7 @@ export async function chatCompletion({
 /** Normalize the content variants returned by OpenAI-compatible providers.
  * Most return a string, while some return content-part arrays, a parsed object,
  * or the legacy `choices[0].text` shape. */
-function extractAssistantContent(value: unknown): string {
+export function extractAssistantContent(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) {
     return value
@@ -641,6 +652,38 @@ export async function callStructuredAgent<T>({
       usage = completion.usage;
     } catch (err) {
       const failure = err instanceof AgentRuntimeError ? err.failureClass : "transport";
+      
+      // Empty responses should skip repair attempts and go straight to recovery.
+      // Retrying empty responses wastes API calls and can trigger rate limits.
+      if (err instanceof AgentRuntimeError && err.failureClass === "empty_response" && recover) {
+        let recovered: T | null = null;
+        try {
+          // Pass empty payload to recovery callback
+          recovered = recover({ raw: "", payload: {}, errors: [err.message], attempts: attempt });
+        } catch {
+          recovered = null;
+        }
+        if (recovered !== null) {
+          await logAgentCall({
+            role,
+            modelId: endpoint.modelId,
+            promptVersion,
+            schemaVersion,
+            latencyMs: Date.now() - started,
+            outcome: "success",
+            failureClass: "recovered_from_empty_response",
+          }).catch(() => {});
+          return {
+            value: recovered,
+            modelId: endpoint.modelId,
+            latencyMs: Date.now() - started,
+            usage: {},
+            attempts: attempt,
+            repaired: true,
+          };
+        }
+      }
+      
       await logAgentCall({
         role,
         modelId: endpoint.modelId,
@@ -683,6 +726,46 @@ export async function callStructuredAgent<T>({
         attempts: attempt,
         repaired: attempt > 1,
       };
+    }
+
+    // Smart validation: if the response has core content (speech), accept it even if
+    // secondary fields fail validation. The speech is what the user cares about.
+    // Only retry if speech is completely missing, which suggests a structural failure.
+    const hasSpeech = typeof payload === 'object' && payload !== null && 
+                      'speech' in payload && 
+                      typeof (payload as any).speech === 'string' && 
+                      (payload as any).speech.trim().length > 0;
+    
+    if (hasSpeech && attempt === 1 && recover) {
+      // First attempt produced valid speech but other fields failed.
+      // Use recovery to sanitize the response and accept it.
+      // This avoids burning 2 more API calls that might make things worse.
+      let recovered: T | null = null;
+      try {
+        recovered = recover({ raw, payload, errors: result.errors, attempts: attempt });
+      } catch {
+        recovered = null;
+      }
+      if (recovered !== null) {
+        await logAgentCall({
+          role,
+          modelId: endpoint.modelId,
+          promptVersion,
+          schemaVersion,
+          latencyMs,
+          outcome: "success",
+          tokenCounts: usage,
+          failureClass: "recovered_speech_accepted",
+        }).catch(() => {});
+        return {
+          value: recovered,
+          modelId: endpoint.modelId,
+          latencyMs,
+          usage,
+          attempts: attempt,
+          repaired: true,
+        };
+      }
     }
 
     lastErrors = result.errors;

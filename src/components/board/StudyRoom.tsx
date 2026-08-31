@@ -189,6 +189,11 @@ export function StudyRoom({
   const [agentStatus, setAgentStatus] = useState<"idle" | "thinking" | "writing" | "error">("idle");
   const [agentActivity, setAgentActivity] = useState<AgentActivity | null>(null);
   const [threadLog, setThreadLog] = useState<SessionThreadLog[]>([]);
+  const [pendingThreadExplanation, setPendingThreadExplanation] = useState<{
+    boardId: string;
+    selection: string;
+    question: string;
+  } | null>(null);
   const [pacing, setPacing] = useState(() => {
     const tutor = loadPreferences().tutor;
     return { sessionLength: tutor.sessionLength, breakEvery: tutor.breakEvery };
@@ -801,17 +806,22 @@ export function StudyRoom({
       setActiveId(sub.id);
       setChatOpen(true);
       setChatCollapsed(false);
+      
+      const userMessage = question ? `${question}  ("${trim(selection)}")` : `Explain: "${trim(selection)}"`;
       setMessages((m) => [
         ...m,
         {
           id: ++msgId.current,
           role: "user",
-          text: question ? `${question}  ("${trim(selection)}")` : `Explain: "${trim(selection)}"`,
+          text: userMessage,
           boardSnapshot,
         },
       ]);
       pushTutor(`New board opened for "${trim(selection)}". I'm writing the breakdown now — it's saved in Threads so you can come back to it.`, 800);
       notify("Branched into a new board");
+      // React applies activeId after this handler returns. Queue the explanation
+      // so the effect below starts it only after the thread is the active board.
+      setPendingThreadExplanation({ boardId: sub.id, selection, question });
     },
     [board, captureActive, captureBoardSnapshot, logThread, notify, pushTutor]
   );
@@ -1117,6 +1127,24 @@ export function StudyRoom({
   );
 
   handleSendRef.current = handleSend;
+
+  // Start a learner-created thread explanation only after React has committed
+  // the new board as active. This ensures handleSend captures the thread board
+  // rather than the parent board that was active when the branch was created.
+  useEffect(() => {
+    if (!pendingThreadExplanation || pendingThreadExplanation.boardId !== activeId || !board.thread) return;
+
+    const { selection, question } = pendingThreadExplanation;
+    setPendingThreadExplanation(null);
+    void handleSendRef.current?.(
+      question
+        ? `The learner highlighted "${selection}" and asked: "${question}". Explain this concept clearly on the board, breaking it down step by step. Start with what they highlighted, then address their specific question.`
+        : `The learner highlighted "${selection}" and wants you to explain it. Break down this concept clearly on the board, step by step, making sure to explain what it means and why it matters.`,
+      undefined,
+      false,
+      { kind: "chat" }
+    );
+  }, [activeId, board.thread, pendingThreadExplanation]);
 
   // A fresh chalkboard opens with a tutor greeting and the first lesson turn;
   // restored sessions keep their existing transcript untouched. When the

@@ -184,6 +184,7 @@ export function validateWidgetIntent(intent: unknown): ValidationResult {
   switch (kind as WidgetKind) {
     case "roadmap": return validateRoadmap(intent);
     case "plan": return validatePlan(intent);
+    case "overview": return validateOverview(intent);
     case "concept_card": return validateConceptCard(intent);
     case "slider": return validateSlider(intent);
     case "animation": return validateAnimation(intent);
@@ -244,11 +245,166 @@ function validatePlan(intent: Record<string, unknown>): ValidationResult {
   if (!ids.valid) return ids;
   for (const step of steps as Record<string, unknown>[]) {
     if (!text(step.label, MAX_SHORT_TEXT_LENGTH)) return fail("Each plan step needs a label");
+    if (!optionalLatex(step.labelLatex)) return fail("Plan step labelLatex is too long");
     if (step.details !== undefined && step.details !== null && !stringList(step.details, MAX_PLAN_STEP_DETAILS, MAX_TEXT_LENGTH)) {
       return fail(`Plan step details are 1–${MAX_PLAN_STEP_DETAILS} short lines each`);
     }
+    // detailsLatex must mirror `details` one-for-one if present.
+    if (step.detailsLatex !== undefined && step.detailsLatex !== null) {
+      if (!Array.isArray(step.detailsLatex)) return fail("Plan step detailsLatex must be an array");
+      const detailsLen = Array.isArray(step.details) ? (step.details as unknown[]).length : 0;
+      if ((step.detailsLatex as unknown[]).length !== detailsLen) {
+        return fail("Plan step detailsLatex length must match details length");
+      }
+      if (!(step.detailsLatex as unknown[]).every((entry) => optionalLatex(entry))) {
+        return fail("Plan step detailsLatex entries must be valid LaTeX strings");
+      }
+    }
   }
   if (!optionalText(intent.agreementPrompt, MAX_SHORT_TEXT_LENGTH)) return fail("Plan agreementPrompt is too long");
+  return ok;
+}
+
+/** Overview bounds: the overview exists to be COMPREHENSIVE, so its lists are
+ *  deliberately larger than any other widget. The point is transparency about
+ *  the full surface of the concept; an overview with one formula teaches the
+ *  wrong thing by omission. */
+const MAX_OVERVIEW_VOCAB = 16;
+const MAX_OVERVIEW_FORMULAS = 24;
+const MAX_OVERVIEW_PROPERTIES = 16;
+const MAX_OVERVIEW_GRAPHS = 6;
+const MAX_OVERVIEW_KEY_POINTS = 8;
+const MAX_OVERVIEW_PITFALLS = 12;
+const MAX_OVERVIEW_PATTERNS = 12;
+const MAX_OVERVIEW_YOU_WILL = 12;
+
+/**
+ * Validate the Overview widget — the comprehensive concept map placed alongside
+ * the Plan. The overview may legitimately omit most fields (a small concept
+ * needs no graphs and no pitfalls), but it must ALWAYS carry at least the
+ * concept name and a summary, otherwise the card is an empty box.
+ */
+function validateOverview(intent: Record<string, unknown>): ValidationResult {
+  if (!text(intent.concept, MAX_SHORT_TEXT_LENGTH)) return fail("Overview needs a concept name");
+  if (!text(intent.summary, MAX_TEXT_LENGTH)) return fail("Overview needs a plain-language summary");
+  if (!optionalText(intent.subtitle, MAX_SHORT_TEXT_LENGTH)) return fail("Overview subtitle is too long");
+  if (!optionalLatex(intent.summaryLatex)) return fail("Overview summaryLatex is too long");
+
+  // Vocabulary — terms the learner must be able to read and use.
+  if (intent.vocabulary !== undefined && intent.vocabulary !== null) {
+    if (!Array.isArray(intent.vocabulary) || intent.vocabulary.length > MAX_OVERVIEW_VOCAB) {
+      return fail(`Overview supports at most ${MAX_OVERVIEW_VOCAB} vocabulary entries`);
+    }
+    // Vocabulary entries are keyed by their `term`, not an explicit `id`,
+    // because the term IS the identifier the learner reads. Duplicates would
+    // confuse the renderer and signal a malformed intent.
+    const seenTerms = new Set<string>();
+    for (const entry of intent.vocabulary as Record<string, unknown>[]) {
+      if (!text(entry.term, MAX_SHORT_TEXT_LENGTH)) return fail("Each vocabulary entry needs a term");
+      if (seenTerms.has(String(entry.term))) return fail(`Overview vocabulary contains duplicate term "${entry.term}"`);
+      seenTerms.add(String(entry.term));
+      if (!optionalText(entry.meaning, MAX_TEXT_LENGTH)) return fail("Vocabulary entry meaning is too long");
+      if (!optionalLatex(entry.latex)) return fail("Vocabulary entry latex is too long");
+    }
+  }
+
+  // Formulas — the formal identities and relations.
+  if (intent.formulas !== undefined && intent.formulas !== null) {
+    if (!Array.isArray(intent.formulas) || intent.formulas.length > MAX_OVERVIEW_FORMULAS) {
+      return fail(`Overview supports at most ${MAX_OVERVIEW_FORMULAS} formulas`);
+    }
+    const ids = uniqueIds(intent.formulas, "overview.formulas");
+    if (!ids.valid) return ids;
+    for (const formula of intent.formulas as Record<string, unknown>[]) {
+      if (!text(formula.name, MAX_SHORT_TEXT_LENGTH)) return fail("Each formula needs a name");
+      // The latex body is the only REQUIRED formula field — without it, the
+      // formula entry has nothing to typeset and is just a label.
+      if (!text(formula.latex, MAX_LATEX_LENGTH)) return fail("Each formula needs a latex body");
+      if (!optionalText(formula.meaning, MAX_TEXT_LENGTH)) return fail("Formula meaning is too long");
+      if (!optionalBoolean(formula.essential)) return fail("Formula 'essential' must be a boolean when present");
+    }
+  }
+
+  // Properties — measurable quantities the learner must know the value of.
+  if (intent.properties !== undefined && intent.properties !== null) {
+    if (!Array.isArray(intent.properties) || intent.properties.length > MAX_OVERVIEW_PROPERTIES) {
+      return fail(`Overview supports at most ${MAX_OVERVIEW_PROPERTIES} properties`);
+    }
+    const ids = uniqueIds(intent.properties, "overview.properties");
+    if (!ids.valid) return ids;
+    for (const property of intent.properties as Record<string, unknown>[]) {
+      if (!text(property.name, MAX_SHORT_TEXT_LENGTH)) return fail("Each property needs a name");
+      if (!text(property.value, MAX_SHORT_TEXT_LENGTH)) return fail("Each property needs a value");
+      if (!optionalLatex(property.valueLatex)) return fail("Property valueLatex is too long");
+      if (!optionalText(property.note, MAX_TEXT_LENGTH)) return fail("Property note is too long");
+    }
+  }
+
+  // Graphs — descriptions of the visual signature of the concept.
+  if (intent.graphs !== undefined && intent.graphs !== null) {
+    if (!Array.isArray(intent.graphs) || intent.graphs.length > MAX_OVERVIEW_GRAPHS) {
+      return fail(`Overview supports at most ${MAX_OVERVIEW_GRAPHS} graphs`);
+    }
+    const ids = uniqueIds(intent.graphs, "overview.graphs");
+    if (!ids.valid) return ids;
+    for (const graph of intent.graphs as Record<string, unknown>[]) {
+      if (!text(graph.name, MAX_SHORT_TEXT_LENGTH)) return fail("Each graph needs a name");
+      if (!text(graph.shape, MAX_TEXT_LENGTH)) return fail("Each graph needs a shape description");
+      if (!optionalText(graph.xRange, MAX_SHORT_TEXT_LENGTH)) return fail("Graph xRange is too long");
+      if (!optionalText(graph.yRange, MAX_SHORT_TEXT_LENGTH)) return fail("Graph yRange is too long");
+      if (!optionalLatex(graph.sketchLatex)) return fail("Graph sketchLatex is too long");
+      if (graph.keyPoints !== undefined && graph.keyPoints !== null) {
+        if (!Array.isArray(graph.keyPoints) || graph.keyPoints.length > MAX_OVERVIEW_KEY_POINTS) {
+          return fail(`Graph supports at most ${MAX_OVERVIEW_KEY_POINTS} key points`);
+        }
+        for (const point of graph.keyPoints as Record<string, unknown>[]) {
+          if (!text(point.label, MAX_SHORT_TEXT_LENGTH)) return fail("Each key point needs a label");
+          if (!optionalLatex(point.valueLatex)) return fail("Key point valueLatex is too long");
+          if (!optionalText(point.description, MAX_TEXT_LENGTH)) return fail("Key point description is too long");
+        }
+      }
+    }
+  }
+
+  // Pitfalls — common mistakes and misconceptions.
+  if (intent.pitfalls !== undefined && intent.pitfalls !== null) {
+    if (!Array.isArray(intent.pitfalls) || intent.pitfalls.length > MAX_OVERVIEW_PITFALLS) {
+      return fail(`Overview supports at most ${MAX_OVERVIEW_PITFALLS} pitfalls`);
+    }
+    const ids = uniqueIds(intent.pitfalls, "overview.pitfalls");
+    if (!ids.valid) return ids;
+    for (const pitfall of intent.pitfalls as Record<string, unknown>[]) {
+      if (!text(pitfall.mistake, MAX_TEXT_LENGTH)) return fail("Each pitfall needs a mistake description");
+      if (!optionalText(pitfall.why, MAX_TEXT_LENGTH)) return fail("Pitfall 'why' is too long");
+      if (!optionalText(pitfall.correction, MAX_TEXT_LENGTH)) return fail("Pitfall correction is too long");
+      if (!optionalLatex(pitfall.correctionLatex)) return fail("Pitfall correctionLatex is too long");
+    }
+  }
+
+  // Patterns — rules-of-thumb.
+  if (intent.patterns !== undefined && intent.patterns !== null) {
+    if (!Array.isArray(intent.patterns) || intent.patterns.length > MAX_OVERVIEW_PATTERNS) {
+      return fail(`Overview supports at most ${MAX_OVERVIEW_PATTERNS} patterns`);
+    }
+    const ids = uniqueIds(intent.patterns, "overview.patterns");
+    if (!ids.valid) return ids;
+    for (const pattern of intent.patterns as Record<string, unknown>[]) {
+      if (!optionalLatex(pattern.latex)) return fail("Pattern latex is too long");
+      if (!optionalText(pattern.text, MAX_TEXT_LENGTH)) return fail("Pattern text is too long");
+      if (!optionalText(pattern.note, MAX_TEXT_LENGTH)) return fail("Pattern note is too long");
+      // A pattern with neither latex nor text has nothing to say.
+      if (
+        (pattern.latex === undefined || pattern.latex === null) &&
+        (pattern.text === undefined || pattern.text === null)
+      ) {
+        return fail("Each pattern needs either a latex body or a text body");
+      }
+    }
+  }
+
+  if (!stringList(intent.youWillBeAbleTo, MAX_OVERVIEW_YOU_WILL)) {
+    return fail(`Overview 'youWillBeAbleTo' must be at most ${MAX_OVERVIEW_YOU_WILL} short strings`);
+  }
   return ok;
 }
 
@@ -685,6 +841,19 @@ function validateComparison(intent: Record<string, unknown>): ValidationResult {
   for (const column of columns as Record<string, unknown>[]) {
     if (!text(column.title, MAX_SHORT_TEXT_LENGTH)) return fail("Each comparison column needs a title");
     if (!stringList(column.items, MAX_LIST_ITEMS)) return fail("Comparison column items must be short strings");
+    // Optional parallel LaTeX list. Must be present alongside `items` (if at
+    // all) AND aligned with it: a one-off LaTeX bullet under a column with
+    // three plain bullets misleads the learner about what was compared.
+    if (column.itemsLatex !== undefined && column.itemsLatex !== null) {
+      if (!Array.isArray(column.itemsLatex)) return fail("Comparison column itemsLatex must be an array");
+      const items = Array.isArray(column.items) ? column.items : [];
+      if (column.itemsLatex.length !== items.length) {
+        return fail("Comparison column itemsLatex length must match items length");
+      }
+      if (!(column.itemsLatex as unknown[]).every((entry) => optionalLatex(entry))) {
+        return fail("Comparison column itemsLatex entries must be valid LaTeX strings");
+      }
+    }
     if (column.accent !== undefined && column.accent !== null) {
       if (!["cyan", "amber", "violet", "ember", "neutral"].includes(String(column.accent))) {
         return fail("Comparison column accent must be cyan, amber, violet, ember, or neutral");
@@ -700,11 +869,22 @@ function validateComparison(intent: Record<string, unknown>): ValidationResult {
     if (!rowIds.valid) return rowIds;
     for (const row of intent.rows as Record<string, unknown>[]) {
       if (!text(row.label, MAX_SHORT_TEXT_LENGTH)) return fail("Each comparison row needs a label");
+      if (!optionalLatex(row.labelLatex)) return fail("Comparison row labelLatex is too long");
       if (!Array.isArray(row.cells) || row.cells.length !== columns.length) {
         return fail("Each comparison row must have exactly one cell per column");
       }
       if (!row.cells.every((cell) => typeof cell === "string" && cell.length <= MAX_TEXT_LENGTH)) {
         return fail("Comparison row cells must be strings within the length limit");
+      }
+      // cellsLatex must mirror cells one-for-one so the renderer can pair them.
+      if (row.cellsLatex !== undefined && row.cellsLatex !== null) {
+        if (!Array.isArray(row.cellsLatex)) return fail("Comparison row cellsLatex must be an array");
+        if (row.cellsLatex.length !== (row.cells as unknown[]).length) {
+          return fail("Comparison row cellsLatex length must match cells length");
+        }
+        if (!(row.cellsLatex as unknown[]).every((entry) => optionalLatex(entry))) {
+          return fail("Comparison row cellsLatex entries must be valid LaTeX strings");
+        }
       }
     }
   }
@@ -795,6 +975,8 @@ function validateHint(intent: Record<string, unknown>): ValidationResult {
     levels.add(step.level as number);
     if (!text(step.label, MAX_SHORT_TEXT_LENGTH)) return fail("Each hint step needs a label");
     if (!text(step.body, MAX_TEXT_LENGTH)) return fail("Each hint step needs a body");
+    if (!optionalLatex(step.labelLatex)) return fail("Hint step labelLatex is too long");
+    if (!optionalLatex(step.bodyLatex)) return fail("Hint step bodyLatex is too long");
   }
   // Levels must form a prefix of 1..3: a hint that opens at "reveal" has
   // skipped the nudge the learner was entitled to first.
@@ -834,6 +1016,7 @@ function validateAnnotation(intent: Record<string, unknown>): ValidationResult {
   for (const mark of marks as Record<string, unknown>[]) {
     if (!text(mark.target, MAX_SHORT_TEXT_LENGTH)) return fail("Each annotation mark needs a target fragment");
     if (!text(mark.note, MAX_TEXT_LENGTH)) return fail("Each annotation mark needs a note");
+    if (!optionalLatex(mark.noteLatex)) return fail("Annotation mark noteLatex is too long");
     if (mark.emphasis !== undefined && mark.emphasis !== null) {
       if (!["circle", "underline", "arrow", "strike"].includes(String(mark.emphasis))) {
         return fail("Annotation emphasis must be circle, underline, arrow, or strike");
@@ -873,6 +1056,7 @@ function validateExample(intent: Record<string, unknown>): ValidationResult {
     if (!hasExpression) return fail("Each example step needs an expression or latex");
     if (!optionalText(step.expression, MAX_TEXT_LENGTH)) return fail("Example step expression is too long");
     if (!optionalLatex(step.latex)) return fail("Example step latex is too long");
+    if (!optionalLatex(step.whyLatex)) return fail("Example step whyLatex is too long");
     // A worked step without a reason is a magic trick, not a demonstration.
     if (!text(step.why, MAX_TEXT_LENGTH)) return fail("Each example step needs a 'why' explaining that step");
   }
@@ -1085,9 +1269,9 @@ export function sanitizeWidgetState(value: unknown): WidgetState | undefined {
 /**
  * Grade an answerable widget without a model call.
  *
- * Correctness of a multiple-choice, short-answer, or numeric response is a
- * deterministic fact about the agent's own answer key. Routing it through the
- * LLM would make the learner's score depend on sampling temperature.
+ * Multiple-choice and numeric correctness are deterministic facts about the
+ * widget's answer key. Open-ended text is intentionally left ungraded here:
+ * different valid phrasings need semantic evaluation by the tutor.
  */
 export function gradeAnswerableWidget(
   intent: { format?: QuestionFormat; options?: QuestionOption[]; acceptedAnswers?: string[]; numericAnswer?: { value: number; tolerance?: number } },
@@ -1106,17 +1290,32 @@ export function gradeAnswerableWidget(
   if (!response) return undefined;
 
   if (intent.format === "short_answer") {
-    // No answer key means UNGRADEABLE, not wrong. `[].some(...)` is false, so
-    // returning it directly would score every keyless short answer as
-    // incorrect — with full evaluator confidence, because a definite boolean
-    // reads as a definite verdict downstream. An open-ended prompt the tutor
-    // never keyed would mark the learner wrong for answering it well, drive
-    // their skill state down, and manufacture the failure streak that routes
-    // them into prerequisite repair they do not need.
     if (!intent.acceptedAnswers?.length) return undefined;
-    const normalize = (input: string) => input.toLowerCase().replace(/\s+/g, " ").replace(/[.,;:!?]+$/, "").trim();
-    const target = normalize(response);
-    return intent.acceptedAnswers.some((accepted) => normalize(accepted) === target);
+
+    // Keep only high-confidence lexical matches. Semantic paraphrases that do
+    // not share enough signal remain neutral for tutor evaluation rather than
+    // becoming a false failure.
+    const normalize = (input: string) => input
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (intent.acceptedAnswers.some((accepted) => normalize(accepted) === normalize(response))) return true;
+
+    const stopWords = new Set(["a", "an", "and", "at", "by", "for", "in", "is", "of", "on", "or", "the", "to", "with"]);
+    const tokens = (input: string) => normalize(input)
+      .split(/\s+/)
+      .filter((token) => token.length > 1 && !stopWords.has(token));
+    const responseTokens = new Set(tokens(response));
+
+    for (const accepted of intent.acceptedAnswers) {
+      const acceptedTokens = tokens(accepted);
+      if (acceptedTokens.length === 0) continue;
+      const overlap = acceptedTokens.filter((token) => responseTokens.has(token)).length;
+      if (overlap === acceptedTokens.length || (acceptedTokens.length === 1 && overlap === 1)) return true;
+    }
+
+    return undefined;
   }
 
   if (intent.format === "numeric") {

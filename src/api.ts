@@ -59,6 +59,14 @@ import {
   getSanitizedSettings as backendGetSanitizedSettings,
   ModelEndpointConfig,
   AgentRole,
+  VisionEndpointRecord,
+  VisionEndpointConfig,
+  getVisionEndpoints as backendGetVisionEndpoints,
+  getActiveVisionEndpoint as backendGetActiveVisionEndpoint,
+  saveVisionEndpoint as backendSaveVisionEndpoint,
+  activateVisionEndpoint as backendActivateVisionEndpoint,
+  deleteVisionEndpoint as backendDeleteVisionEndpoint,
+  testVisionEndpoint as backendTestVisionEndpoint,
 } from "./lib/llm";
 
 import { countBoundAgents as backendCountBoundAgents } from "./lib/agentRuntime";
@@ -80,7 +88,7 @@ export {
   saveSourcePdf,
 } from "./lib/tauri";
 
-export type { AttemptForTakingDTO, AttemptResultDTO, CurriculumNodeRecord, LearnerModelEntry, ModelEndpointConfig, AgentRole, GenerationRequest, GenerationResult, RubricEvaluation, RubricEvaluationRequest, TutorTurn, TutorTurnRequest, SessionMessage, GeneratedOnboarding };
+export type { AttemptForTakingDTO, AttemptResultDTO, CurriculumNodeRecord, LearnerModelEntry, ModelEndpointConfig, AgentRole, GenerationRequest, GenerationResult, RubricEvaluation, RubricEvaluationRequest, TutorTurn, TutorTurnRequest, SessionMessage, GeneratedOnboarding, VisionEndpointRecord, VisionEndpointConfig };
 export type { Commitment, TurnContract } from "./lib/contracts/types";
 export { describeCommitment, commitmentKindLabel } from "./lib/contracts/format";
 
@@ -245,4 +253,45 @@ export async function getSessionMessages(sessionId: string, limit?: number): Pro
 /** Delete a chalkboard session row and its cascaded transcript. */
 export async function deleteChalkboardSession(sessionId: string): Promise<void> {
   return backendDeleteChalkboardSession(sessionId);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   VISION ENDPOINTS (for curriculum OCR)
+   ───────────────────────────────────────────────────────────── */
+
+/** List all configured vision endpoints. */
+export async function getVisionEndpoints(): Promise<VisionEndpointRecord[]> {
+  return backendGetVisionEndpoints();
+}
+
+/** Get the currently active vision endpoint. */
+export async function getActiveVisionEndpoint(): Promise<VisionEndpointRecord | null> {
+  return backendGetActiveVisionEndpoint();
+}
+
+/** Save or update a vision endpoint. Creates a new one if `id` is not provided. */
+export async function saveVisionEndpoint(
+  config: VisionEndpointConfig & { label: string; id?: string }
+): Promise<VisionEndpointRecord> {
+  return backendSaveVisionEndpoint(config);
+}
+
+/** Activate a vision endpoint by id. Deactivates all others. */
+export async function activateVisionEndpoint(id: string): Promise<void> {
+  return backendActivateVisionEndpoint(id);
+}
+
+/** Delete a vision endpoint by id. */
+export async function deleteVisionEndpoint(id: string): Promise<void> {
+  return backendDeleteVisionEndpoint(id);
+}
+
+/** Test a vision endpoint configuration before saving. */
+export async function testVisionEndpoint(config: VisionEndpointConfig): Promise<{
+  reachable: boolean;
+  authenticated: boolean;
+  modelAvailable: boolean;
+  error?: string;
+}> {
+  return backendTestVisionEndpoint(config);
 }

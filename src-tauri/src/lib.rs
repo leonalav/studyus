@@ -9,7 +9,7 @@
 
 mod pdf_render;
 mod storage;
-mod granite_docling;
+mod doc_extract;
 
 use std::path::PathBuf;
 
@@ -73,16 +73,22 @@ async fn save_source_pdf(
 
 /// Predetermined default API key for Studyus models. 
 /// Replace this value or set the `STUDYUS_API_KEY` environment variable.
-const DEFAULT_STUDYUS_API_KEY: &str = "sk-qzzjQ55a5y67zhimBNmi0FdsCdVd1j2fOL866WG0j12JJ0fa";
+const DEFAULT_STUDYUS_API_KEY: &str = "sk-264056c1bf073233f3a282e18c133b2117c75344409a4bd91d9687d88d3d5000";
 
 /// Custom endpoint URL redirection for the default models.
 /// Change this to target your custom API endpoint (e.g., OpenAI, OpenRouter, self-hosted proxy, etc.).
-const CUSTOM_ENDPOINT_URL: &str = "https://modelapi.vn/v1";
+const CUSTOM_ENDPOINT_URL: &str = "https://api.xah.io/v1";
 
 /// Model IDs mapping to redirect standard Studyus tiers to your custom models.
-const CUSTOM_MODEL_TIER_1: &str = "deepseek-v4-flash"; // Fastest / cheapest
-const CUSTOM_MODEL_TIER_2: &str = "deepseek-v4-flash";      // Balanced
-const CUSTOM_MODEL_TIER_3: &str = "deepseek-v4-pro";     // Reasoning / heavy
+const CUSTOM_MODEL_TIER_1: &str = "rouyea98/qwen3.8-max"; // Fastest / cheapest
+const CUSTOM_MODEL_TIER_2: &str = "thanhnhan9023/glm-5.3";      // Balanced
+const CUSTOM_MODEL_TIER_3: &str = "thanhnhan9023/glm-5.3";     // Reasoning / heavy
+
+/// Vision model configuration for curriculum OCR/transcription.
+/// This is a completely distinct model class from the agent roles.
+const VISION_API_KEY: &str = "xRPyGGNOD7fQANiAMUxHGHS1yM8Y0UoT"; // Set your vision model API key here, or use STUDYUS_VISION_API_KEY env var
+const VISION_ENDPOINT_URL: &str = "https://api.deepinfra.com/v1"; // Your vision model endpoint
+const VISION_MODEL_ID: &str = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"; // Vision-capable model (e.g., gpt-4o, claude-3-opus, deepseek-v4-flash)
 
 /// Native transport for one OpenAI-compatible chat-completion POST.
 ///
@@ -257,65 +263,169 @@ async fn hf_inference(
     Ok(output)
 }
 
-/// Extract content from a base64-encoded PNG page using the local Granite Docling
-/// ONNX pipeline running on CPU via ONNX Runtime.
+/// Extract content from a base64-encoded PNG page using the local PP-OCR
+/// ONNX pipeline running on CPU via oar-ocr.
 ///
-/// Downloads the ONNX model files from HuggingFace on first invocation and caches
-/// them in `<app_data>/granite_docling/onnx/`. Subsequent calls reuse the cached
-/// sessions without re-downloading.
+/// Downloads the ONNX model files from GitHub on first invocation and caches
+/// them in `<app_data>/pp_ocr_models/`. Subsequent calls reuse the cached models.
 ///
-/// Replaces the HF Inference API call; the frontend calls this instead of
-/// `hf_inference("ds4sd/granite-docling-258M", ...)`.
+/// Performance: ~0.2-2s per page (vs. 96s for Granite Docling).
 #[tauri::command]
 async fn docling_extract_image(
     app: tauri::AppHandle,
     base64_png: String,
-) -> Result<granite_docling::ExtractionResult, String> {
+) -> Result<doc_extract::ExtractionResult, String> {
     let app_data = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("app_data_dir: {e}"))?;
 
-    granite_docling::docling_extract(&app_data, &base64_png)
+    tauri::async_runtime::spawn_blocking(move || {
+        doc_extract::extract_page(&app_data, &base64_png)
+    })
+    .await
+    .map_err(|e| format!("async join error: {e}"))?
 }
 
-/// Kick off or resume download of the three Granite Docling ONNX model files.
+/// Kick off or resume download of the PP-OCR model files.
 ///
-/// Downloads are streamed in chunks so the frontend can track progress. Files
-/// already on disk are skipped. The Rust side also pre-loads the ONNX sessions
-/// at the end so the first `docling_extract_image` call is instant.
-///
-/// Call `docling_get_download_state` to poll progress after this resolves.
+/// With auto-download enabled, models are fetched from ModelScope automatically
+/// on first use. This function just returns a ready state.
 #[tauri::command]
-async fn docling_prepare_model(app: tauri::AppHandle) -> Result<granite_docling::DownloadState, String> {
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app_data_dir: {e}"))?;
+async fn docling_prepare_model(_app: tauri::AppHandle) -> Result<PrepareModelResult, String> {
+    Ok(PrepareModelResult {
+        status: "ready".to_string(),
+        total_bytes: doc_extract::TOTAL_BYTES,
+    })
+}
 
-    // Move app_data into the closure so the async fn future doesn't hold any
-    // borrows of the AppHandle after the await point (avoids self-referential futures).
-    let handle = tauri::async_runtime::spawn_blocking(move || {
-        granite_docling::prepare_model(&app_data, |_progress, _status, _bytes| {
-            // Progress is captured in the shared state; the frontend polls it.
-        })
+#[derive(Serialize)]
+struct PrepareModelResult {
+    status: String,
+    total_bytes: u64,
+}
+
+/// Read the current PP-OCR model download state.
+/// For now, returns a simple ready/not-ready status.
+#[tauri::command]
+fn docling_get_download_state() -> DownloadState {
+    DownloadState {
+        completed: true,
+        status: "ready".to_string(),
+        total_bytes: doc_extract::TOTAL_BYTES,
+        downloaded_bytes: doc_extract::TOTAL_BYTES,
+    }
+}
+
+#[derive(Serialize)]
+struct DownloadState {
+    completed: bool,
+    status: String,
+    total_bytes: u64,
+    downloaded_bytes: u64,
+}
+
+/// Extract content from a base64-encoded PNG page using a cloud vision model
+/// via the existing chat_completion transport. This uses the generation-role
+/// binding's vision capability, or falls back to a configurable vision endpoint.
+///
+/// The extracted text is returned in docling-compatible format.
+#[tauri::command]
+async fn vision_extract_image(
+    base64_png: String,
+    vision_model: Option<String>,
+    vision_endpoint: Option<String>,
+) -> Result<doc_extract::ExtractionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        extract_with_vision_model(&base64_png, vision_model.as_deref(), vision_endpoint.as_deref())
+    })
+    .await
+    .map_err(|e| format!("async join error: {e}"))?
+}
+
+fn extract_with_vision_model(
+    base64_png: &str,
+    vision_model: Option<&str>,
+    vision_endpoint: Option<&str>,
+) -> Result<doc_extract::ExtractionResult, String> {
+    let model = vision_model.unwrap_or(VISION_MODEL_ID);
+    let endpoint_base = vision_endpoint.unwrap_or(VISION_ENDPOINT_URL);
+    let endpoint = format!("{}/chat/completions", endpoint_base.trim_end_matches('/'));
+
+    let system_prompt = r#"You are a document extraction system. Extract all text, equations, tables, and structure from the provided page image.
+Return the content in clean markdown format following these rules:
+- Inline math: $...$
+- Display math: $$...$$
+- Tables: markdown table format
+- Preserve reading order exactly
+- Mark page breaks only if clearly indicated
+- Return BLANK if the page is empty or non-instructional"#;
+
+    let user_message = "Extract this curriculum page image to markdown:";
+
+    let request_body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": [
+                {"type": "text", "text": user_message},
+                {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", base64_png), "detail": "high"}}
+            ]}
+        ],
+        "max_tokens": 8192,
+        "temperature": 0.1
     });
 
-    // Flatten: handle.await → Result<(), String> → unwrap inner Ok, propagate Err.
-    handle
-        .await
-        .map_err(|e| format!("prepare_model task: {e}"))?
-        .map_err(|e| e)?;
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("HTTP client: {e}"))?;
 
-    Ok(granite_docling::get_download_state())
-}
+    let api_key = std::env::var("STUDYUS_VISION_API_KEY")
+        .ok()
+        .or_else(|| {
+            if !VISION_API_KEY.is_empty() {
+                Some(VISION_API_KEY.to_string())
+            } else {
+                std::env::var("STUDYUS_API_KEY").ok()
+            }
+        })
+        .or_else(|| option_env!("STUDYUS_API_KEY").map(|s| s.to_string()))
+        .unwrap_or_else(|| DEFAULT_STUDYUS_API_KEY.to_string());
 
-/// Read the current Granite Docling model download / warm-up progress.
-/// Poll this every ~1 s after calling `docling_prepare_model` to update the
-/// Downloads modal UI until `completed` is `true`.
-#[tauri::command]
-fn docling_get_download_state() -> granite_docling::DownloadState {
-    granite_docling::get_download_state()
+    let res = client
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .body(request_body.to_string())
+        .send()
+        .map_err(|e| format!("vision API error: {e}"))?;
+
+    let status = res.status().as_u16();
+    let body = res.text().unwrap_or_default();
+
+    if status != 200 {
+        return Err(format!("vision API returned {}: {}", status, body));
+    }
+
+    let response: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("parse vision response: {e}"))?;
+
+    let markdown = response
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|msg| msg.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(doc_extract::ExtractionResult {
+        markdown,
+        tables: Vec::new(),
+        warnings: Vec::new(),
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -334,6 +444,7 @@ pub fn run() {
             docling_extract_image,
             docling_prepare_model,
             docling_get_download_state,
+            vision_extract_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Studyus");

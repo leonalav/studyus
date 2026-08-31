@@ -75,6 +75,31 @@ describe("Tutor turn schema validation", () => {
     }
   });
 
+  it("accepts speech-only turn without board_ops field (chalkboard scenario)", () => {
+    // When the tutor just wants to respond with speech (common in chalkboard),
+    // board_ops and evidence_refs should be optional
+    const res = validateTutorPayload({ speech: "That's a great question!" }, EVIDENCE);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value.speech).toBe("That's a great question!");
+      expect(res.value.boardOps).toEqual([]);
+      expect(res.value.evidenceRefs).toEqual([]);
+    }
+  });
+
+  it("accepts turn with speech and empty board_ops array", () => {
+    const res = validateTutorPayload(
+      { speech: "Let me think about that.", board_ops: [], evidence_refs: [] },
+      EVIDENCE
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value.speech).toBe("Let me think about that.");
+      expect(res.value.boardOps).toEqual([]);
+      expect(res.value.evidenceRefs).toEqual([]);
+    }
+  });
+
   it("accepts every supported board operation", () => {
     const turns: BoardOp[] = [
       { op: "write_title", text: "Orbits" },
@@ -214,10 +239,14 @@ describe("Tutor turn schema validation", () => {
     if (!res.ok) expect(res.errors.join(" ")).toMatch(/board_ops\[0\]\.op must be one of/);
   });
 
-  it("rejects evidence handles that were never supplied", () => {
+  it("silently filters evidence handles that were never supplied", () => {
     const res = validateTutorPayload(validTurn({ evidence_refs: ["E1", "E99"] }), EVIDENCE);
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.errors.join(" ")).toMatch(/E99/);
+    // Invalid refs are filtered out but don't cause rejection - we accept valid speech
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value.evidenceRefs).toEqual(["E1"]);
+      expect(res.value.speech).toBeTruthy();
+    }
   });
 
   it("rejects more board operations than the per-turn bound", () => {
@@ -433,7 +462,8 @@ describe("Tutor turn deterministic recovery", () => {
 
   it("returns a learner-safe continuation even when no prose can be extracted", () => {
     const recovered = recoverTutorPayload(undefined, "{\"board_ops\":[", new Set(), "Help with vectors");
-    expect(recovered.speech).toContain("Please resend");
+    expect(recovered.speech).toContain("trouble");
+    expect(recovered.speech).toContain("rephrase");
     expect(recovered.speech).not.toMatch(/tutor_turn_v2|after 3 attempts|schema/i);
   });
 });
@@ -1021,6 +1051,7 @@ describe("Tutor evidence cards", () => {
         startPage: 5,
         endPage: 9,
         evidencePages: [5],
+        pageExtractions: [],
       },
       {
         nodeId: NODE_ID_2,
@@ -1028,6 +1059,7 @@ describe("Tutor evidence cards", () => {
         startPage: 10,
         endPage: 14,
         evidencePages: [10],
+        pageExtractions: [],
       },
     ]);
     expect(grounding.cards[0].section).toBe("2.1 Derivatives · selected pp.5–9 · evidence p.5");
@@ -1043,6 +1075,7 @@ describe("Tutor evidence cards", () => {
       startPage: 5,
       endPage: 9,
       evidencePages: [],
+      pageExtractions: [],
     }]);
   });
 });

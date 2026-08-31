@@ -55,7 +55,7 @@ import {
  */
 const ROUTE_WIDGETS: Record<LearningRoute, WidgetKind[]> = {
   diagnostic_probe: ["question", "mistake_check", "comparison", "scratchpad"],
-  direct_instruction: ["concept_card", "example", "annotation", "animation", "slider", "comparison"],
+  direct_instruction: ["concept_card", "overview", "example", "annotation", "animation", "slider", "comparison"],
   prediction: ["animation", "slider", "question", "comparison"],
   contrast_case: ["comparison", "mistake_check", "example", "question", "animation"],
   prerequisite_repair: ["concept_card", "example", "question", "hint", "animation", "slider"],

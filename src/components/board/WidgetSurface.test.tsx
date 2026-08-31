@@ -208,6 +208,31 @@ const EXEMPLARS: Record<WidgetKind, WidgetIntent> = {
     next: "Apply the same reasoning to a rate-of-change word problem.",
     reviewIn: "3 days",
   },
+  overview: {
+    kind: "overview",
+    concept: "Trigonometric functions",
+    subtitle: "sin, cos, tan and their graphs",
+    summary: "The six trig functions describe ratios of sides of a right triangle, equivalently the coordinates of a point on the unit circle, equivalently the y-values of a periodic wave.",
+    summaryLatex: "\\sin^2(x) + \\cos^2(x) = 1",
+    vocabulary: [
+      { term: "amplitude", meaning: "peak height of the wave", latex: "A" },
+    ],
+    formulas: [
+      { id: "pyth", name: "Pythagorean identity", latex: "\\sin^2(x) + \\cos^2(x) = 1", essential: true },
+    ],
+    properties: [
+      { id: "period_sin", name: "Period of sin/cos", value: "2π", valueLatex: "2\\pi" },
+    ],
+    graphs: [
+      { id: "sin_graph", name: "Sine", shape: "A smooth wave that starts at 0, rises to 1 at π/2, returns to 0 at π, falls to -1 at 3π/2, and repeats every 2π." },
+    ],
+    pitfalls: [
+      { id: "sign", mistake: "Reading sin(π - x) as -sin(x)" },
+    ],
+    youWillBeAbleTo: [
+      "Read the period and amplitude off a trig equation.",
+    ],
+  },
 };
 
 const render = (intent: WidgetIntent) =>
@@ -215,7 +240,7 @@ const render = (intent: WidgetIntent) =>
     <WidgetSurface intent={intent} chalk="#e8e8ea" accent="#7dd3fc" readOnly />
   );
 
-describe("WidgetSurface — all 17 widgets", () => {
+describe("WidgetSurface — all 19 widgets", () => {
   it("has an exemplar for every widget kind", () => {
     expect(Object.keys(EXEMPLARS).sort()).toEqual([...WIDGET_KINDS].sort());
   });

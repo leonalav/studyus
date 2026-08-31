@@ -36,6 +36,7 @@ import {
   type SceneLineStyle,
   type ScenePointSpec,
   type AnimationKeyframe,
+  type OverviewWidget,
 } from "../../lib/widgets/types";
 import { assessMastery, MASTERY_DIMENSION_LABEL, MASTERY_THRESHOLD } from "../../lib/mastery";
 import { MASTERY_EVIDENCE_DIMENSIONS } from "../../lib/widgets/types";
@@ -90,6 +91,7 @@ const MARKS: Record<WidgetKind, string> = {
   challenge: "M6 4h12v3a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4zM9 15h6M8 20h8M12 11v4",
   reflection: "M4 5h16v9H8l-4 4z M8 9h8M8 12h5",
   mastery_card: "M12 3l2.4 5 5.4.6-4 3.7 1.1 5.3L12 20l-4.9 2.6L8.2 12l-4-3.7 5.4-.6z",
+  overview: "M4 5h6v2H4zM4 11h10v2H4zM4 17h8v2H4zM16 5h4v14h-4z",
 };
 
 const EXTRA_MARK_SHAPES: Partial<Record<WidgetKind, React.ReactElement>> = {
@@ -102,6 +104,7 @@ const EXTRA_MARK_SHAPES: Partial<Record<WidgetKind, React.ReactElement>> = {
 const DEFAULT_TAGS: Record<WidgetKind, string> = {
   roadmap: "Path",
   plan: "Your say",
+  overview: "The full picture",
   concept_card: "Idea",
   slider: "Manipulate",
   animation: "Over time",
@@ -497,6 +500,7 @@ function renderBody(rawIntent: WidgetIntent, props: BodyProps) {
   switch (intent.kind) {
     case "roadmap": return <RoadmapBody intent={intent} {...props} />;
     case "plan": return <PlanBody intent={intent} {...props} />;
+    case "overview": return <OverviewBody intent={intent} {...props} />;
     case "concept_card": return <ConceptCardBody intent={intent} {...props} />;
     case "slider": return <SliderBody intent={intent} {...props} />;
     case "animation": return <AnimationBody intent={intent} {...props} />;
@@ -662,13 +666,25 @@ function PlanBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & 
               {index < steps.length - 1 ? <span className="mt-0.5 w-px flex-1" style={{ background: `${chalk}1f` }} /> : null}
             </span>
             <div className="min-w-0 pb-2.5">
-              <div className="text-[11.5px] font-medium leading-snug opacity-90">{step.label}</div>
+              <div className="text-[11.5px] font-medium leading-snug opacity-90">
+                <span>{step.label}</span>
+                {step.labelLatex ? (
+                  <span className="ml-1.5">
+                    <Tex tex={step.labelLatex} color={chalk} size={13} />
+                  </span>
+                ) : null}
+              </div>
               {step.details?.length ? (
                 <ol className="m-0 mt-1 list-none space-y-0.5 p-0">
                   {step.details.map((detail, i) => (
                     <li key={i} className="text-[10px] leading-snug opacity-65">
                       <span className="mr-1 font-mono opacity-70">({i + 1})</span>
-                      {detail}
+                      <span>{detail}</span>
+                      {step.detailsLatex?.[i] ? (
+                        <span className="ml-1.5">
+                          <Tex tex={step.detailsLatex[i]} color={chalk} size={11} />
+                        </span>
+                      ) : null}
                     </li>
                   ))}
                 </ol>
@@ -2222,9 +2238,15 @@ function ComparisonBody({ intent, chalk, accent }: BodyProps & { intent: Extract
             <tbody>
               {intent.rows.map((row) => (
                 <tr key={row.id} className="border-t" style={{ borderColor: `${chalk}18` }}>
-                  <td className="py-1.5 pr-3 text-[9.5px] opacity-50">{row.label}</td>
+                  <td className="py-1.5 pr-3 text-[9.5px] opacity-50">
+                    <div>{row.label}</div>
+                    {row.labelLatex ? <div className="mt-0.5"><Tex tex={row.labelLatex} color={chalk} size={11} /></div> : null}
+                  </td>
                   {row.cells.map((cell, index) => (
-                    <td key={index} className="py-1.5 pr-2 opacity-80">{cell}</td>
+                    <td key={index} className="py-1.5 pr-2 opacity-80">
+                      <div>{cell}</div>
+                      {row.cellsLatex?.[index] ? <div className="mt-0.5"><Tex tex={row.cellsLatex[index]} color={chalk} size={11} /></div> : null}
+                    </td>
                   ))}
                 </tr>
               ))}
@@ -2240,7 +2262,10 @@ function ComparisonBody({ intent, chalk, accent }: BodyProps & { intent: Extract
               </h5>
               <ul className="m-0 list-none space-y-1 p-0">
                 {(column.items ?? []).map((item, itemIndex) => (
-                  <li key={itemIndex} className="text-[9.5px] leading-snug opacity-75">{item}</li>
+                  <li key={itemIndex} className="text-[9.5px] leading-snug opacity-75">
+                    <div>{item}</div>
+                    {column.itemsLatex?.[itemIndex] ? <div className="mt-0.5"><Tex tex={column.itemsLatex[itemIndex]} color={chalk} size={11} /></div> : null}
+                  </li>
                 ))}
               </ul>
             </div>
@@ -2441,14 +2466,20 @@ function HintBody({ intent, chalk, accent, state, emit, readOnly }: BodyProps & 
               className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-[10px] transition-colors disabled:cursor-default disabled:opacity-35"
               style={{ background: isOpen ? "rgba(255,255,255,0.05)" : "transparent" }}
             >
-              <span className="flex-1 opacity-85">{step.label}</span>
+              <span className="flex-1 opacity-85">
+                <span>{step.label}</span>
+                {step.labelLatex ? <span className="ml-1.5"><Tex tex={step.labelLatex} color={chalk} size={11} /></span> : null}
+              </span>
               <span className="font-mono text-[8px] opacity-45">
                 {step.level} · {step.level === 1 ? "nudge" : step.level === 2 ? "lead" : "reveal"}
               </span>
               <span style={{ color: accent, transform: isOpen ? "rotate(90deg)" : undefined, transition: "transform .2s" }}>›</span>
             </button>
             {isOpen ? (
-              <p className="m-0 px-2.5 pb-2 text-[10px] leading-snug opacity-80">{step.body}</p>
+              <div className="m-0 px-2.5 pb-2 text-[10px] leading-snug opacity-80">
+                <div>{step.body}</div>
+                {step.bodyLatex ? <div className="mt-1"><TexBlock tex={step.bodyLatex} color={chalk} size={12} /></div> : null}
+              </div>
             ) : null}
           </div>
         );
@@ -2541,6 +2572,11 @@ function AnnotationBody({ intent, chalk, accent, state, emit, readOnly }: BodyPr
                 {mark.target}
               </div>
               <p className="m-0 mt-1 text-[10px] leading-snug opacity-80">{mark.note}</p>
+              {mark.noteLatex ? (
+                <div className="mt-1">
+                  <Tex tex={mark.noteLatex} color={chalk} size={13} />
+                </div>
+              ) : null}
             </div>
           </div>
         ))}
@@ -2617,7 +2653,14 @@ function ExampleBody({ intent, chalk, accent }: BodyProps & { intent: Extract<Wi
               {step.latex
                 ? <TexBlock tex={step.latex} color={chalk} size={16} />
                 : <div className="text-[12px]" style={{ textShadow: "0 0 1px currentColor" }}>{step.expression}</div>}
-              <div className="mt-0.5 text-[9px] opacity-50">{step.why}</div>
+              <div className="mt-0.5 text-[9px] opacity-50">
+                <span>{step.why}</span>
+                {step.whyLatex ? (
+                  <span className="ml-1.5 inline-block">
+                    <Tex tex={step.whyLatex} color={chalk} size={11} />
+                  </span>
+                ) : null}
+              </div>
             </div>
           </div>
         ))}
@@ -2953,6 +2996,255 @@ function MasteryCardBody({ intent, chalk, accent }: BodyProps & { intent: Extrac
             {intent.evidenceIds.join(" · ")}
           </div>
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* ── 22 · Overview — the full-concept map, placed alongside Plan ── */
+
+/**
+ * The Overview card is a READ-MAP of the entire concept, placed next to the
+ * Plan so the learner sees both "what I am committing to" and "what I am
+ * about to learn" before any teaching begins. Every section is independent
+ * and skippable so the renderer doesn't fall over when the tutor authored a
+ * small concept (no graphs, no pitfalls) or a large one (all eight sections
+ * populated).
+ *
+ * LaTeX is rendered inline wherever the agent supplied it, so formulas in
+ * `formulas`, properties' `valueLatex`, graph `sketchLatex`, key point
+ * `valueLatex`, pitfalls' `correctionLatex`, and pattern `latex` all read
+ * as typeset math rather than raw TeX source.
+ */
+function OverviewBody({ intent, chalk, accent }: BodyProps & { intent: OverviewWidget }) {
+  // Defensive normalization: a saved session restored from an older build, or
+  // a payload truncated mid-write, can hand the renderer nulls inside what is
+  // supposed to be an array. Filter once at the top so each section below can
+  // trust its inputs.
+  const vocabulary = (intent.vocabulary ?? []).filter((entry) => entry && typeof entry.term === "string");
+  const formulas = (intent.formulas ?? []).filter((entry) => entry && typeof entry.latex === "string");
+  const properties = (intent.properties ?? []).filter((entry) => entry && typeof entry.name === "string");
+  const graphs = (intent.graphs ?? []).filter((entry) => entry && typeof entry.name === "string");
+  const pitfalls = (intent.pitfalls ?? []).filter((entry) => entry && typeof entry.mistake === "string");
+  const patterns = (intent.patterns ?? []).filter((entry) => entry && (entry.latex || entry.text));
+  const youWillBeAbleTo = (intent.youWillBeAbleTo ?? []).filter((entry) => typeof entry === "string" && entry.trim().length > 0);
+
+  return (
+    <div className="space-y-3">
+      {/* Header: concept + subtitle + plain summary + LaTeX summary */}
+      <div>
+        <div className="text-[13px] font-semibold leading-tight opacity-95">{intent.concept}</div>
+        {intent.subtitle ? (
+          <div className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.08em] opacity-45">{intent.subtitle}</div>
+        ) : null}
+        <p className="m-0 mt-1.5 text-[10.5px] leading-relaxed opacity-85">{intent.summary}</p>
+        {intent.summaryLatex ? (
+          <div className="mt-1.5 rounded-md border px-2.5 py-1.5" style={{ borderColor: `${accent}33`, background: "rgba(255,255,255,0.04)" }}>
+            <TexBlock tex={intent.summaryLatex} color={chalk} size={16} />
+          </div>
+        ) : null}
+      </div>
+
+      {/* Vocabulary */}
+      {vocabulary.length ? (
+        <section>
+          <Muted className="mb-1">Vocabulary</Muted>
+          <ul className="m-0 list-none space-y-1 p-0">
+            {vocabulary.map((entry) => (
+              <li key={entry.term} className="text-[10px] leading-snug">
+                <span style={{ color: accent }}>{entry.term}</span>
+                {entry.latex ? <span className="ml-1.5"><Tex tex={entry.latex} color={chalk} size={11} /></span> : null}
+                {entry.meaning ? (
+                  <span className="ml-1.5 opacity-65">— {entry.meaning}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {/* Formulas */}
+      {formulas.length ? (
+        <section>
+          <Muted className="mb-1">Formulas</Muted>
+          <ul className="m-0 list-none space-y-1.5 p-0">
+            {formulas.map((formula) => (
+              <li
+                key={formula.id}
+                className="rounded-md px-2.5 py-1.5"
+                style={{ background: "rgba(255,255,255,0.04)", border: `1px solid ${chalk}1a` }}
+              >
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-[10px] opacity-75">{formula.name}</span>
+                  {formula.essential ? (
+                    <span
+                      className="flex-none rounded-full px-1.5 py-px font-mono text-[8px] uppercase tracking-wide"
+                      style={{ background: `${accent}22`, color: accent }}
+                      title="Marked essential — must memorise"
+                    >
+                      essential
+                    </span>
+                  ) : null}
+                </div>
+                <div className="mt-1">
+                  <TexBlock tex={formula.latex} color={chalk} size={15} />
+                </div>
+                {formula.meaning ? (
+                  <div className="mt-0.5 text-[9px] opacity-55">{formula.meaning}</div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {/* Properties */}
+      {properties.length ? (
+        <section>
+          <Muted className="mb-1">Properties</Muted>
+          <div className="overflow-hidden rounded-md border" style={{ borderColor: `${chalk}1a` }}>
+            <table className="w-full border-collapse text-[10px]">
+              <tbody>
+                {properties.map((property, index) => (
+                  <tr
+                    key={property.id}
+                    className={index > 0 ? "border-t" : undefined}
+                    style={{ borderColor: `${chalk}14` }}
+                  >
+                    <td className="px-2.5 py-1.5 align-top font-mono text-[9px] opacity-55" style={{ width: "38%" }}>{property.name}</td>
+                    <td className="px-2.5 py-1.5 align-top">
+                      <div className="opacity-90">{property.value}</div>
+                      {property.valueLatex ? (
+                        <div className="mt-0.5">
+                          <Tex tex={property.valueLatex} color={chalk} size={12} />
+                        </div>
+                      ) : null}
+                      {property.note ? (
+                        <div className="mt-0.5 text-[9px] opacity-55">{property.note}</div>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {/* Graphs — descriptions of what the learner must picture */}
+      {graphs.length ? (
+        <section>
+          <Muted className="mb-1">Graphs</Muted>
+          <div className="space-y-1.5">
+            {graphs.map((graph) => (
+              <div
+                key={graph.id}
+                className="rounded-md px-2.5 py-1.5"
+                style={{ background: "rgba(255,255,255,0.04)", border: `1px solid ${chalk}1a` }}
+              >
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-[10px] font-semibold opacity-85">{graph.name}</span>
+                  {(graph.xRange || graph.yRange) ? (
+                    <span className="font-mono text-[8.5px] opacity-50">
+                      {graph.xRange ? `x ∈ ${graph.xRange}` : ""}{graph.xRange && graph.yRange ? " · " : ""}{graph.yRange ? `y ∈ ${graph.yRange}` : ""}
+                    </span>
+                  ) : null}
+                </div>
+                {graph.sketchLatex ? (
+                  <div className="mt-1">
+                    <Tex tex={graph.sketchLatex} color={chalk} size={14} />
+                  </div>
+                ) : null}
+                <p className="m-0 mt-1 text-[9.5px] leading-snug opacity-70">{graph.shape}</p>
+                {graph.keyPoints?.length ? (
+                  <ul className="m-0 mt-1 list-none space-y-0.5 p-0">
+                    {graph.keyPoints.map((point, index) => (
+                      <li key={index} className="flex items-baseline gap-1.5 text-[9px] opacity-65">
+                        <span style={{ color: accent }}>·</span>
+                        <span>{point.label}</span>
+                        {point.valueLatex ? <Tex tex={point.valueLatex} color={chalk} size={11} /> : null}
+                        {point.description ? <span className="opacity-50">— {point.description}</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {/* Patterns — rules-of-thumb */}
+      {patterns.length ? (
+        <section>
+          <Muted className="mb-1">Patterns</Muted>
+          <ul className="m-0 list-none space-y-1 p-0">
+            {patterns.map((pattern) => (
+              <li
+                key={pattern.id}
+                className="rounded-md px-2.5 py-1.5"
+                style={{ background: "rgba(255,255,255,0.03)" }}
+              >
+                {pattern.latex ? (
+                  <div><Tex tex={pattern.latex} color={chalk} size={14} /></div>
+                ) : pattern.text ? (
+                  <div className="text-[10px] opacity-80">{pattern.text}</div>
+                ) : null}
+                {pattern.note ? <div className="mt-0.5 text-[9px] opacity-55">{pattern.note}</div> : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {/* Pitfalls — common mistakes */}
+      {pitfalls.length ? (
+        <section>
+          <Muted className="mb-1">Pitfalls</Muted>
+          <ul className="m-0 list-none space-y-1.5 p-0">
+            {pitfalls.map((pitfall) => (
+              <li
+                key={pitfall.id}
+                className="rounded-md px-2.5 py-1.5"
+                style={{ background: "rgba(252,165,165,0.06)", border: `1px solid rgba(252,165,165,0.22)` }}
+              >
+                <div className="flex items-baseline gap-1.5">
+                  <span style={{ color: "#fca5a5" }} className="font-mono text-[9px]">△</span>
+                  <span className="text-[10px] opacity-90">{pitfall.mistake}</span>
+                </div>
+                {pitfall.why ? (
+                  <div className="mt-0.5 text-[9px] opacity-55">Why: {pitfall.why}</div>
+                ) : null}
+                {(pitfall.correction || pitfall.correctionLatex) ? (
+                  <div className="mt-1 rounded px-1.5 py-1" style={{ background: "rgba(134,239,172,0.08)" }}>
+                    <div className="font-mono text-[8px] uppercase tracking-wide opacity-60" style={{ color: "#86efac" }}>Correction</div>
+                    {pitfall.correction ? (
+                      <div className="text-[10px] opacity-90">{pitfall.correction}</div>
+                    ) : null}
+                    {pitfall.correctionLatex ? (
+                      <div className="mt-0.5"><Tex tex={pitfall.correctionLatex} color={chalk} size={12} /></div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {/* Closure — what the learner will be able to do after mastery */}
+      {youWillBeAbleTo.length ? (
+        <section className="border-t pt-2" style={{ borderColor: `${chalk}18` }}>
+          <Muted className="mb-1">By the end of this, you will be able to…</Muted>
+          <ul className="m-0 list-none space-y-0.5 p-0">
+            {youWillBeAbleTo.map((item, index) => (
+              <li key={index} className="flex gap-1.5 text-[10px] opacity-80">
+                <span style={{ color: accent }}>›</span>
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
       ) : null}
     </div>
   );
