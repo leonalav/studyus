@@ -129,7 +129,7 @@ export function inferSkillNodes(rows: OutlineRow[]): SkillNode[] {
 export async function seedSkillGraphFromCurriculum(sourceId: string): Promise<number> {
   const db = await getDb();
   const res = db.exec(
-    `SELECT id, parent_node_id, ordinal, title, section_number, node_kind, drill_families
+    `SELECT id, parent_node_id, ordinal, title, section_number, node_kind
      FROM curriculum_nodes WHERE source_id = ? ORDER BY ordinal ASC;`,
     [sourceId]
   );
@@ -141,7 +141,6 @@ export async function seedSkillGraphFromCurriculum(sourceId: string): Promise<nu
     title: String(row[3] ?? "Untitled section"),
     sectionNumber: row[4] === null || row[4] === undefined ? null : String(row[4]),
     nodeKind: String(row[5] ?? "section"),
-    drillFamilies: row[6] === null || row[6] === undefined ? undefined : String(row[6]).split(",").filter(Boolean),
   }));
 
   const nodes = inferSkillNodes(rows);

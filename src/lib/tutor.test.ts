@@ -4,6 +4,7 @@ import { simpleHash } from "./curriculum";
 import {
   validateTutorPayload,
   recoverTutorPayload,
+  checkSessionOpeningContract,
   buildTutorEvidenceCards,
   buildTutorGrounding,
   ensureChalkboardSession,
@@ -381,6 +382,172 @@ describe("Tutor turn schema validation", () => {
       expect(res.value.diagnosis?.hintDependence).toBe("high");
       expect(res.value.diagnosis?.misconceptions).toHaveLength(1);
     }
+  });
+});
+
+describe("session opening contract — plan and overview must appear together", () => {
+  it("rejects a plan-only board_ops on a session-opening turn", () => {
+    // The learner must see the full concept map before agreeing to the plan.
+    // A plan without an overview is teaching by omission.
+    const error = checkSessionOpeningContract(
+      {
+        speech: "Here is the route we can take.",
+        board_ops: [
+          { op: "place_widget", intent: { kind: "plan", heading: "Limits", steps: [{ id: "s1", label: "Meet the idea" }] } },
+        ],
+        evidence_refs: [],
+      },
+      true
+    );
+    expect(error).toMatch(/overview widget/i);
+    expect(error).toMatch(/plan widget/i);
+  });
+
+  it("accepts plan and overview together on a session-opening turn", () => {
+    const error = checkSessionOpeningContract(
+      {
+        speech: "Here is the route.",
+        board_ops: [
+          { op: "place_widget", intent: { kind: "plan", heading: "Limits", steps: [{ id: "s1", label: "Meet the idea" }] } },
+          { op: "place_widget", intent: { kind: "overview", concept: "Limits", summary: "A limit is a value a function approaches." } },
+        ],
+        evidence_refs: [],
+      },
+      true
+    );
+    expect(error).toBeNull();
+  });
+
+  it("does not enforce the contract on non-session-opening turns", () => {
+    // A mid-session plan-only update (e.g., learner asks for the route again)
+    // must not be blocked by the opening contract.
+    const error = checkSessionOpeningContract(
+      {
+        speech: "Route update.",
+        board_ops: [
+          { op: "place_widget", intent: { kind: "plan", heading: "Limits", steps: [{ id: "s1", label: "Step 1" }] } },
+        ],
+        evidence_refs: [],
+      },
+      false
+    );
+    expect(error).toBeNull();
+  });
+
+  it("does not fire when the LLM placed no plan widget", () => {
+    // A speech-only session opening (e.g., model returned no board ops at
+    // all) is caught by other validators; the contract only fires when a
+    // plan widget is placed without its overview sibling.
+    const error = checkSessionOpeningContract(
+      {
+        speech: "Hi.",
+        board_ops: [],
+        evidence_refs: [],
+      },
+      true
+    );
+    expect(error).toBeNull();
+  });
+});
+
+describe("session opening contract — repair loop forces overview alongside plan", () => {
+  it("retries the LLM when it returns plan-only, accepting the second attempt's plan+overview", async () => {
+    // Reported failure: the agent emitted only the plan widget despite the
+    // prompt telling it to also place an overview. Validation must reject the
+    // first attempt and force the LLM to retry; the retry that adds the
+    // overview is accepted.
+    let attempts = 0;
+    const fetchMock = vi.fn(async () => {
+      attempts++;
+      if (attempts === 1) {
+        return new Response(JSON.stringify({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                speech: "Here is the route we can take.",
+                board_ops: [
+                  {
+                    op: "place_widget",
+                    intent: {
+                      kind: "plan",
+                      heading: "Limits",
+                      steps: [
+                        { id: "s1", label: "Meet the idea" },
+                        { id: "s2", label: "Defend a claim" },
+                      ],
+                    },
+                  },
+                ],
+                evidence_refs: [],
+              }),
+            },
+          }],
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      // Second attempt: the LLM has read the contract error and adds overview.
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              speech: "Here is the route and the full concept map.",
+              board_ops: [
+                {
+                  op: "place_widget",
+                  intent: {
+                    kind: "plan",
+                    heading: "Limits",
+                    steps: [
+                      { id: "s1", label: "Meet the idea" },
+                      { id: "s2", label: "Defend a claim" },
+                    ],
+                  },
+                },
+                {
+                  op: "place_widget",
+                  intent: {
+                    kind: "overview",
+                    concept: "Limits",
+                    summary: "A limit is the value a function approaches as the input approaches a point.",
+                  },
+                },
+              ],
+              evidence_refs: [],
+            }),
+          },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await askTutorTurn({
+      sessionId: "plan-overview-repair",
+      sessionTitle: "Limits",
+      domain: "math",
+      learnerId: "plan-overview-repair-learner",
+      learnerMessage: "Please make my plan.",
+      turnKind: "greeting",
+      onboarding: {
+        concept: "Limits",
+        answers: [{ question: "Where are you with limits?", answer: "Brand new" }],
+        selfReportedFamiliarity: "new",
+      },
+      endpoint: {
+        role: "tutor",
+        provider: "custom",
+        baseUrl: "https://model.example/v1",
+        modelId: "plan-overview-repair-model",
+        apiKey: "",
+        capabilities: defaultCapabilities(),
+      },
+    });
+
+    // The repair loop must have been triggered: at least 2 LLM calls.
+    expect(attempts).toBeGreaterThanOrEqual(2);
+    // The second request the LLM saw must have included the contract error.
+    const secondCallBody = JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body ?? "{}"));
+    const secondMessages = secondCallBody?.messages ?? [];
+    const repairPrompt = JSON.stringify(secondMessages);
+    expect(repairPrompt).toMatch(/overview widget/i);
   });
 });
 

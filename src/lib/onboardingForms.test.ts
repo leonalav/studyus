@@ -5,12 +5,12 @@ import {
   validateCreateFormsPayload,
 } from "./tutor";
 
-/** A well-formed create_forms tool call: five questions with both answer
- *  kinds represented. The written fields (notification/title/invitation/
- *  handoff) are the counsellor's own words. */
+/** A well-formed create_forms tool call: eight questions covering the
+ *  expanded intake (footing, misconceptions, goal, time, style, pace,
+ *  background, and the part that may trip the learner up). */
 function validPayload() {
   return {
-    notification: "I'm putting five quick questions into a little form so we can calibrate — a minute at most.",
+    notification: "I'm putting eight quick questions into a little form so we can calibrate — a minute at most.",
     tool_call: {
       name: "create_forms",
       arguments: {
@@ -39,6 +39,20 @@ function validPayload() {
             options: ["None", "Coursework due this week", "Exam soon"],
           },
           { question: "How do you want to be taught?", kind: "free" },
+          {
+            question: "How much time can you give this in a sitting?",
+            kind: "choice",
+            options: ["15 minutes", "30 minutes", "An hour or more"],
+          },
+          {
+            question: "What's the goal you're aiming at?",
+            kind: "choice",
+            options: ["Pass the next test", "Genuinely understand it", "Apply it elsewhere"],
+          },
+          {
+            question: "What is a misconception you keep hitting on these ideas?",
+            kind: "free",
+          },
         ],
       },
     },
@@ -102,8 +116,8 @@ describe("validateCreateFormsPayload — the counsellor's create_forms call", ()
     expect(result.value.notification).toMatch(/form/i);
     expect(result.value.form.title).toBe("Before we start: limits");
     expect(result.value.form.invitation).toContain("skipping");
-    expect(result.value.form.questions).toHaveLength(5);
-    expect(result.value.form.questions.map((q) => q.id)).toEqual(["q1", "q2", "q3", "q4", "q5"]);
+    expect(result.value.form.questions).toHaveLength(8);
+    expect(result.value.form.questions.map((q) => q.id)).toEqual(["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"]);
     expect(result.value.form.questions[1].options).toEqual(["The definitions", "The algebra", "The notation"]);
     expect(result.value.handoff).toContain("Thanks");
   });
@@ -169,6 +183,9 @@ describe("validateCreateFormsPayload — the counsellor's create_forms call", ()
 
   it(`rejects anything but the fixed ${MIN_ONBOARDING_QUESTIONS}–${MAX_ONBOARDING_QUESTIONS} question window`, () => {
     const payload = validPayload();
+    // Pop twice to land BELOW the minimum, since the original payload now
+    // satisfies MIN_ONBOARDING_QUESTIONS=8.
+    payload.tool_call.arguments.questions.pop();
     payload.tool_call.arguments.questions.pop();
     const result = validateCreateFormsPayload(payload);
     expect(result.ok).toBe(false);

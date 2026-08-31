@@ -2210,6 +2210,34 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
 }
 
 /**
+ * The SESSION OPENING contract: when the learner has just submitted the intake
+ * form, the tutor's first turn MUST place both a plan widget and an overview
+ * widget. The plan is the route from where they stand to mastery; the overview
+ * is the full-concept map laid out transparently (identities, properties,
+ * graphs, vocabulary, pitfalls, patterns) so they see exactly what they'd
+ * learn before agreeing. Without the overview the learner cannot see the full
+ * concept before agreeing — placing only the plan is teaching by omission.
+ *
+ * Returns the error message when the payload violates the contract (or
+ * `null` when it satisfies it). Exposed so the repair-loop recover callback
+ * can also refuse to silently sanitize a plan-only payload back into a
+ * successful turn.
+ */
+export function checkSessionOpeningContract(
+  payload: unknown,
+  isSessionOpening: boolean
+): string | null {
+  if (!isSessionOpening) return null;
+  const ops = (payload as Record<string, unknown>)?.board_ops as Array<Record<string, unknown>> | undefined;
+  const hasPlan = ops?.some((op) => (op?.intent as Record<string, unknown>)?.kind === "plan");
+  const hasOverview = ops?.some((op) => (op?.intent as Record<string, unknown>)?.kind === "overview");
+  if (hasPlan && !hasOverview) {
+    return "Session opening: you placed a plan widget but did not place an overview widget alongside it. Place BOTH the plan widget (the route from zero to mastery) AND the overview widget (the full-concept map: identities, properties, graphs, vocabulary, pitfalls, patterns) in the same board_ops. Both are required for the learner to see what they would learn before agreeing.";
+  }
+  return null;
+}
+
+/**
  * Validates the tutor payload against the supplied evidence handles.
  *
  * Evidence references that name a handle that was not supplied are a hard
@@ -3601,8 +3629,8 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
 
   if (isSessionOpening) {
     openingBrief = [
-      "SESSION OPENING — binding:",
-      "The intake answers in the development reminder are the design input for this session. Your board_ops open with the plan widget FIRST — the route from where the learner said they stand to mastery of this concept, each phase carrying the one or two lines of what it covers — then the roadmap for orientation. Place no teaching content: lesson work begins only when the learner agrees to the plan (their \"Start learning\" click is your signal). Your speech text is the greeting and nothing else.",
+      "SESSION OPENING — binding (non-negotiable):",
+      "You MUST place TWO widgets in board_ops: (1) the plan widget — the route from where the learner said they stand to mastery, built directly on their intake answers, each phase with one or two lines of what it covers — AND (2) the overview widget, placed alongside the plan as the agreement pair. The overview shows the full-concept map (identities, properties, graphs, vocabulary, pitfalls, patterns) so the learner sees exactly what they'd learn before agreeing. The plan is the commitment; the overview is the scope. Both MUST be present — neither can substitute for the other. Then the roadmap for orientation. Place no teaching content: lesson work begins only when the learner agrees to the plan (their \"Start learning\" click is your signal). Your speech is the greeting only.",
       openingBrief,
     ].filter(Boolean).join("\n\n");
   }
@@ -3697,9 +3725,29 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     maxTokens: studio.advanced.maxResponseTokens,
     timeoutMs: studio.advanced.requestTimeoutSeconds * 1000,
     signal: req.signal,
-    validate: (payload) =>
-      validateTutorPayload(payload, allowedEvidence, MAX_BOARD_OPS_PER_TURN, req.turnContract),
-    recover: ({ payload, raw }) => {
+    validate: (payload) => {
+      const base = validateTutorPayload(payload, allowedEvidence, MAX_BOARD_OPS_PER_TURN, req.turnContract);
+      if (!base.ok) return base;
+      // Session-opening turns MUST place an overview widget alongside the plan.
+      // Without the overview the learner cannot see the full concept before agreeing.
+      const contractError = checkSessionOpeningContract(payload, isSessionOpening);
+      if (contractError) {
+        return { ok: false, errors: [contractError] };
+      }
+      return base;
+    },
+    recover: ({ payload, raw, errors }) => {
+      // A session-opening turn with a plan widget but no overview widget must
+      // NOT be recovered — the LLM needs to retry with the validation feedback
+      // so it actually emits the overview widget. The default recover path
+      // would silently sanitize the partial payload (plan-only) and accept it.
+      if (
+        isSessionOpening &&
+        Array.isArray(errors) &&
+        errors.some((e) => /Session opening:.*overview/i.test(String(e)))
+      ) {
+        return null;
+      }
       try {
         return recoverTutorPayload(payload, raw, allowedEvidence, req.learnerMessage);
       } catch (err) {

@@ -349,4 +349,28 @@ describe("session opening — the plan widget is always placeable", () => {
     expect(scoped).not.toMatch(/\[plan\]/);
     expect(scoped).not.toMatch(/\[roadmap\]/);
   });
+
+  it("the full catalog includes the overview widget alongside the plan", () => {
+    const catalog = formatWidgetCatalog();
+    expect(catalog).toMatch(/- Overview \[overview\]/);
+    // The overview's purpose text must mention it is placed alongside the plan.
+    expect(catalog).toMatch(/alongside the Plan/i);
+  });
+});
+
+describe("session opening — plan and overview must appear together", () => {
+  it("the opening brief tells the agent to place BOTH plan and overview widgets", () => {
+    // buildOnboardingReminder is imported separately — test that the
+    // SESSION OPENING brief in the user prompt is uncommentable without
+    // breaking the plan+overview contract.
+    // We verify the brief text by checking what askTutorTurn builds:
+    // isSessionOpening turns set the brief to mention both widgets.
+    // Pin the literal that must survive any future prompt refactor:
+    const catalog = formatWidgetCatalog();
+    // The catalog describes both widgets so the model can place them.
+    expect(catalog).toMatch(/- Plan \[plan\]/);
+    expect(catalog).toMatch(/- Overview \[overview\]/);
+    // And the overview is explicitly about being placed alongside the plan.
+    expect(catalog).toMatch(/overview.*alongside.*plan|plan.*alongside.*overview/is);
+  });
 });

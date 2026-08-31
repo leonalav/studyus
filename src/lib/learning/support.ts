@@ -264,16 +264,16 @@ function buildInstruction(
  */
 export const RESPONSE_ROUTING_TABLE = [
   {
+    id: "exposition",
+    condition: "The selected move grants exposition headroom (direct_instruction, or any route whose support ceiling permits teaching before learner evidence).",
+    action: "Teach the intuition, core representation or mechanism, essential terminology, and one canonical worked example BEFORE asking for any response. The teach-me-back rule below triggers AFTER this teaching. Do not treat the presentation as learner evidence.",
+    reason: "A learner encountering an idea for the first time needs a usable mental model before a prediction can be meaningful; exposition is permitted when the route grants support headroom or the learner has already made an attempt, but it never counts as learner evidence and does not advance mastery.",
+  },
+  {
     id: "teach_back",
     condition: "You just taught a new concept, mechanism, or procedure — ANY explanation that introduced new material in Encounter, Understand, or early Construct.",
     action: "TEACH-ME-BACK: Ask the learner to explain it back in their own words, in the SAME turn. Write on the board: \"Now you explain it back to me — what did we just learn?\" Do NOT advance to new material until the learner's explanation demonstrates understanding. A correct procedure with no understanding is not evidence.",
     reason: "This is the single highest-ROI move in tutoring. The explanation reveals gaps the teacher can close immediately, rather than discovering them later on a quiz.",
-  },
-  {
-    id: "exposition",
-    condition: "The selected move grants exposition headroom (direct_instruction, or any route whose support ceiling permits teaching before learner evidence).",
-    action: "Teach the intuition, core representation or mechanism, essential terminology, and one canonical worked example BEFORE asking for any response. The teach-me-back rule above triggers AFTER this teaching. Do not treat the presentation as learner evidence.",
-    reason: "A learner encountering an idea for the first time needs a usable mental model before a prediction can be meaningful; exposition is permitted when the route grants support headroom or the learner has already made an attempt, but it never counts as learner evidence and does not advance mastery.",
   },
   {
     id: "factual",
@@ -284,7 +284,7 @@ export const RESPONSE_ROUTING_TABLE = [
   {
     id: "visualization",
     condition: "The learner explicitly asks to see, draw, plot, graph, or visualize something.",
-    action: "Render it on the board first, then attach the question the representation makes askable.",
+    action: "Render it first on the board, then attach the question the representation makes askable.",
     reason: "Withholding a requested representation to force a guess breaks trust, and the representation itself is usually the better probe.",
   },
   {
@@ -322,11 +322,11 @@ export const RESPONSE_ROUTING_TABLE = [
 /** Render the routing table for the tutor prompt. */
 export function formatRoutingTable(): string {
   const rows = RESPONSE_ROUTING_TABLE.map(
-    (row, index) => `[${row.id.toUpperCase()}] IF ${row.condition}\n   THEN ${row.action}\n   (${row.reason})`
+    (row, index) => `${index + 1}. IF ${row.condition}\n   THEN ${row.action}\n   (${row.reason})`
   );
   return [
-    "RESPONSE ROUTING — apply the FIRST matching rule in priority order. This replaces any general instruction about whether to ask or tell; it is how those instructions are reconciled.",
-    "Priority order: teach_back > exposition > factual > visualization > blocked > answer_requested > retrieval > diagnostic > default",
+    "RESPONSE ROUTING — apply the FIRST row that matches. This replaces any general instruction about whether to ask or tell; it is how those instructions are reconciled.",
+    "Priority order: exposition > teach_back > factual > visualization > blocked > answer_requested > retrieval > diagnostic > default",
     ...rows,
   ].join("\n");
 }
