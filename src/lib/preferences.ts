@@ -391,7 +391,7 @@ export const DEFAULT_TUTOR: TutorPreferences = {
     maxResponseTokens: 4096,
     // 20s per attempt. Transport failures do not retry (see tutor override
     // below); 1 schema retry allowed, so worst case = 40s per turn.
-    requestTimeoutSeconds: 20,
+    requestTimeoutSeconds: 0,
     autonomy: "balanced",
   },
   versions: [],
@@ -585,7 +585,10 @@ function sanitizeTutor(value: unknown): TutorPreferences {
   // Clamp to 20s so any stored setting cannot exceed the 1-minute turn budget.
   // 60 is the documented user minimum; the upper bound is now 20 (not 90) so
   // a misconfigured store can't reintroduce the long-hang failure mode.
-  const requestTimeoutSeconds = Math.max(15, Math.min(20, parsedRequestTimeout));
+  // 0 means "no timeout" (Infinity on the wire).
+  const requestTimeoutSeconds = parsedRequestTimeout === 0
+    ? 0
+    : Math.max(15, Math.min(20, parsedRequestTimeout));
 
   const parsedTools = Object.fromEntries(TUTOR_TOOL_IDS.map((id) => [
     id,

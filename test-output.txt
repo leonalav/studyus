@@ -1,0 +1,54 @@
+npm warn Unknown project config "verify-deps-before-run". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+
+ RUN  v4.1.10 a:/studyus_app
+
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/effort.test.ts [ src/lib/effort.test.ts ]
+TypeError: Cannot read properties of undefined (reading 'config')
+ ❯ src/lib/effort.test.ts:33:1
+     31| }
+     32|
+     33| describe("resolveAutoEffort", () => {
+       | ^
+     34|   it("returns 'high' when onboarding is undefined (no signal)", () => {
+     35|     expect(resolveAutoEffort(undefined, undefined)).toBe("high");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/lib/tutor.planStart.test.ts [ src/lib/tutor.planStart.test.ts ]
+Error: Vitest failed to find the current suite. One of the following is possible:
+- "vitest" is imported directly without running "vitest" command
+- "vitest" is imported inside "globalSetup" (to fix this, use "setupFiles" instead, because "globalSetup" runs in a different context)
+- "vitest" is imported inside Vite / Vitest config file
+- Otherwise, it might be a Vitest bug. Please report it to https://github.com/vitest-dev/vitest/issues
+
+ ❯ src/lib/tutor.planStart.test.ts:26:1
+     24| import { resolveTurnWidgetPermit } from "./tutor";
+     25|
+     26| afterEach(() => {
+       | ^
+     27|   vi.unstubAllGlobals();
+     28| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  src/lib/widgets/validate.effort.test.ts [ src/lib/widgets/validate.effort.test.ts ]
+TypeError: Cannot read properties of undefined (reading 'config')
+ ❯ src/lib/widgets/validate.effort.test.ts:26:1
+     24| }
+     25|
+     26| describe("validatePlan — effort-aware step window", () => {
+       | ^
+     27|   it("standard rejects a 5-step plan", () => {
+     28|     const result = validatePlan(planWithSteps(5), EFFORT_PLAN_CONSTRAI…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  3 failed (3)
+      Tests  no tests
+   Start at  23:51:26
+   Duration  1.94s (transform 933ms, setup 0ms, import 0ms, tests 0ms, environment 0ms)
+

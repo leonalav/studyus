@@ -1,6 +1,6 @@
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { getDb, saveDbSync } from "../db/database";
-import { renderPageRange, saveSourcePdf, TauriUnavailableError, visionExtractImage, isTauriRuntime } from "./tauri";
+import { renderPageRange, saveSourcePdf, TauriUnavailableError, doclingExtractImage, isTauriRuntime } from "./tauri";
 import { resolveRoleEndpoint, chatCompletion, type ContentPart, type RuntimeMessage } from "./agentRuntime";
 import { normalize } from "./latex/normalize";
 import { TEST_GENERATION_AGENT_PROMPT_V1 } from "./llm";
@@ -750,10 +750,10 @@ export async function transcribeNode(nodeId: string, onProgress?: (page: number,
     throw new Error(`transcribeNode: pdfium returned no pages for ${nodeId} (${startPage}..${endPage})`);
   }
 
-  // Use cloud vision API via Rust (hardcoded constants in lib.rs)
+  // Extract via local oar-ocr ONNX (Rust backend).
   if (isTauriRuntime()) {
-    _log("Using cloud vision API for transcribeNode", { nodeId, pageCount: pngBase64.length });
-    return await transcribeWithCloudVision(db, nodeId, sourceId, pngBase64, startPage, endPage, onProgress);
+    _log("Using local oar-ocr ONNX for transcribeNode", { nodeId, pageCount: pngBase64.length });
+    return await transcribeWithOnnx(db, nodeId, sourceId, pngBase64, startPage, endPage, onProgress);
   }
 
   // Cloud vision fallback
@@ -862,8 +862,8 @@ export function splitTranscriptionByPage(normalized: string, startPage: number, 
 }
 
 /**
- * Transcribe curriculum pages using cloud vision API via Rust.
- * The vision model configuration lives in src-tauri/src/lib.rs as hardcoded constants.
+ * Transcribe curriculum pages using local oar-ocr ONNX via the Rust backend.
+ * No cloud endpoint required — extraction runs fully offline on-device.
  *
  * @param db           - SQLite database instance
  * @param nodeId       - Curriculum node ID for chunk IDs
@@ -874,7 +874,7 @@ export function splitTranscriptionByPage(normalized: string, startPage: number, 
  * @param onProgress   - Progress callback (page, total)
  * @returns Number of pages successfully transcribed
  */
-async function transcribeWithCloudVision(
+async function transcribeWithOnnx(
   db: import("sql.js").Database,
   nodeId: string,
   sourceId: string,
@@ -890,14 +890,14 @@ async function transcribeWithCloudVision(
     _log(`Processing page ${pageNumber}/${endPage}`, { nodeId, sourceId });
 
     try {
-      // Call Rust's vision_extract_image with no parameters.
-      // The Rust side uses VISION_ENDPOINT_URL, VISION_MODEL_ID, and
-      // VISION_API_KEY / STUDYUS_VISION_API_KEY from hardcoded constants.
-      const result = await visionExtractImage(pngBase64[i], undefined, undefined);
-      _log(`Cloud vision extracted page ${pageNumber}`, { nodeId, markdownLength: result.markdown.length });
+      // Call Rust's docling_extract_image: local oar-ocr ONNX pipeline.
+      // Model files are cached under <app_data>/pp_ocr_models/ and stay
+      // within the 1.2 GB RAM budget.
+      const result = await doclingExtractImage(pngBase64[i]);
+      _log(`Local ONNX extracted page ${pageNumber}`, { nodeId, markdownLength: result.markdown.length });
 
       // Write the markdown as the text content for this page
-      const chunkId = `chunk-vision-${nodeId}-p${pageNumber}`;
+      const chunkId = `chunk-onnx-${nodeId}-p${pageNumber}`;
       const excerptHash = simpleHash(result.markdown);
 
       db.run(
@@ -918,8 +918,8 @@ async function transcribeWithCloudVision(
       successCount++;
       onProgress?.(pageNumber, endPage);
     } catch (err) {
-      _log(`Cloud vision failed for page ${pageNumber}`, { nodeId, error: String(err) });
-      console.warn(`[curriculum] Cloud vision failed for page ${pageNumber}:`, err);
+      _log(`Local ONNX failed for page ${pageNumber}`, { nodeId, error: String(err) });
+      console.warn(`[curriculum] Local ONNX failed for page ${pageNumber}:`, err);
     }
   }
 
@@ -931,10 +931,10 @@ async function transcribeWithCloudVision(
 
 /**
  * Legacy function kept for backward compatibility with existing code that may reference it.
- * With ONNX removed, this is no longer used in the curriculum pipeline.
- * All extraction now goes through cloud vision via transcribeWithCloudVision().
+ * With local ONNX as the default, this is no longer used in the curriculum pipeline.
+ * All extraction now goes through transcribeWithOnnx() via transcribeNode().
  *
- * @deprecated Use transcribeNode() which calls transcribeWithCloudVision() internally.
+ * @deprecated Use transcribeNode() which calls transcribeWithOnnx() internally.
  */
 export async function storeDoclingExtraction(
   nodeId: string,

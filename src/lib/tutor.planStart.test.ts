@@ -416,3 +416,215 @@ describe("plan-start seam — symmetric synthesis adds missing plan widget", () 
     expect(kinds).toContain("overview");
   });
 });
+
+/**
+ * Effort Parameter + binding plan behavioural tests.
+ *
+ * These cover the wiring that connects the SessionCard Effort selector to
+ * the tutor harness (Phase 1 + Phase 2) and the binding-plan persistence
+ * on `plan_start` (Phase 6). They use the same fetch-mocking pattern as
+ * the other plan-start tests.
+ */
+describe("effort parameter — system prompt surfaces the resolved level", () => {
+  beforeEach(async () => {
+    await getDb();
+  });
+
+  it("an explicit 'max' choice reaches the system prompt as EFFORT LEVEL: MAX", async () => {
+    let capturedSystem = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      try {
+        const parsed = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ role: string; content: string }> };
+        const sys = parsed.messages?.find((m) => m.role === "system");
+        if (sys && typeof sys.content === "string") capturedSystem = sys.content;
+      } catch {}
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            speech: "Welcome.",
+            board_ops: [],
+            evidence_refs: [],
+          }) } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await askTutorTurn({
+      ...greetingRequest("effort-max-system", "effort-max-system"),
+      context: { effortParameter: "max" },
+    });
+
+    expect(capturedSystem).toMatch(/EFFORT LEVEL: MAX/);
+    expect(capturedSystem).toMatch(/8.+12/);
+  });
+
+  it("auto resolves to 'high' when no onboarding is provided", async () => {
+    let capturedSystem = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      try {
+        const parsed = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ role: string; content: string }> };
+        const sys = parsed.messages?.find((m) => m.role === "system");
+        if (sys && typeof sys.content === "string") capturedSystem = sys.content;
+      } catch {}
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            speech: "Welcome.",
+            board_ops: [],
+            evidence_refs: [],
+          }) } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await askTutorTurn({
+      context: { effortParameter: "auto" },
+      learner: {
+        learnerId: "effort-auto-no-onboarding",
+        learnerMessage: "Hi.",
+      },
+      board: {
+        sessionId: "effort-auto-no-onboarding",
+        sessionTitle: "Limits",
+        domain: "math",
+        turnKind: "chat",
+      },
+      persistence: { sessionId: "effort-auto-no-onboarding", learnerId: "effort-auto-no-onboarding" },
+      model: {
+        endpoint: {
+          role: "tutor",
+          provider: "custom",
+          baseUrl: "https://model.example/v1",
+          modelId: "auto-model",
+          apiKey: "",
+          capabilities: defaultCapabilities(),
+        },
+      },
+    });
+
+    // 'high' is the no-signal default and produces 4–6 phases.
+    expect(capturedSystem).toMatch(/EFFORT LEVEL: HIGH/);
+    expect(capturedSystem).toMatch(/4.+6/);
+  });
+});
+
+describe("binding plan — persists learner-edited plan as a contract on plan_start", () => {
+  beforeEach(async () => {
+    await getDb();
+  });
+
+  it("writes a contract row whose statement contains the edited step labels", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          speech: "OK.",
+          board_ops: [],
+          evidence_refs: [],
+        }) } }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const sessionId = "binding-plan-persist";
+    const learnerId = "binding-plan-persist";
+    const bindingPlan = {
+      heading: "Limits",
+      steps: [
+        { id: "s1", label: "Meet the idea" },
+        { id: "s2", label: "Compute a first limit" },
+      ],
+    };
+
+    await askTutorTurn({
+      context: { effortParameter: "standard" },
+      learner: {
+        learnerId,
+        learnerMessage: "I edited the plan and agree.",
+        bindingPlan,
+        onboarding: undefined,
+      },
+      board: {
+        sessionId,
+        sessionTitle: "Limits",
+        domain: "math",
+        turnKind: "plan_start",
+      },
+      persistence: { sessionId, learnerId },
+      model: {
+        endpoint: {
+          role: "tutor",
+          provider: "custom",
+          baseUrl: "https://model.example/v1",
+          modelId: "binding-plan",
+          apiKey: "",
+          capabilities: defaultCapabilities(),
+        },
+      },
+    });
+
+    const { listActiveContracts } = await import("./contracts/store");
+    const contracts = await listActiveContracts(learnerId);
+    const binding = contracts.find((c) => c.sessionId === sessionId);
+    expect(binding).toBeDefined();
+    const goal = binding?.commitments.find((c) => c.kind === "goal");
+    expect(goal).toBeDefined();
+    if (goal?.kind === "goal") {
+      expect(goal.statement).toContain("Meet the idea");
+      expect(goal.statement).toContain("Compute a first limit");
+      expect(goal.statement).toContain("Limits");
+    }
+  });
+
+  it("does NOT write a contract when bindingPlan is absent (verbatim agreement)", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          speech: "OK.",
+          board_ops: [],
+          evidence_refs: [],
+        }) } }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const sessionId = "no-binding-plan";
+    const learnerId = "no-binding-plan";
+
+    await askTutorTurn({
+      context: { effortParameter: "standard" },
+      learner: {
+        learnerId,
+        learnerMessage: "I agree with the plan.",
+        // No bindingPlan — the learner agreed verbatim. The harness should
+        // not synthesize a binding contract in this case.
+        onboarding: undefined,
+      },
+      board: {
+        sessionId,
+        sessionTitle: "Limits",
+        domain: "math",
+        turnKind: "plan_start",
+      },
+      persistence: { sessionId, learnerId },
+      model: {
+        endpoint: {
+          role: "tutor",
+          provider: "custom",
+          baseUrl: "https://model.example/v1",
+          modelId: "no-binding-plan",
+          apiKey: "",
+          capabilities: defaultCapabilities(),
+        },
+      },
+    });
+
+    const { listActiveContracts } = await import("./contracts/store");
+    const contracts = await listActiveContracts(learnerId);
+    const binding = contracts.find((c) => c.sessionId === sessionId);
+    expect(binding).toBeUndefined();
+  });
+});

@@ -5,9 +5,9 @@
  * `classifyPageContent`, `buildFormulaRegistry`, `extractFormulasFromMarkdown`,
  * `normaliseFormula`) so they run in jsdom without needing a Tauri runtime.
  *
- * The pipeline tests for `extractCurriculumSubsection` use a mocked Tauri
- * surface — `doclingExtractImage` and `visionExtractImage` are stubbed so
- * the page routing logic can be asserted in isolation.
+ * The pipeline tests for `extractCurriculumSubsection` mock the Tauri `invoke`
+ * surface — `docling_extract_image` is stubbed so the extraction pipeline can
+ * be asserted in isolation.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 

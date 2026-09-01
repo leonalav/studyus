@@ -4,18 +4,18 @@
  * Runs on the desktop (Tauri) build only. Uses local ONNX inference via
  * the Rust backend for zero-latency, offline-capable document extraction.
  *
- * Pipeline overview (5 layers):
+ * Pipeline overview (4 layers):
  *
  *   Layer 1 — PDF page rasterisation via PDFium (Rust side).
- *   Layer 2 — Page classification (this file): text/diagram/formula heavy.
- *   Layer 3 — Layered extraction: diagram-heavy pages go to vision LLM,
- *             text/formula-heavy pages stay on local oar-ocr.
- *   Layer 4 — Markdown post-processing: tables inlined as `[Table N]` markers.
- *   Layer 5 — Formula registry extraction: deduplicated LaTeX expressions
+ *   Layer 2 — Single-path extraction via local oar-ocr ONNX (PP-OCR pipeline).
+ *             Page-classification helpers are retained for diagnostics but no
+ *             longer gate routing.
+ *   Layer 3 — Markdown post-processing: tables inlined as `[Table N]` markers.
+ *   Layer 4 — Formula registry extraction: deduplicated LaTeX expressions
  *             across all pages of the subsection.
  */
 
-import { doclingExtractImage, visionExtractImage, isTauriRuntime, TauriUnavailableError } from "../tauri";
+import { doclingExtractImage, isTauriRuntime, TauriUnavailableError } from "../tauri";
 import { renderPageRange } from "../tauri";
 
 /** A table extracted from a page during Docling OCR. */
@@ -142,30 +142,16 @@ export async function extractCurriculumSubsection(
 }
 
 /**
- * Run the Layer 2 + Layer 3 routing for one page.
+ * Run extraction for one page via local oar-ocr ONNX.
  *
- * - Classify the page by content mix.
- * - Diagram-heavy → vision LLM fallback (best OCR for figures).
- * - Otherwise → local oar-ocr (fast, offline).
+ * The page-classification functions (`analyzePageContent`, `classifyPageContent`)
+ * are retained for diagnostics and logging — they no longer gate routing.
  */
 async function extractSinglePage(
   base64Png: string,
-  pageNumber: number
+  _pageNumber: number
 ): Promise<Omit<ExtractedPage, "pageNumber">> {
-  const analysis = await analyzePageContent(base64Png);
-  const classification = classifyPageContent(analysis);
-
-  let raw: { markdown: string; tables: ExtractedTable[]; images: ExtractedImage[] };
-
-  if (classification.kind === "diagram-heavy") {
-    // Layer 3: targeted vision fallback. Diagrams confuse the layout model
-    // because figure captions and labels aren't text/table blocks.
-    raw = await extractWithVision(base64Png);
-  } else {
-    raw = await extractWithLocalOnnx(base64Png);
-  }
-
-  return raw;
+  return extractWithLocalOnnx(base64Png);
 }
 
 /** Analyse a page's content mix from the rasterised PNG alone. */
@@ -227,15 +213,7 @@ export function classifyPageContent(analysis: PageAnalysis): PageClassification 
   return { kind: "mixed", imageAreaRatio, equationDensity, textDensity };
 }
 
-/** Vision-LLM path for diagram-heavy pages. */
-async function extractWithVision(
-  base64Png: string
-): Promise<{ markdown: string; tables: ExtractedTable[]; images: ExtractedImage[] }> {
-  const result = await visionExtractImage(base64Png);
-  return parseVisionResult(result.markdown, result.tables ?? []);
-}
-
-/** Local ONNX path for text/formula-heavy pages. */
+/** Local ONNX path for all pages (oar-ocr PP-OCR pipeline). */
 async function extractWithLocalOnnx(
   base64Png: string
 ): Promise<{ markdown: string; tables: ExtractedTable[]; images: ExtractedImage[] }> {

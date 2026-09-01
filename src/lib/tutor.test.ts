@@ -43,6 +43,7 @@ import {
   summarizeBoardBlocks,
 } from "./tutor";
 import { DEFAULT_TUTOR } from "./preferences";
+import { DEFAULT_LEARNER_ID } from "./learning/store";
 import { bindModelRole, defaultCapabilities } from "./llm";
 import type { VisualizationIntent } from "./visualization/types";
 import type { RoadmapWidget } from "./widgets/types";
@@ -1242,7 +1243,7 @@ describe("Tutor session learner memory", () => {
         weakCriteria: [],
         hintDependence: "none",
         calibration: "accurate",
-      }, sessionTutor, []);
+      }, sessionTutor, [], DEFAULT_LEARNER_ID, "skill:arithmetic");
     }
 
     const summary = getTutorSessionLearnerSummary("bounded-session");
@@ -1263,7 +1264,7 @@ describe("Tutor session learner memory", () => {
         weakCriteria: [],
         hintDependence: "none",
         calibration: "accurate",
-      }, sessionTutor, []);
+      }, sessionTutor, [], DEFAULT_LEARNER_ID, "skill:arithmetic");
     }
     expect(getTutorSessionLearnerSummary("session-0")).toContain("no observations");
     expect(getTutorSessionLearnerSummary("session-100")).toContain("Observation 100");
@@ -1362,6 +1363,96 @@ describe("Tutor evidence cards", () => {
       evidencePages: [],
       pageExtractions: [],
     }]);
+  });
+});
+
+/**
+ * Effort-aware curriculum scope (Phase 5).
+ *
+ * `buildTutorGrounding` reads `effort.curriculumDepth` and maps it to
+ *   { chunkLimit, excerptChars }:
+ *     surface    →  8 chunks, 480-char excerpts
+ *     medium     → 16 chunks, 600-char excerpts
+ *     deep       → 24 chunks, 600-char excerpts
+ *     exhaustive → 48 chunks, 900-char excerpts
+ *
+ * The default (no effort supplied) is `medium`. Each level must be honoured
+ * exactly — custom endpoints with small context windows depend on the
+ * lower-effort caps to keep prompt assembly under their token ceiling.
+ */
+describe("Tutor evidence cards — effort-aware curriculum scope", () => {
+  const EFFORT_SOURCE_ID = "tutor-effort-depth-src";
+  const EFFORT_NODE_ID = "tutor-effort-depth-node";
+  const CHUNK_COUNT = 50;
+
+  beforeEach(async () => {
+    const db = await getDb();
+    db.run(`DELETE FROM curriculum_chunks WHERE node_id LIKE 'tutor-effort-depth-%';`);
+    db.run(`DELETE FROM curriculum_nodes WHERE id LIKE 'tutor-effort-depth-%';`);
+    db.run(`DELETE FROM curriculum_sources WHERE id = ?;`, [EFFORT_SOURCE_ID]);
+    db.run(
+      `INSERT OR REPLACE INTO curriculum_sources (id, name, hash, page_count, has_outline, extraction_status, created_at)
+       VALUES (?, ?, '', 100, 1, 'authored', '2026-01-01');`,
+      [EFFORT_SOURCE_ID, "Effort Depth Test"]
+    );
+    db.run(
+      `INSERT OR REPLACE INTO curriculum_nodes
+        (id, source_id, parent_node_id, ordinal, depth, title, section_number, start_page, end_page, node_kind, extraction_status, content_hash)
+       VALUES
+        (?, ?, NULL, 1, 1, 'Limits Depth', '3.1', 1, 100, 'section', 'transcribed', '');`,
+      [EFFORT_NODE_ID, EFFORT_SOURCE_ID]
+    );
+    // 50 chunks, each with 1200 chars of text so excerptChars truncation
+    // is observably different at 480 / 600 / 900 chars.
+    for (let i = 1; i <= CHUNK_COUNT; i++) {
+      const text = `chunk-${i}-`.repeat(120); // 120 * 9 = 1080 chars per chunk
+      db.run(
+        `INSERT INTO curriculum_chunks (id, node_id, page, chunk_ordinal, text_content, excerpt_hash, chunk_kind)
+         VALUES (?, ?, ?, ?, ?, ?, 'prose');`,
+        [`tutor-effort-depth-chunk-${i}`, EFFORT_NODE_ID, i, 1, text, simpleHash(text)]
+      );
+    }
+  });
+
+  it("clamps cards at chunkLimit=8 for surface effort", async () => {
+    const { EFFORT_PLAN_CONSTRAINTS } = await import("./effort");
+    const grounding = await buildTutorGrounding([EFFORT_NODE_ID], EFFORT_PLAN_CONSTRAINTS.standard);
+    expect(grounding.cards.length).toBeLessThanOrEqual(8);
+    expect(grounding.cards.length).toBeGreaterThan(0);
+  });
+
+  it("clamps cards at chunkLimit=48 for exhaustive effort", async () => {
+    const { EFFORT_PLAN_CONSTRAINTS } = await import("./effort");
+    const grounding = await buildTutorGrounding([EFFORT_NODE_ID], EFFORT_PLAN_CONSTRAINTS.max);
+    expect(grounding.cards.length).toBeLessThanOrEqual(48);
+    // We inserted 50, so exhaustive must take all 48 available.
+    expect(grounding.cards.length).toBe(48);
+  });
+
+  it("truncates excerpts at excerptChars=480 for surface effort", async () => {
+    const { EFFORT_PLAN_CONSTRAINTS } = await import("./effort");
+    const grounding = await buildTutorGrounding([EFFORT_NODE_ID], EFFORT_PLAN_CONSTRAINTS.standard);
+    // Each excerpt must be at most 480 chars, plus the ellipsis that
+    // indicates the chunk was truncated.
+    for (const card of grounding.cards) {
+      expect(card.excerpt).toBeDefined();
+      expect(card.excerpt!.length).toBeLessThanOrEqual(481);
+    }
+  });
+
+  it("allows longer excerpts at exhaustive effort than at surface", async () => {
+    const { EFFORT_PLAN_CONSTRAINTS } = await import("./effort");
+    const surface = await buildTutorGrounding([EFFORT_NODE_ID], EFFORT_PLAN_CONSTRAINTS.standard);
+    const exhaustive = await buildTutorGrounding([EFFORT_NODE_ID], EFFORT_PLAN_CONSTRAINTS.max);
+    expect(surface.cards[0]?.excerpt).toBeDefined();
+    expect(exhaustive.cards[0]?.excerpt).toBeDefined();
+    expect(surface.cards[0]!.excerpt!.length).toBeLessThan(exhaustive.cards[0]!.excerpt!.length);
+  });
+
+  it("defaults to medium effort (chunkLimit=16) when no effort is supplied", async () => {
+    const grounding = await buildTutorGrounding([EFFORT_NODE_ID]);
+    // 50 chunks inserted, 16 selected by default.
+    expect(grounding.cards.length).toBe(16);
   });
 });
 

@@ -28,6 +28,7 @@ import {
 import { FormCallCard, IntakeFormSheet, type IntakeDraft } from "./IntakeForm";
 import { ContractReview } from "./ContractReview";
 import { generateOnboardingQuestions, transcribeNode } from "../api";
+import { EFFORT_LEVELS, type EffortParameter } from "../lib/effort";
 import { extractContractFromOnboarding, type ExtractionOutcome } from "../lib/contracts/extract";
 import { saveContract } from "../lib/contracts/store";
 import type { TurnContract } from "../lib/contracts/types";
@@ -64,35 +65,31 @@ interface PendingOnboarding {
   handoff?: string;
 }
 
-type Depth = "auto" | "simple" | "detailed";
-
 interface Props {
   notify: (text: string) => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
+  /** The selected Effort level for this session. Threaded into the greeting
+   *  turn so the chalkboard's plan widget can be sized to match. Auto resolves
+   *  to an explicit level at the tutor harness, not here. */
   onPrepare: (
     prompt: string,
     boundNodes?: string[],
     onboarding?: OnboardingAnswers,
     contract?: TurnContract | null,
     sessionId?: string,
+    effortParameter?: EffortParameter,
   ) => void;
   selectedSection?: CurriculumStudySelection | null;
   onSelectedSectionChange?: (selection: CurriculumStudySelection | null) => void;
 }
 
-const DEPTHS: { id: Depth; label: string; desc: string }[] = [
-  { id: "auto", label: "Auto", desc: "Adapts to the question" },
-  { id: "simple", label: "Simple", desc: "Two-sentence answers" },
-  { id: "detailed", label: "Detailed", desc: "Full reasoning + next steps" },
-];
-
-const COMMANDS: { token: string; label: string; desc: string; intent: Intent; depth?: Depth }[] = [
+const COMMANDS: { token: string; label: string; desc: string; intent: Intent }[] = [
   { token: "explain", label: "Explain", desc: "Break the idea down step by step", intent: "explain" },
   { token: "practice", label: "Practice", desc: "Generate a problem and check my work", intent: "practice" },
   { token: "quiz", label: "Quiz", desc: "Test me with a quick question", intent: "quiz" },
-  { token: "simplify", label: "Simplify", desc: "Use a shorter, clearer explanation", intent: "explain", depth: "simple" },
+  { token: "simplify", label: "Simplify", desc: "Use a shorter, clearer explanation", intent: "explain" },
   { token: "notes", label: "Notes", desc: "Turn this topic into key points", intent: "explain" },
-  { token: "focus", label: "Focus", desc: "Pull out the one idea to remember", intent: "explain", depth: "simple" },
+  { token: "focus", label: "Focus", desc: "Pull out the one idea to remember", intent: "explain" },
 ];
 
 export function SessionCard({
@@ -136,8 +133,12 @@ export function SessionCard({
   const [input, setInput] = useState("");
   const [notesOpen, setNotesOpen] = useState(false);
   const [notes, setNotes] = useState<string[]>([]);
-  const [depth, setDepth] = useState<Depth>("auto");
-  const [depthOpen, setDepthOpen] = useState(false);
+  /** The Effort Parameter for this SessionCard. Local state — explicit
+   *  selections live only for the duration of the session, matching the v1
+   *  design. Threaded into the greeting turn via `onPrepare` so the
+   *  chalkboard's plan widget is sized to match. */
+  const [effortParameter, setEffortParameter] = useState<EffortParameter>("auto");
+  const [effortOpen, setEffortOpen] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [focused, setFocused] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -185,7 +186,7 @@ export function SessionCard({
     () => `session-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
   );
   const scrollRef = useRef<HTMLDivElement>(null);
-  const depthRef = useRef<HTMLDivElement>(null);
+  const effortRef = useRef<HTMLDivElement>(null);
   const commandRef = useRef<HTMLDivElement>(null);
   const commandButtonRef = useRef<HTMLButtonElement>(null);
   const paletteRef = useRef<HTMLDivElement>(null);
@@ -240,12 +241,14 @@ export function SessionCard({
     setContractOutcome(null);
     setContractSeed(null);
     setPrep({ pct: 0, stage: "" });
+    setEffortParameter("auto");
+    setEffortOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
-      if (depthRef.current && !depthRef.current.contains(e.target as Node)) setDepthOpen(false);
+      if (effortRef.current && !effortRef.current.contains(e.target as Node)) setEffortOpen(false);
       if (
         commandRef.current &&
         !commandRef.current.contains(e.target as Node) &&
@@ -459,7 +462,7 @@ export function SessionCard({
           ? `Couldn't generate onboarding (${error.message}) — starting the session directly.`
           : "Couldn't generate onboarding — starting the session directly."
       );
-      onPrepare(prompt, boundNodes);
+      onPrepare(prompt, boundNodes, undefined, undefined, undefined, effortParameter);
     }
   }
 
@@ -528,7 +531,7 @@ export function SessionCard({
       setPrep({ pct: 94, stage: "Preparing the chalkboard…" });
       setPrep({ pct: 100, stage: "Ready" });
       setOnboardingStage("done");
-      onPrepare(prompt, boundNodes, answers, contract, sessionId);
+      onPrepare(prompt, boundNodes, answers, contract, sessionId, effortParameter);
     } catch (error) {
       // Transcription is best-effort: the desktop-only pdfium path is absent in
       // the browser build, and a node may have no readable pages. Enter the
@@ -539,7 +542,7 @@ export function SessionCard({
           ? `Could not read the curriculum section (${error.message}) — starting with what's available.`
           : "Could not read the curriculum section — starting with what's available."
       );
-      onPrepare(prompt, boundNodes, answers, contract, sessionId);
+      onPrepare(prompt, boundNodes, answers, contract, sessionId, effortParameter);
     } finally {
       setPrep({ pct: 0, stage: "" });
     }
@@ -981,32 +984,32 @@ export function SessionCard({
 
       {/* footer */}
       <div className="flex items-center gap-3 border-t border-edge-soft px-4 py-2.5">
-        <div className="relative flex items-center gap-2" ref={depthRef}>
-          <span className="font-mono text-[11px] text-dim">Depth:</span>
+        <div className="relative flex items-center gap-2" ref={effortRef}>
+          <span className="font-mono text-[11px] text-dim">Effort:</span>
           <button
-            onClick={() => setDepthOpen((v) => !v)}
+            onClick={() => setEffortOpen((v) => !v)}
             className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[12px] font-medium text-fg transition-colors hover:bg-white/[0.06]"
           >
-            {DEPTHS.find((d) => d.id === depth)?.label}
-            <ChevronDown size={12} className={`text-dim transition-transform ${depthOpen ? "rotate-180" : ""}`} />
+            {EFFORT_LEVELS.find((e) => e.id === effortParameter)?.label}
+            <ChevronDown size={12} className={`text-dim transition-transform ${effortOpen ? "rotate-180" : ""}`} />
           </button>
-          {depthOpen && (
-            <div className="anim-toast absolute bottom-8 left-0 z-30 w-52 rounded-md border border-edge bg-raise p-1 shadow-[0_10px_30px_rgba(0,0,0,0.5)]">
-              {DEPTHS.map((d) => (
+          {effortOpen && (
+            <div className="anim-toast absolute bottom-8 left-0 z-30 w-64 rounded-md border border-edge bg-raise p-1 shadow-[0_10px_30px_rgba(0,0,0,0.5)]">
+              {EFFORT_LEVELS.map((e) => (
                 <button
-                  key={d.id}
+                  key={e.id}
                   onClick={() => {
-                    setDepth(d.id);
-                    setDepthOpen(false);
-                    notify(`Depth set to ${d.label}`);
+                    setEffortParameter(e.id);
+                    setEffortOpen(false);
+                    notify(`Effort set to ${e.label}`);
                   }}
                   className="flex w-full items-center gap-2.5 rounded px-2 py-1.5 text-left transition-colors hover:bg-white/[0.06]"
                 >
                   <span className="flex-1">
-                    <span className="block text-[13px] text-fg">{d.label}</span>
-                    <span className="block text-[11px] text-dim">{d.desc}</span>
+                    <span className="block text-[13px] text-fg">{e.label}</span>
+                    <span className="block text-[11px] text-dim">{e.desc}</span>
                   </span>
-                  {depth === d.id && <Check size={13} className="text-accent" />}
+                  {effortParameter === e.id && <Check size={13} className="text-accent" />}
                 </button>
               ))}
             </div>

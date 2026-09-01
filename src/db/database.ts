@@ -896,55 +896,14 @@ function runMigrations(db: Database) {
     db.run("COMMIT;");
   }
 
-  if (currentVersion < 13) {
-    db.run("BEGIN TRANSACTION;");
-
-    db.run(`
-      CREATE TABLE IF NOT EXISTS vision_endpoints (
-        id TEXT PRIMARY KEY,
-        label TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        base_url TEXT NOT NULL,
-        model_id TEXT NOT NULL,
-        api_key TEXT,
-        is_active INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-    `);
-
-    // Default vision endpoint — the real configuration lives in src-tauri/src/lib.rs (Rust)
-    // Database stores this as a placeholder record for reference only.
-    const v13Now = new Date().toISOString();
-    db.run(
-      `INSERT INTO vision_endpoints (id, label, provider, base_url, model_id, api_key, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-      [
-        "vision-default",
-        "Default Vision Model",
-        "custom",
-        "", // Configured in lib.rs: VISION_ENDPOINT_URL
-        "", // Configured in lib.rs: VISION_MODEL_ID
-        null, // Configured in lib.rs: VISION_API_KEY (env var: STUDYUS_VISION_API_KEY)
-        1,
-        v13Now,
-        v13Now,
-      ]
-    );
-
-    db.run(
-      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
-      [
-        13,
-        "Separate vision endpoints table for curriculum OCR",
-        v13Now,
-        "Rule: vision_endpoints stores dedicated vision model configurations for curriculum page transcription. This separates vision/OCR concerns from the agent role bindings (tutor/generation/evaluator).",
-      ]
-    );
-
-    db.run("PRAGMA user_version = 13;");
-    db.run("COMMIT;");
-  }
+  // ── v13: REMOVED ──
+  //
+  // The `vision_endpoints` table and its CRUD layer were created to support a
+  // dedicated cloud-vision transcription endpoint. With the local oar-ocr ONNX
+  // pipeline as the only extraction path, this table is no longer reachable
+  // from any caller and would only confuse future readers. The migration is
+  // intentionally skipped — there is nothing to migrate, and dropping the
+  // CREATE means existing v12 installs move straight to v14 with no v13 row.
 
   // ── v14: dual learner model cleanup + turn trace persistence ──
   //

@@ -5,10 +5,18 @@ description = "Studyus desktop app — pdfium-backed curriculum text+math ingest
 authors = ["Studyus"]
 edition = "2021"
 rust-version = "1.77.2"
+# The Tauri application binary is the default for `cargo run`. The other
+# binaries (memory_budget, ocr_benchmark) are tooling for the OCR pipeline and
+# must be addressed explicitly with `--bin` to avoid `cargo run` ambiguity.
+default-run = "studyus_app"
 
 [lib]
 name = "studyus_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "studyus_app"
+path = "src/main.rs"
 
 [[bin]]
 name = "memory_budget"

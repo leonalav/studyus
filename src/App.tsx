@@ -20,6 +20,7 @@ import { type OnboardingAnswers } from "./data/tutor";
 import { getStudySession, type StoredStudySession } from "./state/studySessionStore";
 import { DEFAULT_LEARNER_ID } from "./lib/learning/store";
 import type { TurnContract } from "./lib/contracts/types";
+import type { EffortParameter } from "./lib/effort";
 import { ContextMenu, type ContextMenuTarget } from "./components/ContextMenu";
 import {
   createDefaultTab,
@@ -88,6 +89,11 @@ export default function App() {
   /** The SessionCard-minted session id, passed to StudyRoom so its persisted
    *  session row shares one id with the contract's revision lineage. */
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
+  /** Effort Parameter chosen for the in-flight session. Threaded to
+   *  StudyRoom so the greeting turn resolves it. The raw choice is shipped
+   *  (not the resolved level) so the tutor harness can re-resolve if the
+   *  intake answers change between SessionCard selection and StudyRoom mount. */
+  const [pendingEffortParameter, setPendingEffortParameter] = useState<EffortParameter>("auto");
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [downloadsOpen, setDownloadsOpen] = useState(false);
@@ -226,12 +232,17 @@ export default function App() {
       onboarding?: OnboardingAnswers,
       contract?: TurnContract | null,
       sessionId?: string,
+      effortParameter?: EffortParameter,
     ) => {
       setRestoredSession(null);
       setPendingBoundNodes(boundNodes ?? []);
       setPendingOnboarding(onboarding ?? null);
       setPendingContract(contract ?? null);
       setPendingSessionId(sessionId ?? null);
+      // Persist the chosen effort for this board so StudyRoom can read it back
+      // even if the user navigates away mid-prep. The "Auto" choice is resolved
+      // at the tutor harness, not here, so we ship the raw choice.
+      setPendingEffortParameter(effortParameter ?? "auto");
       // Title the board from the chosen concept (carried on the onboarding
       // answers), never the raw prompt — the board must not echo the learner's
       // own query back at them.
@@ -503,6 +514,7 @@ export default function App() {
           boundNodes={restoredSession ? undefined : pendingBoundNodes}
           onboarding={restoredSession ? undefined : pendingOnboarding ?? undefined}
           turnContract={restoredSession ? undefined : pendingContract ?? undefined}
+          effort={restoredSession ? undefined : pendingEffortParameter}
           learnerId={DEFAULT_LEARNER_ID}
           notify={notify}
           onLeave={() => {

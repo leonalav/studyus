@@ -49,6 +49,7 @@ import {
   type BoardOp,
   type SessionThreadLog,
 } from "../../lib/tutor";
+import type { EffortParameter } from "../../lib/effort";
 import { ContextMenu, ContextMenuTarget } from "../ContextMenu";
 import { toPng } from "html-to-image";
 import { hydrateStudyBoards, saveStudySession, type StoredStudySession } from "../../state/studySessionStore";
@@ -90,6 +91,11 @@ interface Props {
    *  sessions only). Restored sessions load theirs from the contracts store
    *  via `getActiveContract` on mount. */
   turnContract?: TurnContract;
+  /** The Effort Parameter chosen on the SessionCard. Threaded into the
+   *  greeting turn so the chalkboard's plan widget is sized to match.
+   *  Undefined for a restored session — the tutor harness defaults to "auto"
+   *  in that case. */
+  effort?: EffortParameter;
   /** Learner identity for the contracts store and evidence ledger. Defaults
    *  to `DEFAULT_LEARNER_ID` to match the rest of the app. */
   learnerId?: string;
@@ -104,6 +110,7 @@ export function StudyRoom({
   boundNodes,
   onboarding,
   turnContract,
+  effort,
   learnerId,
   onLeave,
   notify,
@@ -296,31 +303,6 @@ export function StudyRoom({
   const abortRef = useRef<AbortController | null>(null);
   const activityTurnRef = useRef(0);
   const greetedRef = useRef(false);
-  /** Hard 1-minute UI backstop: if "thinking" lingers past 55s, force an
-   *  error state so the learner never stares at a spinner past the SLA.
-   *  Cleared on every status change; the request itself is left to its own
-   *  AbortController to settle in the background. */
-  const thinkingWatchdogRef = useRef<number | null>(null);
-  const armThinkingWatchdog = useCallback(() => {
-    if (thinkingWatchdogRef.current !== null) window.clearTimeout(thinkingWatchdogRef.current);
-    thinkingWatchdogRef.current = window.setTimeout(() => {
-      thinkingWatchdogRef.current = null;
-      setAgentStatus("error");
-      setAgentActivity({
-        kind: "error",
-        label: "Response took too long",
-        detail: "The tutor did not respond within 55 seconds. The request has been cancelled.",
-      });
-      // Cancel the in-flight request so it cannot resurrect a late response.
-      abortRef.current?.abort();
-    }, 55_000);
-  }, []);
-  const disarmThinkingWatchdog = useCallback(() => {
-    if (thinkingWatchdogRef.current !== null) {
-      window.clearTimeout(thinkingWatchdogRef.current);
-      thinkingWatchdogRef.current = null;
-    }
-  }, []);
   /** Widgets that have already woken the tutor, so a re-render or a double
    *  click on Check cannot ask the same question twice. */
   const signalledWidgets = useRef(new Set<string>());
@@ -331,7 +313,7 @@ export function StudyRoom({
       text: string,
       imageData?: string,
       showUserMessage?: boolean,
-      options?: { kind?: TurnKind; displayText?: string; signalKey?: string }
+      options?: { kind?: TurnKind; displayText?: string; signalKey?: string; bindingPlan?: { heading: string; steps: { id: string; label: string; details?: string[] }[] } }
     ) => Promise<void>) | null
   >(null);
   /** Bumped when an opening greeting is cancelled by an unmount, so the
@@ -731,6 +713,7 @@ export function StudyRoom({
               kind: widget.intent.kind === "plan" ? "plan_start" : "widget",
               displayText: signal.displayText,
               signalKey: blockId,
+              bindingPlan: signal.bindingPlan,
             });
           } catch (error) {
             // Release the dedupe claim, or this widget could never wake the tutor
@@ -875,7 +858,6 @@ export function StudyRoom({
     abortRef.current?.abort();
     abortRef.current = null;
     setTyping(false);
-    disarmThinkingWatchdog();
     setAgentStatus("idle");
     setAgentActivity(null);
     setAttachments([]);
@@ -937,7 +919,7 @@ export function StudyRoom({
       text: string,
       imageData?: string,
       showUserMessage = true,
-      options?: { kind?: TurnKind; displayText?: string; signalKey?: string }
+      options?: { kind?: TurnKind; displayText?: string; signalKey?: string; bindingPlan?: { heading: string; steps: { id: string; label: string; details?: string[] }[] } }
     ) => {
       if (rewindRef.current) return;
       const turnKind = options?.kind ?? "chat";
@@ -958,7 +940,6 @@ export function StudyRoom({
       // callback's immutable attachment snapshot while React clears the UI.
       setAttachments([]);
       setAgentStatus("thinking");
-      armThinkingWatchdog();
       setAgentActivity({
         kind: "planning",
         label: "Planning a response",
@@ -976,12 +957,15 @@ export function StudyRoom({
       abortRef.current = controller;
       try {
         const result = await askTutorTurn({
-          context: {},
+          context: {
+            effortParameter: effort,
+          },
           learner: {
             learnerId: resolvedLearnerId,
             learnerMessage: text,
             signal: controller.signal,
             onboarding: onboarding ?? undefined,
+            bindingPlan: options?.bindingPlan,
             attachments: attachments.map((a) => ({
               name: a.name,
               kind: a.kind,
@@ -1097,7 +1081,6 @@ export function StudyRoom({
         }
 
         if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
-        disarmThinkingWatchdog();
         setAgentStatus("idle");
         setAgentActivity({
           kind: "complete",
@@ -1122,7 +1105,6 @@ export function StudyRoom({
             setGreetAttempt((attempt) => attempt + 1);
           }
           if (activityTurnRef.current === activityTurn) {
-            disarmThinkingWatchdog();
             setAgentStatus("idle");
             setAgentActivity(null);
           }
@@ -1139,7 +1121,6 @@ export function StudyRoom({
         // saveWidgetState: `blockId` for a single widget, `group:…` for a
         // cluster. The helper exists so this release invariant is testable.
         releaseWidgetDedupeOnFailure(signalledWidgets.current, turnKind, options?.signalKey);
-        disarmThinkingWatchdog();
         setAgentStatus("error");
         setAgentActivity({
           kind: "error",

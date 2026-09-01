@@ -1,0 +1,25 @@
+npm warn Unknown project config "verify-deps-before-run". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+
+ RUN  v4.1.10 a:/studyus_app
+
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/contracts/__tests__/validate.test.ts [ src/lib/contracts/__tests__/validate.test.ts ]
+TypeError: Cannot read properties of undefined (reading 'config')
+ ❯ src/lib/contracts/__tests__/validate.test.ts:9:1
+      7|    ───────────────────────────────────────────────────────────── */
+      8|
+      9| describe("validateTurnContract - engine-owned field rejection", () => {
+       | ^
+     10|   it("rejects a commitment with 'mastery' in the concept field", () =>…
+     11|     const result = validateTurnContract({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  no tests
+   Start at  23:28:15
+   Duration  1.01s (transform 154ms, setup 0ms, import 0ms, tests 0ms, environment 0ms)
+

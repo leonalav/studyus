@@ -1,0 +1,57 @@
+npm warn Unknown project config "verify-deps-before-run". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+src/components/board/AnimationTimeline.tsx(31,9): error TS6133: 'totalDuration' is declared but its value is never read.
+src/components/board/AnimationTimeline.tsx(33,9): error TS6133: 'getEasing' is declared but its value is never read.
+src/components/board/AnimationTimeline.tsx(136,65): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/components/board/MathDiagram.tsx(138,9): error TS6133: 'changed' is declared but its value is never read.
+src/components/board/StudyRoom.tsx(1037,52): error TS7015: Element implicitly has an 'any' type because index expression is not of type 'number'.
+src/components/board/WidgetSurface.tsx(19,3): error TS6133: 'Check' is declared but its value is never read.
+src/components/board/WidgetSurface.tsx(20,3): error TS6133: 'Plus' is declared but its value is never read.
+src/components/board/WidgetSurface.tsx(40,8): error TS6133: 'AnimationKeyframe' is declared but its value is never read.
+src/components/board/WidgetSurface.tsx(2106,11): error TS2322: Type '{ keyframes: { id: string; label: string; duration: number; }[]; autoPlay: false; loop: boolean | undefined; playbackSpeed: number | undefined; onKeyframeChange: (index: number) => void; }' is not assignable to type 'IntrinsicAttributes & AnimationTimelineProps'.
+  Property 'playbackSpeed' does not exist on type 'IntrinsicAttributes & AnimationTimelineProps'.
+src/data/tutor.ts(163,9): error TS6133: 'byQuestion' is declared but its value is never read.
+src/lib/agentRuntime.empty-response.test.ts(28,38): error TS2353: Object literal may only specify known properties, and 'jsonMode' does not exist in type 'ModelCapabilities'.
+src/lib/agentRuntime.ts(463,18): error TS2769: No overload matches this call.
+  Overload 1 of 2, '(timeout: string | number | Timeout | undefined): void', gave the following error.
+    Argument of type 'Timeout | null' is not assignable to parameter of type 'string | number | Timeout | undefined'.
+      Type 'null' is not assignable to type 'string | number | Timeout | undefined'.
+  Overload 2 of 2, '(id: number | undefined): void', gave the following error.
+    Argument of type 'Timeout | null' is not assignable to parameter of type 'number | undefined'.
+      Type 'null' is not assignable to type 'number | undefined'.
+src/lib/curriculum.ts(940,3): error TS6133: 'nodeId' is declared but its value is never read.
+src/lib/curriculum.ts(941,3): error TS6133: 'pages' is declared but its value is never read.
+src/lib/curriculum/docling.ts(179,9): error TS7022: 'whitespaceRatio' implicitly has type 'any' because it does not have a type annotation and is referenced directly or indirectly in its own initializer.
+src/lib/curriculum/docling.ts(179,33): error TS2448: Block-scoped variable 'whitespaceRatio' used before its declaration.
+src/lib/curriculum/docling.ts(221,77): error TS2345: Argument of type '{ id: string; markdown: string; }[]' is not assignable to parameter of type '{ id: string; markdown?: string | undefined; html: string; }[]'.
+  Property 'html' is missing in type '{ id: string; markdown: string; }' but required in type '{ id: string; markdown?: string | undefined; html: string; }'.
+src/lib/curriculum/docling.ts(443,16): error TS6133: 'whitespaceRatio' is declared but its value is never read.
+src/lib/curriculum/docling.ts(443,32): error TS6133: 'b64' is declared but its value is never read.
+src/lib/curriculum/docling.ts(443,45): error TS6133: 'area' is declared but its value is never read.
+src/lib/figureSpec/roundTrip.test.ts(15,10): error TS6133: 'validateFigureSpec' is declared but its value is never read.
+src/lib/learning/evidence.ts(50,7): error TS2739: Type '{ prediction: { recall: number; understanding: number; procedure: number; transfer: number; }; observation: { recall: number; understanding: number; procedure: number; transfer: number; }; construction: { ...; }; ... 4 more ...; retrieval: { ...; }; }' is missing the following properties from type 'Record<"explanation" | "procedure" | "transfer" | "retrieval" | "drill" | "prediction" | "observation" | "construction" | "selection" | "cover", { recall: number; understanding: number; procedure: number; transfer: number; }>': drill, cover
+src/lib/learning/plan.ts(215,21): error TS2345: Argument of type '{ description: string; successCriteria: string; status: "pending"; targetPageRange: [number, number]; checkpointEvidence: never[]; estimatedMinutes: number; }' is not assignable to parameter of type 'LearningObjective'.
+  Property 'id' is missing in type '{ description: string; successCriteria: string; status: "pending"; targetPageRange: [number, number]; checkpointEvidence: never[]; estimatedMinutes: number; }' but required in type 'LearningObjective'.
+src/lib/learning/policy.ts(541,3): error TS6133: 'state' is declared but its value is never read.
+src/lib/learning/store.ts(1148,6): error TS2339: Property 'run' does not exist on type 'Promise<Database>'.
+src/lib/learning/store.ts(1168,18): error TS2339: Property 'exec' does not exist on type 'Promise<Database>'.
+src/lib/learning/store.ts(1169,38): error TS7006: Parameter 'row' implicitly has an 'any' type.
+src/lib/learning/store.ts(1181,18): error TS2339: Property 'exec' does not exist on type 'Promise<Database>'.
+src/lib/preferences.ts(746,7): error TS2322: Type 'string' is not assignable to type '"compact" | "standard" | "spacious" | undefined'.
+src/lib/tutor.ceiling.test.ts(264,9): error TS6133: 'answeredQuestion' is declared but its value is never read.
+src/lib/tutor.diagnostic.test.ts(87,33): error TS2345: Argument of type 'BoardOp[]' is not assignable to parameter of type 'readonly { op: string; intent?: { kind: string; } | undefined; }[]'.
+  Type 'BoardOp' is not assignable to type '{ op: string; intent?: { kind: string; } | undefined; }'.
+    Type '{ op: "visualize"; intent: VisualizationIntent; }' is not assignable to type '{ op: string; intent?: { kind: string; } | undefined; }'.
+      Types of property 'intent' are incompatible.
+        Type 'VisualizationIntent' is not assignable to type '{ kind: string; } | undefined'.
+          Property 'kind' is missing in type 'GeometryIntent' but required in type '{ kind: string; }'.
+src/lib/tutor.diagnostic.test.ts(137,33): error TS2345: Argument of type 'BoardOp[]' is not assignable to parameter of type 'readonly { op: string; intent?: { kind: string; } | undefined; }[]'.
+  Type 'BoardOp' is not assignable to type '{ op: string; intent?: { kind: string; } | undefined; }'.
+    Type '{ op: "visualize"; intent: VisualizationIntent; }' is not assignable to type '{ op: string; intent?: { kind: string; } | undefined; }'.
+      Types of property 'intent' are incompatible.
+        Type 'VisualizationIntent' is not assignable to type '{ kind: string; } | undefined'.
+          Property 'kind' is missing in type 'GeometryIntent' but required in type '{ kind: string; }'.
+src/lib/tutor.empty-recovery.test.ts(215,33): error TS2339: Property 'correct' does not exist on type 'TutorDiagnosis'.
+src/lib/tutor.test.ts(575,73): error TS2493: Tuple type '[]' of length '0' has no element at index '1'.
+src/lib/tutor.test.ts(1857,30): error TS2322: Type '"function"' is not assignable to type '"roadmap" | "plan" | "concept_card" | "slider" | "animation" | "comparison" | "question" | "hint" | "scratchpad" | "annotation" | "reveal" | "example" | "mistake_check" | "memory_hook" | ... 5 more ... | "figure_spec"'.
+src/lib/tutor.test.ts(1872,30): error TS2322: Type '"equation"' is not assignable to type '"roadmap" | "plan" | "concept_card" | "slider" | "animation" | "comparison" | "question" | "hint" | "scratchpad" | "annotation" | "reveal" | "example" | "mistake_check" | "memory_hook" | ... 5 more ... | "figure_spec"'.
+src/lib/widgets/signal.ts(44,43): error TS2304: Cannot find name 'PlanStep'.

@@ -258,7 +258,8 @@ interface CompletionOutcome {
 // Model endpoints can need substantial cold-start and structured-generation
 // time. Keep the shared deadline aligned with the native transport rather than
 // surfacing the former 60-second cutoff during an otherwise healthy response.
-export const DEFAULT_TIMEOUT_MS = 20_000;
+// Set to Infinity to disable the per-request timeout entirely.
+export const DEFAULT_TIMEOUT_MS = Infinity;
 
 function httpError(status: number, text: string, endpoint: ResolvedRoleEndpoint): AgentRuntimeError {
   const body = text.slice(0, 240);
@@ -310,7 +311,8 @@ export async function chatCompletion({
     if (signal.aborted) controller.abort();
     else signal.addEventListener("abort", onOuterAbort, { once: true });
   }
-  const timer = setTimeout(() => {
+  // Only arm the timer when a real deadline exists.
+  const timer = timeoutMs === 0 || timeoutMs === Infinity ? null : setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, Math.max(1, timeoutMs));
@@ -347,7 +349,9 @@ export async function chatCompletion({
 
   const interruptionError = () => timedOut
     ? new AgentRuntimeError(
-        `${ROLE_LABEL[endpoint.role]} agent timed out after ${Math.round(timeoutMs / 1000)}s.`,
+        `${ROLE_LABEL[endpoint.role]} agent timed out after ${
+          !isFinite(timeoutMs) ? "the configured limit" : `${Math.round(timeoutMs / 1000)}s`
+        }.`,
         "timeout"
       )
     : new AgentRuntimeError("Request cancelled.", "aborted");

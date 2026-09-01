@@ -25,6 +25,7 @@ import {
   MAX_FIGURE_DECLARED,
 } from "../figureSpec/types";
 import { devLog } from "../devLog";
+import type { EffortConstraints } from "../effort";
 
 /* ── Safety bounds ── */
 
@@ -173,7 +174,7 @@ function validateGroup(value: unknown): ValidationResult {
 
 /* ── Main entry point ── */
 
-export function validateWidgetIntent(intent: unknown): ValidationResult {
+export function validateWidgetIntent(intent: unknown, effortConfig?: EffortConstraints): ValidationResult {
   if (!isPlainObject(intent)) return fail("Widget intent must be an object");
 
   const kind = intent.kind;
@@ -190,7 +191,7 @@ export function validateWidgetIntent(intent: unknown): ValidationResult {
 
   switch (kind as WidgetKind) {
     case "roadmap": return validateRoadmap(intent);
-    case "plan": return validatePlan(intent);
+    case "plan": return validatePlan(intent, effortConfig);
     case "overview": return validateOverview(intent);
     case "concept_card": return validateConceptCard(intent);
     case "slider": return validateSlider(intent);
@@ -240,18 +241,66 @@ function validateRoadmap(intent: Record<string, unknown>): ValidationResult {
   return ok;
 }
 
-/** Plan bounds: a plan with one phase is a sentence, not a route; past eight
- *  phases it stops being something a learner can agree to at a glance. */
-const MAX_PLAN_STEPS = 8;
+/** Plan bounds: a plan with one phase is a sentence, not a route. The hard
+ *  upper bound here is the maximum across all effort levels; per-level caps
+ *  come from `EffortConstraints.maxSteps` and are checked below. */
+const MAX_PLAN_STEPS_ABSOLUTE = 12;
+const MIN_PLAN_STEPS_ABSOLUTE = 2;
 const MAX_PLAN_STEP_DETAILS = 4;
+const TIME_ESTIMATE_PATTERN = /\b\d+\s*(?:min|minute|minutes|hour|hours|hr|h|day|days|week|weeks)\b/i;
+const SUCCESS_CRITERION_PATTERN = /(?:^|\s)(?:can|will|able\s+to|achieve|master|success(?:ful)?|succeed|know|explain|do|solve|complete|finish)\b/i;
+const PITFALL_PATTERN = /(?:pitfall|common\s+mistake|warn(?:ing)?|careful|watch\s+out|avoid)/i;
 
-function validatePlan(intent: Record<string, unknown>): ValidationResult {
+/**
+ * Validate a Plan widget intent, optionally against the chosen Effort level.
+ *
+ * The hard bounds (`MIN_PLAN_STEPS_ABSOLUTE` … `MAX_PLAN_STEPS_ABSOLUTE`) are
+ * always enforced — they are the schema ceiling for the renderer regardless of
+ * effort. The per-effort bounds are a tighter window: a "standard" plan with
+ * 8 steps is too long for that level even though 8 is a valid number, and a
+ * "max" plan with 3 steps undersells the requested depth. When `effortConfig`
+ * is supplied, both windows are checked and the per-level message names the
+ * level so the repair loop can do the right thing on the second attempt.
+ *
+ * Sub-activities / time estimates / success criteria / pitfalls are all effort
+ * flags. When the flag is on, every step must include the structural element
+ * the flag names. When the flag is off, the corresponding structural element
+ * is not validated — standard-effort plans legitimately skip time estimates.
+ */
+export function validatePlan(intent: Record<string, unknown>, effortConfig?: EffortConstraints): ValidationResult {
   if (!text(intent.heading, MAX_SHORT_TEXT_LENGTH)) return fail("Plan needs a heading — what is being mastered");
-  const steps = requiredList(intent.steps, MAX_PLAN_STEPS);
+  const steps = requiredList(intent.steps, MAX_PLAN_STEPS_ABSOLUTE);
   devLog("[tutor-trace] validatePlan steps:", Array.isArray(steps) ? `array len=${steps.length}` : "null", "intent.steps was:", intent.steps);
-  if (!steps || steps.length < 2) return fail(`Plan needs 2–${MAX_PLAN_STEPS} steps`);
+  if (!steps) return fail(`Plan needs ${MIN_PLAN_STEPS_ABSOLUTE}–${MAX_PLAN_STEPS_ABSOLUTE} steps`);
+  if (steps.length < MIN_PLAN_STEPS_ABSOLUTE) {
+    return fail(`Plan needs at least ${MIN_PLAN_STEPS_ABSOLUTE} steps (got ${steps.length})`);
+  }
+
+  // Per-effort count window. A plan that is valid against the schema but too
+  // long for "standard" or too short for "max" fails here with an effort-aware
+  // message that names the level so the repair loop can size correctly.
+  if (effortConfig) {
+    if (steps.length < effortConfig.minSteps) {
+      return fail(`Plan needs at least ${effortConfig.minSteps} steps for the selected effort level (got ${steps.length})`);
+    }
+    if (steps.length > effortConfig.maxSteps) {
+      return fail(`Plan must have at most ${effortConfig.maxSteps} steps for the selected effort level (got ${steps.length})`);
+    }
+  } else if (steps.length > MAX_PLAN_STEPS_ABSOLUTE) {
+    return fail(`Plan supports at most ${MAX_PLAN_STEPS_ABSOLUTE} steps`);
+  }
+
   const ids = uniqueIds(steps, "plan.steps");
   if (!ids.valid) return ids;
+
+  // Collect labels once so the effort-level messages can name them when a step
+  // is missing a required structural element.
+  const labelsOf = (arr: Record<string, unknown>[]): string[] =>
+    arr.map((step: Record<string, unknown>) => {
+      const raw = step.label;
+      return typeof raw === "string" && raw.trim() ? raw.trim().slice(0, 80) : "(unnamed)";
+    });
+
   for (const step of steps as Record<string, unknown>[]) {
     if (!text(step.label, MAX_SHORT_TEXT_LENGTH)) return fail("Each plan step needs a label");
     if (!optionalLatex(step.labelLatex)) return fail("Plan step labelLatex is too long");
@@ -270,6 +319,75 @@ function validatePlan(intent: Record<string, unknown>): ValidationResult {
       }
     }
   }
+
+  // Effort-aware structural checks. These run after the per-step shape check
+  // so a malformed details[] does not short-circuit a level-aware message.
+  // Each check is independent and names the offending step label(s) so the
+  // model can repair the exact entry rather than the whole plan.
+  if (effortConfig) {
+    const stepArr = steps as Record<string, unknown>[];
+    const labels = labelsOf(stepArr);
+    const detailsOf = (step: Record<string, unknown>): string[] =>
+      Array.isArray(step.details) ? step.details.filter((d): d is string => typeof d === "string") : [];
+
+    if (effortConfig.includeSubActivities) {
+      const missing = stepArr
+        .map((s, i) => ({ s, i, label: labels[i] }))
+        .filter(({ s }) => detailsOf(s).length < 2)
+        .map(({ label }) => label);
+      if (missing.length > 0) {
+        return fail(
+          `Each step must include at least 2 sub-activities (details) at the selected effort level. Missing in: ${missing.join(", ")}`
+        );
+      }
+    }
+
+    if (effortConfig.includeTimeEstimates) {
+      const missing = stepArr
+        .map((s, i) => ({ details: detailsOf(s), label: labels[i] }))
+        .filter(({ details }) => details.length === 0 || !TIME_ESTIMATE_PATTERN.test(details[0]))
+        .map(({ label }) => label);
+      if (missing.length > 0) {
+        return fail(
+          `Each step must include a time estimate as its first detail item at the selected effort level (e.g. "~30 min", "~2 hours"). Missing in: ${missing.join(", ")}`
+        );
+      }
+    }
+
+    if (effortConfig.includeSuccessCriteria) {
+      const missing = stepArr
+        .map((s, i) => ({ details: detailsOf(s), label: labels[i] }))
+        .filter(({ details }) => {
+          if (details.length === 0) return true;
+          const last = details[details.length - 1];
+          return !SUCCESS_CRITERION_PATTERN.test(last);
+        })
+        .map(({ label }) => label);
+      if (missing.length > 0) {
+        return fail(
+          `Each step must end with a success criterion at the selected effort level (e.g. "can solve X unaided"). Missing in: ${missing.join(", ")}`
+        );
+      }
+    }
+
+    if (effortConfig.includePitfalls) {
+      const missing = stepArr
+        .map((s, i) => ({ details: detailsOf(s), label: labels[i] }))
+        .filter(({ details }) => {
+          if (details.length < 2) return true;
+          // A pitfall can sit anywhere among the middle details; checking each
+          // entry is more forgiving than only checking the middle one.
+          return !details.slice(0, -1).some((d) => PITFALL_PATTERN.test(d));
+        })
+        .map(({ label }) => label);
+      if (missing.length > 0) {
+        return fail(
+          `Each step should identify a common pitfall at the selected effort level. Missing in: ${missing.join(", ")}`
+        );
+      }
+    }
+  }
+
   if (!optionalText(intent.agreementPrompt, MAX_SHORT_TEXT_LENGTH)) return fail("Plan agreementPrompt is too long");
   return ok;
 }
@@ -1519,7 +1637,7 @@ export function sanitizeWidgetState(value: unknown): WidgetState | undefined {
     const rawSteps = Array.isArray(value.planDraft.steps) ? value.planDraft.steps : [];
     const steps = rawSteps
       .filter((step): step is Record<string, unknown> => isPlainObject(step))
-      .slice(0, MAX_PLAN_STEPS)
+      .slice(0, MAX_PLAN_STEPS_ABSOLUTE)
       .map((step, index) => {
         const id = identifier(step.id) ? String(step.id) : `step-${index + 1}`;
         const label =

@@ -40,6 +40,16 @@ export default defineConfig({
     // Agent worktrees under .claude/ are full source copies; without this the
     // runner collects every test three times and reports triple counts.
     exclude: ["**/node_modules/**", "**/dist/**", "**/.claude/**", "**/src-tauri/**"],
+    // The default `forks` pool spawns a child process that, on this Windows +
+    // Node 22/25 environment, fails to initialise vitest's worker context —
+    // every test then throws "Cannot read properties of undefined (reading
+    // 'config')" at the first `describe()` call because the file-scope runner
+    // reference is never set by `clearCollectorContext()`. Both `vmThreads`
+    // and `vmForks` run the test file in-process inside a Worker/vm context
+    // and bootstrap correctly, so we pin `vmThreads` as the default. Anyone
+    // who needs a hard process isolation (e.g. for native modules that
+    // crash the worker) can pass `--pool=vmForks` on the CLI to override.
+    pool: "vmThreads",
   },
 });
 

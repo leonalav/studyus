@@ -1,0 +1,712 @@
+diff --git a/src/lib/tutor.ts b/src/lib/tutor.ts
+index 8f0cbec..2e7c84d 100644
+--- a/src/lib/tutor.ts
++++ b/src/lib/tutor.ts
+@@ -51,6 +51,15 @@ import {
+ import { buildContractReminder } from "./contracts/format";
+ import type { TurnContract } from "./contracts/types";
+ import { TUTOR_AGENT_PROMPT_V1 } from "./llm";
++import {
++  EFFORT_PLAN_CONSTRAINTS,
++  formatEffortReminder,
++  resolveEffort,
++  type CurriculumDepth,
++  type EffortConstraints,
++  type EffortParameter,
++  type ExplicitEffort,
++} from "./effort";
+ import {
+   getSkillEvidence, upsertEntrySignal, upsertHypothesis, DEFAULT_LEARNER_ID, getActivePlanForSkill
+ } from "./learning/store";
+@@ -75,7 +84,7 @@ import type { RoadmapStep, RoadmapWidget, WidgetIntent, WidgetKind, WidgetState
+ import type { SupportLevel, LearningRoute, SelfReportedFamiliarity } from "./learning/types";
+ import { devLog, devWarn } from "./devLog";
+ import { WIDGET_LABEL, isActionableWidget } from "./widgets/types";
+-import { validateWidgetIntent } from "./widgets/validate";
++import { validateWidgetIntent, validatePlan as validatePlanWidget } from "./widgets/validate";
+ import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
+ import { MASTERY_STAGES, MASTERY_STAGE_SPECS, isMasteryStage, nextStage, type MasteryStage } from "./mastery";
+ import { evaluateStageExit } from "./learning/predicates";
+@@ -88,7 +97,6 @@ import {
+ } from "./learning/session";
+ import { groundMasteryCards } from "./learning/masteryCard";
+ import { recordTutorObservation } from "./learning/bridge";
+-import { getSkillEvidence, upsertEntrySignal, upsertHypothesis, DEFAULT_LEARNER_ID, getActivePlanForSkill } from "./learning/store";
+ import type { LearningPlan } from "./learning/plan";
+ import { isSelfReportedFamiliarity } from "./learning/types";
+ import {
+@@ -299,8 +307,31 @@ const EVIDENCE_EXCERPT_CHARS = 600;
+  * Async because it reads from SQLite; callers must `await` it before assembling
+  * the prompt.
+  */
+-export async function buildTutorGrounding(boundNodes: string[]): Promise<TutorGrounding> {
++/**
++ * Map an Effort Constraints curriculum depth to the chunk cap and excerpt
++ * length for `buildTutorGrounding`. The depth is a request to be more or less
++ * comprehensive; the numbers below are the operational consequence.
++ *
++ * Custom-endpoint note: `excerptChars` is what each card embeds in the prompt.
++ * The bound endpoint's context window governs whether all cards fit; the
++ * runtime trusts the endpoint and does not clamp. A 48-card x 900-char excerpt
++ * at `exhaustive` is ~43KB of curriculum prose — well within any 32k context
++ * window but at risk of truncation on smaller custom endpoints.
++ */
++const CURRICULUM_DEPTH_LIMITS: Record<CurriculumDepth, { chunkLimit: number; excerptChars: number }> = {
++  surface: { chunkLimit: 8, excerptChars: 480 },
++  medium: { chunkLimit: 16, excerptChars: 600 },
++  deep: { chunkLimit: 24, excerptChars: 600 },
++  exhaustive: { chunkLimit: 48, excerptChars: 900 },
++};
++
++export async function buildTutorGrounding(
++  boundNodes: string[],
++  effort?: EffortConstraints
++): Promise<TutorGrounding> {
+   if (!boundNodes || boundNodes.length === 0) return { scope: [], cards: [] };
++  const depth = effort?.curriculumDepth ?? "medium";
++  const { chunkLimit, excerptChars } = CURRICULUM_DEPTH_LIMITS[depth];
+   const { nodes, chunks } = await getEvidenceForSelectedNodes(boundNodes);
+   const nodeById = new Map(nodes.map((node) => [node.id, node]));
+   const boundRank = new Map(boundNodes.map((id, index) => [id, index]));
+@@ -363,10 +394,10 @@ export async function buildTutorGrounding(boundNodes: string[]): Promise<TutorGr
+     a.page - b.page ||
+     a.chunkOrdinal - b.chunkOrdinal
+   );
+-  for (const chunk of ordered.slice(0, 24)) {
++  for (const chunk of ordered.slice(0, chunkLimit)) {
+     const node = nodeById.get(chunk.nodeId);
+-    const excerpt = chunk.textContent.length > EVIDENCE_EXCERPT_CHARS
+-      ? chunk.textContent.slice(0, EVIDENCE_EXCERPT_CHARS) + "…"
++    const excerpt = chunk.textContent.length > excerptChars
++      ? chunk.textContent.slice(0, excerptChars) + "…"
+       : chunk.textContent;
+     const range = node
+       ? node.startPage === node.endPage ? `p.${node.startPage}` : `pp.${node.startPage}–${node.endPage}`
+@@ -1293,7 +1324,7 @@ function validateBoardBlockSpec(value: unknown, path: string, errors: string[]):
+       return { kind, intent: intent as VisualizationIntent };
+     }
+     case "widget": {
+-      const intent = validateWidgetIntentField(rec.intent, path, errors);
++      const intent = validateWidgetIntentField(rec.intent, path, errors, effortConfig);
+       if (!intent) return null;
+       return { kind, intent };
+     }
+@@ -1307,12 +1338,12 @@ function validateBoardBlockSpec(value: unknown, path: string, errors: string[]):
+  * schema failure the repair loop reports back — never a silently dropped or
+  * half-rendered card.
+  */
+-function validateWidgetIntentField(value: unknown, path: string, errors: string[]): WidgetIntent | null {
++function validateWidgetIntentField(value: unknown, path: string, errors: string[], effortConfig?: EffortConstraints): WidgetIntent | null {
+   if (!value || typeof value !== "object" || Array.isArray(value)) {
+     errors.push(`${path}.intent must be a widget intent object`);
+     return null;
+   }
+-  const result = validateWidgetIntent(value);
++  const result = validateWidgetIntent(value, effortConfig);
+   if (!result.valid) {
+     errors.push(`${path}.intent: ${result.reason}`);
+     return null;
+@@ -1471,7 +1502,7 @@ function validateBoardTarget(rec: Record<string, unknown>, path: string, errors:
+   return out;
+ }
+ 
+-function validateBoardOp(value: unknown, path: string, errors: string[]): BoardOp | null {
++function validateBoardOp(value: unknown, path: string, errors: string[], effortConfig?: EffortConstraints): BoardOp | null {
+   const rec = asRecord(value, path, errors);
+   if (!rec) return null;
+ 
+@@ -1542,7 +1573,7 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
+       return { op, intent: intent as VisualizationIntent };
+     }
+     case "place_widget": {
+-      const intent = validateWidgetIntentField(rec.intent, path, errors);
++      const intent = validateWidgetIntentField(rec.intent, path, errors, effortConfig);
+       if (!intent) return null;
+       // Rebuilt from validated fields only, which deliberately drops any
+       // model-authored `blockId`: that field is assigned by the client at
+@@ -1552,7 +1583,7 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
+     }
+     case "update_widget": {
+       const target = validateBoardTarget(rec, path, errors);
+-      const intent = validateWidgetIntentField(rec.intent, path, errors);
++      const intent = validateWidgetIntentField(rec.intent, path, errors, effortConfig);
+       if (!target || !intent) return null;
+       return { op, ...target, intent } as BoardOp;
+     }
+@@ -1702,7 +1733,8 @@ export function validateTutorPayload(
+   payload: unknown,
+   allowedEvidence: ReadonlySet<string>,
+   maxBoardOps: number = MAX_BOARD_OPS_PER_TURN,
+-  turnContract?: TurnContract
++  turnContract?: TurnContract,
++  effortConfig?: EffortConstraints
+ ): ValidationResult<TutorTurn> {
+   const errors: string[] = [];
+   const root = asRecord(payload, "response", errors);
+@@ -1721,7 +1753,7 @@ export function validateTutorPayload(
+ 
+   const boardOps: BoardOp[] = [];
+   rawOps.forEach((entry, i) => {
+-    const op = validateBoardOp(entry, `board_ops[${i}]`, errors);
++    const op = validateBoardOp(entry, `board_ops[${i}]`, errors, effortConfig);
+     if (op) boardOps.push(op);
+   });
+   const spawnedThreads = boardOps.filter((operation) => operation.op === "spawn_thread").length;
+@@ -2408,6 +2440,242 @@ export function resolveNextMasteryStage(
+    PROMPT ASSEMBLY
+    ───────────────────────────────────────────────────────────── */
+ 
++/* ─────────────────────────────────────────────────────────────
++   PARALLEL PLAN + OVERVIEW (session-opening greeting)
++   ───────────────────────────────────────────────────────────── */
++
++/**
++ * The minimum shape the plan agent must return. The full TutorTurn is not
++ * needed because the greeting turn's `speech` is the plan agent's greeting
++ * (the overview agent has nothing to say); the merge handles board op
++ * composition.
++ */
++interface PlanOnlyTurn {
++  speech: string;
++  boardOps: BoardOp[];
++}
++
++/** Mirror of PlanOnlyTurn for the overview agent. */
++interface OverviewOnlyTurn {
++  speech: string;
++  boardOps: BoardOp[];
++}
++
++/**
++ * System fragment the plan agent receives on top of the shared system prompt.
++ * Phrased as a directive: "your only output is a plan widget" is exactly the
++ * constraint, and the structural reminders map 1:1 to the validator checks in
++ * `validatePlanOnlyPayload`.
++ */
++function buildPlanAgentSystemFragment(
++  effort: ExplicitEffort,
++  cfg: EffortConstraints
++): string {
++  return [
++    "You are the study route planner for this session's greeting turn.",
++    "Your ONLY output is a single plan widget — board_ops must contain exactly one place_widget with intent.kind = \"plan\".",
++    `EFFORT LEVEL: ${effort.toUpperCase()}.`,
++    `Plan: ${cfg.minSteps}–${cfg.maxSteps} phases (must be in this range).`,
++    cfg.includePrerequisites ? "Include prerequisite skill identification in plan details." : null,
++    cfg.includeTimeEstimates ? "First detail item in each step is a time estimate (\"~30 min\", \"~2 hours\")." : null,
++    cfg.includeSuccessCriteria ? "Last detail item in each step is a success criterion (\"can solve X unaided\")." : null,
++    cfg.includePitfalls ? "An intermediate detail item is a common pitfall." : null,
++    cfg.includeSubActivities ? "Each step has 2–4 sub-activities in details[]." : null,
++    "The plan is a contract — it is the route from where the learner SAID they are (per intake answers) to mastery.",
++    "Step labels name outcomes, not topics. Details are sub-activities and meta-notes.",
++    "Do NOT exceed the step range. Do NOT pad with extra phases to look thorough.",
++  ].filter(Boolean).join("\n");
++}
++
++/**
++ * System fragment for the overview agent. The overview's job is the SCOPE
++ * (the full concept laid out so the learner sees the territory); the depth
++ * level controls which sections must be populated.
++ */
++function buildOverviewAgentSystemFragment(
++  effort: ExplicitEffort,
++  cfg: EffortConstraints
++): string {
++  const depthDirectives: Record<CurriculumDepth, string> = {
++    surface: "Be concise: vocabulary + formulas + youWillBeAbleTo only.",
++    medium: "Be thorough: include vocabulary + formulas + at least one of {properties, pitfalls, patterns}.",
++    deep: "Be comprehensive: include at least vocab + formulas + pitfalls + youWillBeAbleTo.",
++    exhaustive: "Be EXHAUSTIVE: populate every section — vocabulary, formulas, properties, graphs, pitfalls, patterns, youWillBeAbleTo.",
++  };
++  return [
++    "You are the concept cartographer for this session's greeting turn.",
++    "Your ONLY output is a single overview widget — board_ops must contain exactly one place_widget with intent.kind = \"overview\".",
++    `EFFORT LEVEL: ${effort.toUpperCase()}. Curriculum depth: ${cfg.curriculumDepth}.`,
++    depthDirectives[cfg.curriculumDepth],
++    "The overview is the SCOPE — it is the full concept laid out so the learner sees the territory.",
++    "Your speech may be empty; the plan agent owns the greeting.",
++  ].join("\n");
++}
++
++/**
++ * Validate that the plan agent returned a TutorTurn-shaped object with exactly
++ * one place_widget of kind=plan and nothing else. The plan widget itself is
++ * validated against the effort constraints.
++ */
++function validatePlanOnlyPayload(payload: unknown, cfg: EffortConstraints): ValidationResult<PlanOnlyTurn> {
++  if (!payload || typeof payload !== "object") {
++    return invalid("Plan agent response was not an object");
++  }
++  const root = payload as Record<string, unknown>;
++  const speech = typeof root.speech === "string" ? root.speech.trim() : "";
++  const rawOps = Array.isArray(root.board_ops)
++    ? root.board_ops
++    : Array.isArray(root.boardOps)
++      ? root.boardOps
++      : [];
++  if (rawOps.length !== 1) {
++    return invalid(`Plan agent must emit exactly one board_op; got ${rawOps.length}`);
++  }
++  const op = rawOps[0] as Record<string, unknown>;
++  if (op.op !== "place_widget") {
++    return invalid(`Plan agent's single board_op must be a place_widget; got ${String(op.op)}`);
++  }
++  const intent = op.intent as Record<string, unknown> | undefined;
++  if (!intent || intent.kind !== "plan") {
++    return invalid("Plan agent's widget intent must be of kind=plan");
++  }
++  // Defer to the structural validatePlan so the effort constraints apply.
++  const planResult = validatePlanWidget(intent, cfg);
++  if (!planResult.valid) {
++    return invalid(planResult.reason);
++  }
++  const speechErr: string[] = [];
++  const speechOk = asNonEmptyString(speech, "speech", speechErr);
++  if (!speechOk) return invalid(speechErr[0] ?? "Plan agent speech must be a non-empty string");
++  return { ok: true, value: { speech: speechOk, boardOps: [{ op: "place_widget", intent: intent as unknown as WidgetIntent }] } };
++}
++
++/**
++ * Validate that the overview agent returned a TutorTurn-shaped object with
++ * exactly one place_widget of kind=overview and nothing else.
++ */
++function validateOverviewOnlyPayload(payload: unknown): ValidationResult<OverviewOnlyTurn> {
++  if (!payload || typeof payload !== "object") {
++    return invalid("Overview agent response was not an object");
++  }
++  const root = payload as Record<string, unknown>;
++  const speech = typeof root.speech === "string" ? root.speech.trim() : "";
++  const rawOps = Array.isArray(root.board_ops)
++    ? root.board_ops
++    : Array.isArray(root.boardOps)
++      ? root.boardOps
++      : [];
++  if (rawOps.length !== 1) {
++    return invalid(`Overview agent must emit exactly one board_op; got ${rawOps.length}`);
++  }
++  const op = rawOps[0] as Record<string, unknown>;
++  if (op.op !== "place_widget") {
++    return invalid(`Overview agent's single board_op must be a place_widget; got ${String(op.op)}`);
++  }
++  const intent = op.intent as Record<string, unknown> | undefined;
++  if (!intent || intent.kind !== "overview") {
++    return invalid("Overview agent's widget intent must be of kind=overview");
++  }
++  // Reuse the structural overview validator.
++  const overviewCheck = validateOverviewWidgetOnly(intent);
++  if (!overviewCheck.valid) {
++    return invalid(overviewCheck.reason);
++  }
++  return { ok: true, value: { speech, boardOps: [{ op: "place_widget", intent: intent as unknown as WidgetIntent }] } };
++}
++
++/**
++ * Light structural check on the overview widget intent. We do not import the
++ * private `validateOverview` from widgets/validate.ts because it lives behind
++ * a module boundary; the full schema check happens after merge in the
++ * post-validate pass via `validateTutorPayload`.
++ */
++function validateOverviewWidgetOnly(intent: Record<string, unknown>): { valid: true } | { valid: false; reason: string } {
++  const concept = intent.concept;
++  const summary = intent.summary;
++  if (typeof concept !== "string" || !concept.trim()) {
++    return { valid: false, reason: "Overview needs a concept name" };
++  }
++  if (typeof summary !== "string" || !summary.trim()) {
++    return { valid: false, reason: "Overview needs a plain-language summary" };
++  }
++  return { valid: true };
++}
++
++/**
++ * Merge a successful plan-agent and overview-agent run into a single
++ * StructuredCallResult<TutorTurn>. The plan agent owns the speech (it is the
++ * greeting); the board ops are concatenated in plan-then-overview order so
++ * the learner sees the agreement pair in reading order. Latency is the max
++ * of the two parallel calls; attempts is the sum so telemetry still reflects
++ * total model calls.
++ */
++function mergePlanOverviewResults(
++  planResult: StructuredCallResult<PlanOnlyTurn>,
++  overviewResult: StructuredCallResult<OverviewOnlyTurn>,
++  introConcept: string | undefined,
++  sessionTitle: string | undefined
++): StructuredCallResult<TutorTurn> {
++  const fallbackConcept = introConcept ?? sessionTitle ?? "the concept";
++  const planOps = planResult.value?.boardOps ?? [];
++  const overviewOps = overviewResult.value?.boardOps ?? [];
++  const planSpeech = planResult.value?.speech ?? "";
++  const overviewSpeech = overviewResult.value?.speech ?? "";
++
++  // Synthesize the missing widget when one of the agents failed mid-call. The
++  // synthesis mirrors the post-validate fallback below so a learner who only
++  // sees one widget never makes a decision without the other.
++  const synthesized: BoardOp[] = [];
++  const hasPlan = planOps.some((op) => op.op === "place_widget" && op.intent.kind === "plan");
++  const hasOverview = overviewOps.some((op) => op.op === "place_widget" && op.intent.kind === "overview");
++  if (!hasPlan) {
++    synthesized.push({
++      op: "place_widget",
++      intent: {
++        kind: "plan",
++        heading: fallbackConcept,
++        steps: [
++          { id: "step-1", label: "Meet the idea" },
++          { id: "step-2", label: "Defend a claim" },
++        ],
++      },
++    });
++  }
++  if (!hasOverview) {
++    synthesized.push({
++      op: "place_widget",
++      intent: {
++        kind: "overview",
++        concept: fallbackConcept,
++        summary: `The full concept map for ${fallbackConcept}: identities, properties, graphs, vocabulary, pitfalls, and patterns — populated by the tutor during teaching.`,
++      },
++    });
++  }
++
++  // Plan first, then overview, so the agreement pair lands in reading order.
++  const orderedOps: BoardOp[] = [
++    ...planOps,
++    ...overviewOps,
++    ...synthesized,
++  ];
++
++  return {
++    value: {
++      speech: planSpeech || overviewSpeech || "Here is the route and the full concept map. Take a look, and tell me when you're ready to start.",
++      boardOps: orderedOps,
++      evidenceRefs: [],
++    },
++    modelId: planResult.modelId ?? overviewResult.modelId ?? "fallback",
++    latencyMs: Math.max(planResult.latencyMs ?? 0, overviewResult.latencyMs ?? 0),
++    usage: {
++      ...(planResult.usage ?? {}),
++      ...(overviewResult.usage ?? {}),
++    },
++    attempts: (planResult.attempts ?? 0) + (overviewResult.attempts ?? 0),
++    repaired: planResult.repaired || overviewResult.repaired,
++  };
++}
++
+ export function buildTutorUserPrompt(params: {
+   domain: Domain;
+   sessionTitle: string;
+@@ -2429,6 +2697,10 @@ export function buildTutorUserPrompt(params: {
+   permittedWidgetKinds?: readonly WidgetKind[];
+   /** Due retrievals to surface before new teaching. Empty mid-session. */
+   openingBrief?: string;
++  /** Effort-aware plan constraints. Threaded in so the plan widget honors the
++   *  chosen effort level; the system prompt already carries the directive
++   *  prose, so this is the schema-shaped reminder. */
++  effortConstraints?: EffortConstraints;
+   learnerSummary: string;
+   curriculumScope?: TutorCurriculumScopeItem[];
+   cards: TutorEvidenceCard[];
+@@ -2436,6 +2708,7 @@ export function buildTutorUserPrompt(params: {
+   board?: BoardDoc;
+   learnerMessage: string;
+   attachmentsNote: string;
++  activePlan?: LearningPlan;
+ }): string {
+   const parts: string[] = [];
+ 
+@@ -2462,6 +2735,24 @@ export function buildTutorUserPrompt(params: {
+   // for carrying it out well.
+   if (params.policyBrief) parts.push(params.policyBrief);
+ 
++  // Effort-aware plan constraints: schema-shaped reminder for the plan widget.
++  // The system prompt already carries the directive prose, so this is the
++  // numeric/structural mirror that the model can pattern-match on when sizing.
++  if (params.effortConstraints) {
++    const ec = params.effortConstraints;
++    const include: string[] = [];
++    if (ec.includePrerequisites) include.push("prerequisites");
++    if (ec.includeTimeEstimates) include.push("time estimates");
++    if (ec.includeSuccessCriteria) include.push("success criteria");
++    if (ec.includePitfalls) include.push("pitfalls");
++    if (ec.includeSubActivities) include.push("sub-activities");
++    parts.push(
++      `PLAN CONSTRAINTS (this session): steps: ${ec.minSteps}–${ec.maxSteps}; ` +
++        `curriculum depth: ${ec.curriculumDepth}; ` +
++        (include.length > 0 ? `include: ${include.join(", ")}.` : "include: standard structural items only.")
++    );
++  }
++
+   parts.push(formatMasteryDirective());
+ 
+   const stage = params.masteryStage ?? "encounter";
+@@ -2489,7 +2780,6 @@ export function buildTutorUserPrompt(params: {
+   // Global PREREQUISITE REPAIR — always active
+   parts.push(
+     `PREREQUISITE REPAIR — If the learner shows signs of missing prerequisites (3+ consecutive failures, inability to start a problem, confusion about fundamental concepts):\n` +
+-    `1. Use spawn_prerequisite_thread to create a prerequisite thread with title: "Review: [prerequisite concept]"\n` +
+     `2. In the thread reason, explain why this prerequisite is needed for the current topic\n` +
+     `3. The thread should teach the prerequisite concept using concept_card, example, and question widgets\n` +
+     `4. Set resumeAfterComplete: true so the learner returns to the main topic after completing the review\n` +
+@@ -2864,6 +3154,13 @@ export interface LessonContext {
+   route?: LearningRoute;
+   evidenceIds?: string[];
+   supportCeiling?: SupportLevel;
++  /**
++   * The Effort Parameter chosen on the SessionCard. Threaded into the
++   * greeting turn so the plan widget is sized to match. The harness resolves
++   * `"auto"` against the concept and intake answers; explicit values pass
++   * through unchanged. Undefined defaults to `"auto"`.
++   */
++  effortParameter?: EffortParameter;
+ }
+ 
+ /**
+@@ -3070,6 +3367,16 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
+   const turnContract = model.turnContract;
+   const activePlanId = model.activePlanId;
+ 
++  // Resolve the Effort Parameter once per turn. The greeting turn is where the
++  // plan widget is sized to match; subsequent turns still see the resolved
++  // level (not "auto") in `effort` because later turns do not pass
++  // `effortParameter` and the harness falls back to "auto", which resolves
++  // against the same concept and onboarding for the session — the answer is
++  // stable.
++  const effortParameter: EffortParameter = context.effortParameter ?? "auto";
++  const effort: ExplicitEffort = resolveEffort(effortParameter, onboarding?.concept, onboarding);
++  const effortConfig: EffortConstraints = EFFORT_PLAN_CONSTRAINTS[effort];
++
+   await ensureChalkboardSession({
+     id: sessionId,
+     title: sessionTitle,
+@@ -3180,8 +3487,23 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
+   trace.mark("grounding");
+ 
+   if (isSessionOpening) {
++    const cfg = effortConfig;
++    const effortBlock = [
++      `EFFORT PARAMETER: ${effort.toUpperCase()}`,
++      `Plan: ${cfg.minSteps}–${cfg.maxSteps} phases (must be in this range).`,
++      `Curriculum overview depth: ${cfg.curriculumDepth}.`,
++      cfg.includePrerequisites ? "Include prerequisite skill identification in plan details." : null,
++      cfg.includeTimeEstimates ? "Each phase MUST include a time estimate as its first detail item (e.g. '~30 min', '~2 hours')." : null,
++      cfg.includeSuccessCriteria ? "Each phase MUST include a success criterion as its last detail item (the concrete outcome that proves mastery)." : null,
++      cfg.includePitfalls ? "Each phase MUST identify a common pitfall the learner is likely to hit, as an intermediate detail item." : null,
++      cfg.includeSubActivities ? "Break each phase into 2–4 sub-activities (multiple entries in details[])." : null,
++      "Do NOT exceed the step range to look thorough. A short plan that hits every criterion is better than a longer plan that dilutes them.",
++    ].filter(Boolean).join("\n");
++
+     openingBrief = [
++      effortBlock,
+       "SESSION OPENING — binding (non-negotiable):",
++      // ... existing text ...
+       "You MUST place TWO widgets in board_ops: (1) the plan widget — the route from where the learner said they stand to mastery, built directly on their intake answers, each phase with one or two lines of what it covers — AND (2) the overview widget, placed alongside the plan as the agreement pair. The overview shows the full-concept map (identities, properties, graphs, vocabulary, pitfalls, patterns) so the learner sees exactly what they'd learn before agreeing. The plan is the commitment; the overview is the scope. Both MUST be present — neither can substitute for the other. Then the roadmap for orientation. Place no teaching content: lesson work begins only when the learner agrees to the plan (their \"Start learning\" click is your signal). Your speech is the greeting only.",
+       openingBrief,
+     ].filter(Boolean).join("\n\n");
+@@ -3190,7 +3512,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
+   const knowledgeNodes = await resolveTutorKnowledgeNodes(boundNodes ?? [], studio);
+   // Curriculum sequencing and source grounding are independent: disabling the
+   // pedagogical phase sequence must not silently disable selected-source use.
+-  const grounding = await buildTutorGrounding(knowledgeNodes);
++  const grounding = await buildTutorGrounding(knowledgeNodes, effortConfig);
+   const { cards, scope: curriculumScope } = grounding;
+   const allowedEvidence = new Set(cards.map((card) => card.handle));
+   const resolvedEndpoint = endpoint ?? (await resolveRoleEndpoint("tutor"));
+@@ -3206,6 +3528,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
+     TUTOR_AGENT_PROMPT_V1,
+     onboarding ? buildOnboardingReminder(onboarding) : "",
+     turnContract ? buildContractReminder(turnContract) : "",
++    formatEffortReminder(effort),
+     buildTutorPreferenceReminder(studio),
+     studio.privacy.includeProfileIdentity
+       ? `The learner has chosen to share this profile name: ${allPreferences.profile.fullName}.`
+@@ -3252,6 +3575,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
+       policyBrief?.move.permittedWidgetKinds
+     ),
+     openingBrief,
++    effortConstraints: effortConfig,
+     learnerSummary,
+     curriculumScope,
+     cards,
+@@ -3269,63 +3593,116 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
+   let rawResult: StructuredCallResult<TutorTurn>;
+   try {
+     trace.mark("llm-call");
+-    rawResult = await callStructuredAgent({
+-      role: "tutor",
+-      endpoint: boundedEndpoint,
+-      system: systemPrompt,
+-      user: userContent,
+-      promptVersion: TUTOR_PROMPT_VERSION,
+-      schemaVersion: TUTOR_SCHEMA_VERSION,
+-      temperature: studio.advanced.temperature / 100,
+-      maxTokens: studio.advanced.maxResponseTokens,
+-      timeoutMs: studio.advanced.requestTimeoutSeconds * 1000,
+-      signal,
+-      // Tutor turns must surface failure to the user within 1 minute total.
+-      // Transport failures (timeout, network) already throw without retry in
+-      // callStructuredAgent; maxRepairAttempts only governs schema-invalid
+-      // retries. Capping at 1 means at most 2 fetches × 20s = 40s per turn.
+-      maxRepairAttempts: model.maxRepairAttempts ?? 1,
+-      validate: (payload) => {
+-        const base = validateTutorPayload(payload, allowedEvidence, MAX_BOARD_OPS_PER_TURN, turnContract);
+-        if (!base.ok) return base;
+-        // Session-opening turns MUST place an overview widget alongside the plan.
+-        // Without the overview the learner cannot see the full concept before agreeing.
+-        const contractError = checkSessionOpeningContract(payload, isSessionOpening);
+-        if (contractError) {
+-          return { ok: false, errors: [contractError] };
+-        }
+-        return base;
+-      },
+-      recover: ({ payload, raw, errors }) => {
+-        // A session-opening turn with an incomplete agreement pair (plan XOR
+-        // overview) must NOT be recovered — the LLM needs to retry with the
+-        // validation feedback so it actually emits the missing widget. The
+-        // default recover path would silently sanitize the partial payload
+-        // (plan-only or overview-only) and accept it, which is the exact
+-        // behaviour we are trying to prevent.
+-        if (
+-          isSessionOpening &&
+-          Array.isArray(errors) &&
+-          errors.some((e) => /Session opening:/i.test(String(e)))
+-        ) {
+-          return null;
+-        }
+-        try {
+-          return recoverTutorPayload(payload, raw, allowedEvidence, learnerMessage);
+-        } catch (err) {
+-          // Ultimate fallback: if recovery itself fails (e.g., corrupted raw string),
+-          // ensure the learner still gets a valid turn instead of an error screen.
+-          console.error("[tutor] recovery callback failed", err);
+-          return {
+-            speech: learnerMessage.trim()
+-              ? "I'm having trouble responding. Could you rephrase that in one short sentence?"
+-              : "I'm ready when you are. What would you like to work on?",
+-            boardOps: [],
+-            evidenceRefs: [],
+-          };
+-        }
+-      },
+-    });
++    if (isSessionOpening) {
++      // Session-opening turns run plan + overview as parallel agents. The
++      // single-agent greeting is the bottleneck on the first-query front, and
++      // splitting the two widgets across parallel calls halves wall-clock
++      // latency while still producing a coherent TutorTurn. Each agent has
++      // its own validator (plan-only / overview-only) so a malformed widget
++      // is rejected without taking the other agent down with it, and
++      // `maxRepairAttempts: 0` keeps the wall-clock ceiling tight — repair
++      // happens at merge time via the existing post-validate synthesis below.
++      const planBudget = Math.floor(
++        Math.min(studio.advanced.maxResponseTokens, boundedEndpoint?.maxTokens ?? studio.advanced.maxResponseTokens) *
++          effortConfig.tokenSplit.plan
++      );
++      const overviewBudget = Math.floor(
++        Math.min(studio.advanced.maxResponseTokens, boundedEndpoint?.maxTokens ?? studio.advanced.maxResponseTokens) *
++          effortConfig.tokenSplit.overview
++      );
++      const timeoutMs = studio.advanced.requestTimeoutSeconds === 0 ? Infinity : studio.advanced.requestTimeoutSeconds * 1000;
++      const sharedParams = {
++        role: "tutor" as const,
++        promptVersion: TUTOR_PROMPT_VERSION,
++        temperature: studio.advanced.temperature / 100,
++        timeoutMs,
++        signal,
++      };
++
++      const [planResult, overviewResult] = await Promise.all([
++        callStructuredAgent<PlanOnlyTurn>({
++          ...sharedParams,
++          schemaVersion: "plan_widget_v1",
++          endpoint: { ...boundedEndpoint, maxTokens: planBudget },
++          system: `${systemPrompt}\n\n${buildPlanAgentSystemFragment(effort, effortConfig)}`,
++          user: userContent,
++          maxTokens: planBudget,
++          maxRepairAttempts: 0,
++          validate: (payload) => validatePlanOnlyPayload(payload, effortConfig),
++          recover: () => null,
++        }),
++        callStructuredAgent<OverviewOnlyTurn>({
++          ...sharedParams,
++          schemaVersion: "overview_widget_v1",
++          endpoint: { ...boundedEndpoint, maxTokens: overviewBudget },
++          system: `${systemPrompt}\n\n${buildOverviewAgentSystemFragment(effort, effortConfig)}`,
++          user: userContent,
++          maxTokens: overviewBudget,
++          maxRepairAttempts: 0,
++          validate: validateOverviewOnlyPayload,
++          recover: () => null,
++        }),
++      ]);
++      rawResult = mergePlanOverviewResults(planResult, overviewResult, onboarding?.concept, sessionTitle);
++    } else {
++      rawResult = await callStructuredAgent({
++        role: "tutor",
++        endpoint: boundedEndpoint,
++        system: systemPrompt,
++        user: userContent,
++        promptVersion: TUTOR_PROMPT_VERSION,
++        schemaVersion: TUTOR_SCHEMA_VERSION,
++        temperature: studio.advanced.temperature / 100,
++        maxTokens: studio.advanced.maxResponseTokens,
++        timeoutMs: studio.advanced.requestTimeoutSeconds === 0 ? Infinity : studio.advanced.requestTimeoutSeconds * 1000,
++        signal,
++        // Tutor turns must surface failure to the user within 1 minute total.
++        // Transport failures (timeout, network) already throw without retry in
++        // callStructuredAgent; maxRepairAttempts only governs schema-invalid
++        // retries. Capping at 1 means at most 2 fetches × 20s = 40s per turn.
++        maxRepairAttempts: model.maxRepairAttempts ?? 1,
++        validate: (payload) => {
++          const base = validateTutorPayload(payload, allowedEvidence, MAX_BOARD_OPS_PER_TURN, turnContract, effortConfig);
++          if (!base.ok) return base;
++          // Session-opening turns MUST place an overview widget alongside the plan.
++          // Without the overview the learner cannot see the full concept before agreeing.
++          const contractError = checkSessionOpeningContract(payload, isSessionOpening);
++          if (contractError) {
++            return { ok: false, errors: [contractError] };
++          }
++          return base;
++        },
++        recover: ({ payload, raw, errors }) => {
++          // A session-opening turn with an incomplete agreement pair (plan XOR
++          // overview) must NOT be recovered — the LLM needs to retry with the
++          // validation feedback so it actually emits the missing widget. The
++          // default recover path would silently sanitize the partial payload
++          // (plan-only or overview-only) and accept it, which is the exact
++          // behaviour we are trying to prevent.
++          if (
++            isSessionOpening &&
++            Array.isArray(errors) &&
++            errors.some((e) => /Session opening:/i.test(String(e)))
++          ) {
++            return null;
++          }
++          try {
++            return recoverTutorPayload(payload, raw, allowedEvidence, learnerMessage);
++          } catch (err) {
++            // Ultimate fallback: if recovery itself fails (e.g., corrupted raw string),
++            // ensure the learner still gets a valid turn instead of an error screen.
++            console.error("[tutor] recovery callback failed", err);
++            return {
++              speech: learnerMessage.trim()
++                ? "I'm having trouble responding. Could you rephrase that in one short sentence?"
++                : "I'm ready when you are. What would you like to work on?",
++              boardOps: [],
++              evidenceRefs: [],
++            };
++          }
++        },
++      });
++    }
+   } catch (err) {
+     // Final guard for the session opening: the LLM failed to comply after all
+     // repair attempts (most likely refused to add the overview). Surface a
+@@ -3723,7 +4100,7 @@ export async function testTutorStudioPrompt(
+     jsonMode: false,
+     temperature: preferences.advanced.temperature / 100,
+     maxTokens: Math.min(1200, preferences.advanced.maxResponseTokens),
+-    timeoutMs: preferences.advanced.requestTimeoutSeconds * 1000,
++    timeoutMs: preferences.advanced.requestTimeoutSeconds === 0 ? Infinity : preferences.advanced.requestTimeoutSeconds * 1000,
+     signal,
+   });
+   return response.content.trim();

@@ -109,8 +109,8 @@ describe("agent file and vision input", () => {
 });
 
 describe("agent request cancellation", () => {
-  it("uses a shared 20s endpoint deadline (transport failures fail fast)", () => {
-    expect(DEFAULT_TIMEOUT_MS).toBe(20_000);
+  it("has no default timeout (Infinity), allowing unlimited request time)", () => {
+    expect(DEFAULT_TIMEOUT_MS).toBe(Infinity);
   });
 
   function hangingFetch(_url: string | URL | Request, init?: RequestInit): Promise<Response> {

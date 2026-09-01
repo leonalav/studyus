@@ -142,32 +142,7 @@ export async function doclingExtractImage(
  *
  * This is the primary extraction method when local ONNX is unavailable or
  * the user prefers cloud processing.
- */
-export interface VisionExtractResult {
-  markdown: string;
-  tables: { id: string; html: string }[];
-  warnings: string[];
-}
-
-export async function visionExtractImage(
-  base64Png: string,
-  visionModel?: string,
-  visionEndpoint?: string
-): Promise<VisionExtractResult> {
-  const t = tauriInternals();
-  if (!t) {
-    throw new TauriUnavailableError(
-      "Vision extraction is only available in the desktop (Tauri) build."
-    );
-  }
-  return t.invoke<VisionExtractResult>("vision_extract_image", {
-    base64Png,
-    visionModel: visionModel ?? null,
-    visionEndpoint: visionEndpoint ?? null,
-  });
-}
-
-/**
+ /**
  * Download and warm up the three Granite Docling ONNX model files.
  *
  * On first run this streams ~900 MB down from HuggingFace (~3-5 min on fast

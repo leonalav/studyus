@@ -1,5 +1,5 @@
 import { getDb, saveDbSync } from "../db/database";
-import { isTauriRuntime, nativeChatCompletion, visionExtractImage } from "./tauri";
+import { isTauriRuntime, nativeChatCompletion, doclingExtractImage } from "./tauri";
 
 export type AgentRole = "tutor" | "generation" | "evaluator";
 
@@ -33,189 +33,6 @@ export interface ModelBindingRecord {
   capabilities: ModelCapabilities;
   fallbackModel?: string;
   overrides?: any;
-}
-
-/* ─────────────────────────────────────────────────────────────
-   VISION ENDPOINTS (for curriculum OCR)
-   Separate from agent role bindings — dedicated vision models for
-   curriculum page transcription.
-   ───────────────────────────────────────────────────────────── */
-
-export interface VisionEndpointRecord {
-  id: string;
-  label: string;
-  provider: string;
-  baseUrl: string;
-  modelId: string;
-  apiKey?: string;
-  isActive: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface VisionEndpointConfig {
-  provider: "openai" | "anthropic" | "custom" | "studyus";
-  baseUrl: string;
-  modelId: string;
-  apiKey?: string;
-}
-
-/** List all vision endpoints. */
-export async function getVisionEndpoints(): Promise<VisionEndpointRecord[]> {
-  const db = await getDb();
-  const res = db.exec(
-    "SELECT id, label, provider, base_url, model_id, api_key, is_active, created_at, updated_at FROM vision_endpoints ORDER BY created_at ASC;"
-  );
-
-  if (!res[0]) return [];
-
-  return res[0].values.map((row) => ({
-    id: row[0] as string,
-    label: row[1] as string,
-    provider: row[2] as string,
-    baseUrl: row[3] as string,
-    modelId: row[4] as string,
-    apiKey: (row[5] as string) || undefined,
-    isActive: Boolean(row[6]),
-    createdAt: row[7] as string,
-    updatedAt: row[8] as string,
-  }));
-}
-
-/** Get the currently active vision endpoint, or null if none is set. */
-export async function getActiveVisionEndpoint(): Promise<VisionEndpointRecord | null> {
-  const endpoints = await getVisionEndpoints();
-  return endpoints.find((e) => e.isActive) ?? null;
-}
-
-/** Save or update a vision endpoint. If `id` is omitted a new endpoint is
- *  created. If `id` is provided the existing record is updated. */
-export async function saveVisionEndpoint(
-  config: VisionEndpointConfig & { label: string; id?: string }
-): Promise<VisionEndpointRecord> {
-  const db = await getDb();
-  const now = new Date().toISOString();
-  const id = config.id ?? `vision-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-
-  db.run(`
-    INSERT INTO vision_endpoints (id, label, provider, base_url, model_id, api_key, is_active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      label      = excluded.label,
-      provider   = excluded.provider,
-      base_url   = excluded.base_url,
-      model_id   = excluded.model_id,
-      api_key    = excluded.api_key,
-      updated_at = excluded.updated_at;
-  `, [
-    id,
-    config.label,
-    config.provider,
-    config.baseUrl,
-    config.modelId,
-    config.apiKey ?? null,
-    now,
-    now,
-  ]);
-
-  saveDbSync();
-
-  // Return the saved record
-  const endpoints = await getVisionEndpoints();
-  return endpoints.find((e) => e.id === id) ?? (await getVisionEndpoints())[0];
-}
-
-/** Deactivate all vision endpoints (used before activating a new one). */
-export async function deactivateAllVisionEndpoints(): Promise<void> {
-  const db = await getDb();
-  db.run("UPDATE vision_endpoints SET is_active = 0, updated_at = ?;", [
-    new Date().toISOString(),
-  ]);
-  saveDbSync();
-}
-
-/** Activate a vision endpoint by id. Deactivates all others. */
-export async function activateVisionEndpoint(id: string): Promise<void> {
-  await deactivateAllVisionEndpoints();
-  const db = await getDb();
-  db.run("UPDATE vision_endpoints SET is_active = 1, updated_at = ? WHERE id = ?;", [
-    new Date().toISOString(),
-    id,
-  ]);
-  saveDbSync();
-}
-
-/** Delete a vision endpoint by id. */
-export async function deleteVisionEndpoint(id: string): Promise<void> {
-  const db = await getDb();
-  db.run("DELETE FROM vision_endpoints WHERE id = ?;", [id]);
-  saveDbSync();
-}
-
-/** Test a vision endpoint configuration before saving. */
-export async function testVisionEndpoint(config: VisionEndpointConfig): Promise<{
-  reachable: boolean;
-  authenticated: boolean;
-  modelAvailable: boolean;
-  error?: string;
-}> {
-  if (!config.baseUrl || !config.modelId) {
-    return { reachable: false, authenticated: false, modelAvailable: false, error: "Base URL and Model ID are required." };
-  }
-
-  if (!/^https?:\/\//i.test(config.baseUrl)) {
-    return { reachable: false, authenticated: false, modelAvailable: false, error: "Invalid scheme: Base URL must start with http:// or https://" };
-  }
-
-  const url = resolveEndpointChatUrl(config.baseUrl);
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (config.apiKey) {
-    headers["Authorization"] = `Bearer ${config.apiKey}`;
-  }
-
-  const body = {
-    model: config.modelId,
-    messages: [{ role: "user", content: "ping" }],
-    max_tokens: 5,
-    stream: false,
-  };
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
-
-  try {
-    let status: number;
-    let responseBody: string;
-
-    if (isTauriRuntime()) {
-      const out = await nativeChatCompletion(url, config.apiKey || "", JSON.stringify(body));
-      status = out.status;
-      responseBody = out.body;
-    } else {
-      const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
-      status = res.status;
-      responseBody = await res.text().catch(() => "");
-    }
-
-    if (status === 401 || status === 403) {
-      return { reachable: true, authenticated: false, modelAvailable: false, error: "Authentication failed. Check your API key." };
-    }
-    if (status < 200 || status >= 300) {
-      return { reachable: true, authenticated: true, modelAvailable: false, error: `HTTP ${status}: ${responseBody.slice(0, 150)}` };
-    }
-
-    let data: any;
-    try { data = JSON.parse(responseBody); } catch { data = null; }
-    if (!data || !data.choices) {
-      return { reachable: true, authenticated: true, modelAvailable: false, error: "Response format invalid: expected OpenAI-compatible chat completion." };
-    }
-
-    return { reachable: true, authenticated: true, modelAvailable: true };
-  } catch (err: any) {
-    return { reachable: false, authenticated: false, modelAvailable: false, error: `Connection error: ${err?.message || String(err)}` };
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -602,23 +419,22 @@ export async function logAgentCall({
 }
 
 /* ─────────────────────────────────────────────────────────────
-   VISION LLM OCR FALLBACK
+   LOCAL ONNX OCR FALLBACK
    ───────────────────────────────────────────────────────────── */
 
 /**
- * Attempt OCR on a PDF page image using a dedicated vision endpoint.
+ * Attempt OCR on a PDF page image using local oar-ocr ONNX via the Rust backend.
  *
  * This is the fallback path when Granite Docling is unavailable (non-Tauri builds,
  * network errors, model loading failures, or a 503 from Hugging Face Inference).
  * It runs after Granite Docling has already failed — it is not the primary pipeline.
  *
  * Priority:
- * 1. Dedicated vision endpoint (from vision_endpoints table)
- * 2. Agent binding with vision capability (legacy fallback)
- * 3. Any agent binding (last resort)
+ * 1. Local oar-ocr ONNX via Rust (fast, offline, 1.2 GB RAM budget)
+ * 2. Agent binding with vision capability (legacy last-resort)
+ * 3. Any agent binding (final fallback)
  *
- * Returns the extracted text, or throws if no vision-capable model is available
- * or if the API call fails.
+ * Returns the extracted text, or throws if no extraction path succeeds.
  *
  * @param base64Image  Raw base64-encoded PNG (no `data:` prefix).
  * @param pageLabel   Optional human-readable page label for error messages.
@@ -627,15 +443,15 @@ export async function tryOcrWithVisionFallback(
   base64Image: string,
   pageLabel = "page"
 ): Promise<string> {
-  // Priority 1: Dedicated vision model via Rust command.
-  // The Rust side (lib.rs) uses VISION_ENDPOINT_URL, VISION_MODEL_ID, and
-  // VISION_API_KEY / STUDYUS_VISION_API_KEY from hardcoded constants.
+  // Priority 1: Local oar-ocr ONNX via Rust backend.
+  // Model files are cached under <app_data>/pp_ocr_models/ and stay
+  // within the 1.2 GB RAM budget.
   if (isTauriRuntime()) {
     try {
-      const result = await visionExtractImage(base64Image, undefined, undefined);
+      const result = await doclingExtractImage(base64Image);
       return result.markdown.trim();
     } catch (err) {
-      console.warn(`[llm] Vision via Rust failed, trying agent bindings: ${err}`);
+      console.warn(`[llm] Local ONNX via Rust failed, trying agent bindings: ${err}`);
       // Fall through to try agent bindings
     }
   }
@@ -720,102 +536,6 @@ export async function tryOcrWithVisionFallback(
   if (!content) {
     throw new Error(
       `Vision OCR returned no text for ${pageLabel} (${visionBinding.modelId}).`
-    );
-  }
-
-  return content.trim();
-}
-
-/**
- * Internal: perform the vision OCR API call using a VisionEndpointRecord.
- */
-async function _visionOcrCall(
-  endpoint: VisionEndpointRecord,
-  base64Image: string,
-  pageLabel: string
-): Promise<string> {
-  const url = resolveEndpointChatUrl(endpoint.baseUrl);
-  const body = {
-    model: endpoint.modelId,
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: "You are an OCR engine. Return only the exact text from this page image, preserving paragraphs and line breaks. Do not summarise, translate, or add commentary.",
-          },
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:image/png;base64,${base64Image}`,
-              detail: "low",
-            },
-          },
-        ],
-      },
-    ],
-    max_tokens: 4096,
-    temperature: 0,
-  };
-
-  let response: Response;
-  try {
-    if (isTauriRuntime()) {
-      const out = await nativeChatCompletion(url, endpoint.apiKey || "", JSON.stringify(body));
-      if (out.status < 200 || out.status >= 300) {
-        throw new Error(
-          `Vision OCR failed for ${pageLabel}: HTTP ${out.status} — ${out.body.slice(0, 200)}`
-        );
-      }
-      const data = JSON.parse(out.body) as {
-        choices?: Array<{ message?: { content?: string } }>;
-        error?: { message?: string };
-      };
-      if (data.error) throw new Error(`Vision OCR failed for ${pageLabel}: ${data.error.message}`);
-      const content = data.choices?.[0]?.message?.content;
-      if (!content) throw new Error(`Vision OCR returned no text for ${pageLabel} (${endpoint.modelId}).`);
-      return content.trim();
-    } else {
-      response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {}),
-        },
-        body: JSON.stringify(body),
-      });
-    }
-  } catch (err) {
-    throw new Error(
-      `Vision OCR failed for ${pageLabel}: ${
-        err instanceof Error ? err.message : String(err)
-      }`
-    );
-  }
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `Vision OCR failed for ${pageLabel}: HTTP ${response.status} — ${
-        response.statusText
-      }${text ? `. ${text.slice(0, 200)}` : ""}`
-    );
-  }
-
-  const data = await response.json() as {
-    choices?: Array<{ message?: { content?: string } }>;
-    error?: { message?: string };
-  };
-
-  if (data.error) {
-    throw new Error(`Vision OCR failed for ${pageLabel}: ${data.error.message}`);
-  }
-
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error(
-      `Vision OCR returned no text for ${pageLabel} (${endpoint.modelId}).`
     );
   }
 

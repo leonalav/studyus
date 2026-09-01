@@ -37,6 +37,11 @@ export interface WidgetSignal {
   displayText: string;
   /** Whether the learner got it right, when that is deterministically known. */
   correct?: boolean;
+  /** When the learner submitted an edited plan, the binding version of the
+   *  route — heading + steps. The harness uses this to persist the binding
+   *  plan and surface it as a learner-owned commitment. Always present on a
+   *  plan agreement signal; absent otherwise. */
+  bindingPlan?: { heading: string; steps: PlanStep[] };
 }
 
 /**
@@ -348,12 +353,16 @@ export function buildWidgetSignal(
   stage: MasteryStage
 ): WidgetSignal | null {
   if (!shouldSignalTutor(intent, previous, next)) return null;
+  const bindingPlan = intent.kind === "plan" && next.planDraft
+    ? { heading: next.planDraft.heading, steps: next.planDraft.steps }
+    : undefined;
   return {
     blockId,
     kind: intent.kind,
     message: buildWidgetSignalMessage(intent, next, stage),
     displayText: buildWidgetSignalDisplayText(intent, next),
     correct: typeof next.correct === "boolean" ? next.correct : undefined,
+    bindingPlan,
   };
 }
 
