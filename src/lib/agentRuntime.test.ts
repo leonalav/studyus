@@ -4,6 +4,7 @@ import {
   callStructuredAgent,
   chatCompletion,
   DEFAULT_TIMEOUT_MS,
+  MAX_AGENT_TIMEOUT_MS,
   extractJsonPayload,
   invalid,
   type ResolvedRoleEndpoint,
@@ -109,8 +110,45 @@ describe("agent file and vision input", () => {
 });
 
 describe("agent request cancellation", () => {
-  it("has no default timeout (Infinity), allowing unlimited request time)", () => {
+  it("exposes a soft Infinity default that the transport clamps before it hits the wire", () => {
+    // The shared default is still Infinity (so the harness does not have to
+    // guess a deadline for callers that never opt in), but chatCompletion
+    // clamps it down to MAX_AGENT_TIMEOUT_MS at the wire. The default alone
+    // is no longer a promise of "unlimited request time" — the runtime
+    // guarantees a bounded wait regardless of caller input.
     expect(DEFAULT_TIMEOUT_MS).toBe(Infinity);
+    expect(MAX_AGENT_TIMEOUT_MS).toBe(90_000);
+  });
+
+  it("clamps Infinity, NaN, zero, and oversized deadlines to the safety ceiling", async () => {
+    // Each of these inputs would historically have left the learner waiting
+    // forever on a stalled upstream. The transport must always arm a timer,
+    // and the timer must always fire within MAX_AGENT_TIMEOUT_MS.
+    //
+    // We use fake timers so the 90s ceiling does not actually take 90s of
+    // wall time — vi.advanceTimersByTimeAsync fires the watchdog
+    // synchronously inside the event loop.
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", vi.fn(hangingFetch));
+
+      for (const timeoutMs of [Infinity, -1, 0, Number.NaN, MAX_AGENT_TIMEOUT_MS * 10]) {
+        const promise = chatCompletion({
+          endpoint: ENDPOINT,
+          messages: [{ role: "user", content: "Wait forever." }],
+          jsonMode: false,
+          temperature: 0,
+          timeoutMs,
+        });
+        // Attach the rejection handler before advancing timers, so the
+        // unhandled-rejection guard never trips if the clamp is wrong.
+        const expectation = expect(promise).rejects.toMatchObject({ failureClass: "timeout" });
+        await vi.advanceTimersByTimeAsync(MAX_AGENT_TIMEOUT_MS);
+        await expectation;
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   function hangingFetch(_url: string | URL | Request, init?: RequestInit): Promise<Response> {

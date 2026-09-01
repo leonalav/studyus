@@ -390,8 +390,11 @@ export const DEFAULT_TUTOR: TutorPreferences = {
     temperature: 40,
     maxResponseTokens: 4096,
     // 20s per attempt. Transport failures do not retry (see tutor override
-    // below); 1 schema retry allowed, so worst case = 40s per turn.
-    requestTimeoutSeconds: 0,
+    // below); 1 schema retry allowed, so worst case = 40s per turn. There is
+    // no "0 means no timeout" escape hatch: the sanitizer and the runtime
+    // both clamp any incoming value into [15, 20] so the per-turn budget is
+    // always finite.
+    requestTimeoutSeconds: 20,
     autonomy: "balanced",
   },
   versions: [],
@@ -575,20 +578,19 @@ function sanitizeTutor(value: unknown): TutorPreferences {
   const breakEvery = numberValue(sessions.breakEvery ?? tutor.breakEvery, DEFAULT_TUTOR.sessions.breakEvery, 10, 60);
   const voiceReplies = booleanValue(voice.voiceReplies ?? tutor.voiceReplies, DEFAULT_TUTOR.voice.voiceReplies);
   const autoNotes = booleanValue(sessions.autoNotes ?? tutor.autoNotes, DEFAULT_TUTOR.sessions.autoNotes);
-  const parsedRequestTimeout = numberValue(
+  // Clamp to 20s so any stored setting cannot exceed the 1-minute turn
+  // budget. A misconfigured store (or a learner who never touched the
+  // slider) cannot reintroduce the long-hang failure mode by sneaking in
+  // an unbounded value: there is no "0 means Infinity" escape hatch here
+  // or downstream. The Range slider in TutorStudio is [15, 20]; we widen
+  // the accepted window slightly so a hand-edited store value still maps
+  // cleanly into the same range.
+  const requestTimeoutSeconds = numberValue(
     advanced.requestTimeoutSeconds,
     DEFAULT_TUTOR.advanced.requestTimeoutSeconds,
     15,
-    180
+    20
   );
-  // Migrate the former default in persisted preferences. Learners who already
-  // Clamp to 20s so any stored setting cannot exceed the 1-minute turn budget.
-  // 60 is the documented user minimum; the upper bound is now 20 (not 90) so
-  // a misconfigured store can't reintroduce the long-hang failure mode.
-  // 0 means "no timeout" (Infinity on the wire).
-  const requestTimeoutSeconds = parsedRequestTimeout === 0
-    ? 0
-    : Math.max(15, Math.min(20, parsedRequestTimeout));
 
   const parsedTools = Object.fromEntries(TUTOR_TOOL_IDS.map((id) => [
     id,

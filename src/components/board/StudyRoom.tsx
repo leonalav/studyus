@@ -955,8 +955,29 @@ export function StudyRoom({
 
       const controller = new AbortController();
       abortRef.current = controller;
+      // UI-side watchdog. Independent of any caller-supplied timeout or
+      // runtime config, so a stalled upstream connection (dead keep-alive,
+      // provider-side hang, misconfigured store that disables the harness
+      // timer) cannot leave the learner staring at an unbounded "thinking"
+      // spinner. The watchdog's abort() looks identical to a rewind /
+      // unmount cancellation, so the catch block checks this flag first.
+      let uiWatchdogFired = false;
+      let watchdogHandle: number | null = null;
+      const tutorTurnWatchdog = new Promise<never>((_, reject) => {
+        watchdogHandle = window.setTimeout(() => {
+          if (activityTurnRef.current !== activityTurn) return;
+          uiWatchdogFired = true;
+          controller.abort();
+          const error: Error & { failureClass: string } = Object.assign(
+            new Error("The tutor took too long to respond. Please try again."),
+            { failureClass: "timeout" }
+          );
+          reject(error);
+        }, 180_000);
+      });
       try {
-        const result = await askTutorTurn({
+        const result = await Promise.race([
+          askTutorTurn({
           context: {
             effortParameter: effort,
           },
@@ -989,7 +1010,9 @@ export function StudyRoom({
           model: {
             turnContract: activeContract,
           },
-        });
+        }),
+        tutorTurnWatchdog,
+        ]);
 
         // The learner may have rewound while the transport was settling. Never
         // let a superseded turn repopulate chat or continue mutating the board.
@@ -1095,7 +1118,13 @@ export function StudyRoom({
         // or the room unmounting (including React StrictMode's dev
         // mount/unmount/remount). It is never a tutor failure, so it must never
         // surface as a tutor error in the learner's chat.
-        if (controller.signal.aborted || e?.failureClass === "aborted") {
+        //
+        // The UI watchdog performs its own controller.abort() to free the
+        // transport, so an aborted signal alone is no longer a sufficient
+        // signal of "we caused this." Check the watchdog flag first: when it
+        // fired we want the error path (and a retry affordance), not the
+        // cancellation path.
+        if (!uiWatchdogFired && (controller.signal.aborted || e?.failureClass === "aborted")) {
           // A greeting killed by an unmount must still happen if the room is
           // still here (React StrictMode mounts, unmounts, then remounts). The
           // remount's effect has already run and skipped by now, so re-arm the
@@ -1150,6 +1179,7 @@ export function StudyRoom({
           if (activityTurnRef.current === activityTurn) setAgentActivity(null);
         }, 1800);
       } finally {
+        if (watchdogHandle !== null) window.clearTimeout(watchdogHandle);
         if (activityTurnRef.current === activityTurn) setTyping(false);
         if (abortRef.current === controller) abortRef.current = null;
       }

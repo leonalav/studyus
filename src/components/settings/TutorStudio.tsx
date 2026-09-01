@@ -639,7 +639,7 @@ function AdvancedPanel({ tutor, updateTutor }: PanelProps) {
     <FieldGroup label="Tool autonomy"><Select value={value.autonomy} onChange={(autonomy) => patch({ autonomy: autonomy as typeof value.autonomy })} options={["ask-first", "balanced", "proactive"]} /></FieldGroup>
     <Range label={`Temperature · ${(value.temperature / 100).toFixed(2)}`} value={value.temperature} onChange={(temperature) => patch({ temperature })} />
     <Range label={`Maximum response · ${value.maxResponseTokens} tokens`} value={value.maxResponseTokens} min={512} max={8192} step={128} onChange={(maxResponseTokens) => patch({ maxResponseTokens })} />
-    <Range label={`Request timeout · ${value.requestTimeoutSeconds} sec`} value={value.requestTimeoutSeconds} min={15} max={180} step={5} onChange={(requestTimeoutSeconds) => patch({ requestTimeoutSeconds })} />
+    <Range label={`Request timeout · ${value.requestTimeoutSeconds} sec`} value={value.requestTimeoutSeconds} min={15} max={20} step={1} onChange={(requestTimeoutSeconds) => patch({ requestTimeoutSeconds })} />
     <Label>Additional system instructions</Label><Textarea value={value.additionalInstructions} onChange={(additionalInstructions) => patch({ additionalInstructions })} rows={8} placeholder="Instructions appended below the core Tutor contract" />
   </>;
 }

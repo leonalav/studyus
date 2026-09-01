@@ -181,12 +181,43 @@ describe("persisted Studyus preferences", () => {
     expect(parsed.advanced).toMatchObject({
       temperature: 100,
       maxResponseTokens: 512,
-      requestTimeoutSeconds: 180,
+      // The per-turn budget must be finite. 500 is clamped into the
+      // documented [15, 20] range — never into a higher value that would
+      // let a misconfigured store reintroduce the long-hang failure mode.
+      requestTimeoutSeconds: 20,
     });
     expect(sanitizePreferences({ tutor: { memory: { minimumEvidence: 2.6 } } }).tutor.memory.minimumEvidence)
       .toBe(DEFAULT_PREFERENCES.tutor.memory.minimumEvidence);
+    // Same clamp applies regardless of direction: 60 (the old user
+    // minimum) maps to the new ceiling of 20.
     expect(sanitizePreferences({ tutor: { advanced: { requestTimeoutSeconds: 60 } } }).tutor.advanced.requestTimeoutSeconds)
-      .toBe(180);
+      .toBe(20);
+  });
+
+  it("clamps requestTimeoutSeconds into [15, 20] so 0 cannot reintroduce an unbounded wait", () => {
+    // The former default was 0, which `tutor.ts` translated to Infinity
+    // and `agentRuntime.ts` honored by skipping the watchdog entirely.
+    // That combination was the chalkboard-tutor hang: a single stalled
+    // upstream connection left the learner staring at a "thinking"
+    // spinner forever. Both ends must clamp — the sanitizer and the
+    // transport — so no value in the store can disable the per-turn
+    // budget. The relevant invariant is that the result is finite and
+    // fits the documented [15, 20] band; not the specific number 20.
+    const sanitize = (input: unknown) =>
+      sanitizePreferences({ tutor: { advanced: { requestTimeoutSeconds: input as number } } })
+        .tutor.advanced.requestTimeoutSeconds;
+
+    expect(sanitize(undefined)).toBe(20); // fresh install → shipped default
+    expect(sanitize(0)).toBe(15);          // the former bug — collapses into the floor instead of Infinity
+    expect(sanitize(14)).toBe(15);         // below the documented user minimum
+    expect(sanitize(15)).toBe(15);
+    expect(sanitize(18)).toBe(18);
+    expect(sanitize(20)).toBe(20);
+    expect(sanitize(21)).toBe(20);         // above the new ceiling
+    expect(sanitize(180)).toBe(20);        // the old slider max, no longer reachable
+    expect(sanitize(500)).toBe(20);
+    expect(sanitize(-5)).toBe(15);         // negative values fall back to the lower bound
+    expect(sanitize("15")).toBe(20);       // junk falls back to the shipped default
   });
 
   it("compiles constitution, privacy-aware memory, and disabled tools into agent policy", () => {
@@ -197,7 +228,7 @@ describe("persisted Studyus preferences", () => {
         privacy: { allowLearnerModelInPrompts: false },
         tools: { geometry: false },
         assessment: { rubricInstructions: "Award method credit when the setup is valid." },
-        advanced: { requestTimeoutSeconds: 75 },
+        advanced: { requestTimeoutSeconds: 18 },
       },
     }).tutor;
     const reminder = buildTutorPreferenceReminder(tutor);
@@ -206,7 +237,10 @@ describe("persisted Studyus preferences", () => {
     expect(reminder).toContain("learner-model context withheld");
     expect(reminder).toContain("Disabled geometry");
     expect(reminder).toContain("Award method credit when the setup is valid.");
-    expect(reminder).toContain("75-second request timeout");
+    // The reminder always reports the *effective* request timeout — the
+    // value actually used at the wire, not the raw input the learner
+    // picked. 18 sits inside [15, 20] and passes through unchanged.
+    expect(reminder).toContain("18-second request timeout");
   });
 
   it("keeps one active endpoint and never stores unknown endpoint fields", () => {

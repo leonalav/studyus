@@ -258,8 +258,29 @@ interface CompletionOutcome {
 // Model endpoints can need substantial cold-start and structured-generation
 // time. Keep the shared deadline aligned with the native transport rather than
 // surfacing the former 60-second cutoff during an otherwise healthy response.
-// Set to Infinity to disable the per-request timeout entirely.
+// "Infinity" here is a soft default — chatCompletion() clamps it down to
+// MAX_AGENT_TIMEOUT_MS at the wire, so this constant is never an open-ended
+// wait for the transport.
 export const DEFAULT_TIMEOUT_MS = Infinity;
+
+// Defense in depth: even if a caller passes a huge or unbounded deadline,
+// the per-request network call cannot exceed this. Callers SHOULD send a
+// realistic value (the tutor path clamps to 20s); this is the safety net
+// that prevents a misconfigured store, a future caller, or the old "0 means
+// Infinity" default from reintroducing the unbounded-wait failure mode on
+// the chalkboard's tutor turn (or anywhere else).
+export const MAX_AGENT_TIMEOUT_MS = 90_000;
+
+// Map any caller-supplied deadline onto a finite, bounded value the
+// transport can honor. `Infinity`, `NaN`, zero, and values above the
+// ceiling all collapse to MAX_AGENT_TIMEOUT_MS — a misconfigured caller
+// must never be able to disable the watchdog entirely.
+function resolveEffectiveTimeoutMs(timeoutMs: number): number {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_AGENT_TIMEOUT_MS) {
+    return MAX_AGENT_TIMEOUT_MS;
+  }
+  return timeoutMs;
+}
 
 function httpError(status: number, text: string, endpoint: ResolvedRoleEndpoint): AgentRuntimeError {
   const body = text.slice(0, 240);
@@ -311,11 +332,14 @@ export async function chatCompletion({
     if (signal.aborted) controller.abort();
     else signal.addEventListener("abort", onOuterAbort, { once: true });
   }
-  // Only arm the timer when a real deadline exists.
-  const timer = timeoutMs === 0 || timeoutMs === Infinity ? null : setTimeout(() => {
+  // Defense in depth: the actual transport deadline is always bounded.
+  // Even when a caller passes Infinity (or any value above the safety
+  // ceiling), the network call cannot wait longer than MAX_AGENT_TIMEOUT_MS.
+  const effectiveTimeoutMs = resolveEffectiveTimeoutMs(timeoutMs);
+  const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, Math.max(1, timeoutMs));
+  }, Math.max(1, effectiveTimeoutMs));
 
   const body = (withJsonMode: boolean) => ({
     model: endpoint.modelId,
@@ -349,9 +373,7 @@ export async function chatCompletion({
 
   const interruptionError = () => timedOut
     ? new AgentRuntimeError(
-        `${ROLE_LABEL[endpoint.role]} agent timed out after ${
-          !isFinite(timeoutMs) ? "the configured limit" : `${Math.round(timeoutMs / 1000)}s`
-        }.`,
+        `${ROLE_LABEL[endpoint.role]} agent timed out after ${Math.round(effectiveTimeoutMs / 1000)}s.`,
         "timeout"
       )
     : new AgentRuntimeError("Request cancelled.", "aborted");
