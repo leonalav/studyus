@@ -23,6 +23,7 @@ import {
   resolveEndpointChatUrl,
 } from "./llm";
 import { isTauriRuntime, nativeChatCompletion } from "./tauri";
+import { devLog, devWarn } from "./devLog";
 
 export type FailureClass =
   | "no_binding"
@@ -257,7 +258,7 @@ interface CompletionOutcome {
 // Model endpoints can need substantial cold-start and structured-generation
 // time. Keep the shared deadline aligned with the native transport rather than
 // surfacing the former 60-second cutoff during an otherwise healthy response.
-export const DEFAULT_TIMEOUT_MS = 180_000;
+export const DEFAULT_TIMEOUT_MS = 20_000;
 
 function httpError(status: number, text: string, endpoint: ResolvedRoleEndpoint): AgentRuntimeError {
   const body = text.slice(0, 240);
@@ -312,7 +313,7 @@ export async function chatCompletion({
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, timeoutMs);
+  }, Math.max(1, timeoutMs));
 
   const body = (withJsonMode: boolean) => ({
     model: endpoint.modelId,
@@ -435,7 +436,7 @@ export async function chatCompletion({
     // Throw a specific error so callStructuredAgent can skip repair attempts and go
     // straight to recovery, avoiding wasted API calls that might trigger rate limits.
     if (!content.trim()) {
-      console.warn(
+      devWarn(
         `[agentRuntime] ${ROLE_LABEL[endpoint.role]} endpoint returned empty content. Response:`,
         res.text.slice(0, 240)
       );
@@ -701,12 +702,16 @@ export async function callStructuredAgent<T>({
     let result: ValidationResult<T>;
     try {
       payload = extractJsonPayload(raw);
+      devLog("[tutor-trace] extract payload keys:", payload && typeof payload === "object" ? Object.keys(payload) : payload);
       result = validate(payload);
     } catch (err) {
+      devLog("[tutor-trace] validate threw:", err instanceof Error ? err.message : err);
       result = invalid(err instanceof AgentRuntimeError ? err.message : String(err));
     }
+    if (!result.ok) devLog("[tutor-trace] validate FAILED errors:", (result as { errors: string[] }).errors);
 
     if (result.ok) {
+      devLog("[tutor-trace] validation-OK boardOps:", (result.value as { boardOps?: unknown[] }).boardOps);
       await logAgentCall({
         role,
         modelId: endpoint.modelId,

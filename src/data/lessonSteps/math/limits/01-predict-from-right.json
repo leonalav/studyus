@@ -1,0 +1,32 @@
+{
+  "id": "math.limits.predict-from-right",
+  "route": "prediction",
+  "stage": "encounter",
+  "mode": "explore",
+  "contextVariant": "same",
+  "targetSkill": "math.limits.base",
+  "supportCeiling": 0,
+  "permittedWidgetKinds": [
+    "question",
+    "concept_card"
+  ],
+  "requiredVisualizationKind": "function",
+  "requiredEvidence": [
+    "prediction",
+    "observation"
+  ],
+  "proseSlots": [
+    {
+      "blockId": "concept-1",
+      "hint": "Frame the function clearly. The point of the exercise is the prediction-vs-computation gap, so name the function once, name the limit point once, and stop. Do not solve it.",
+      "tone": "inquisitive"
+    },
+    {
+      "blockId": "question-1",
+      "hint": "Offer four options ranging from 'undefined' to 'approaches 0' to 'approaches 2' to 'equals 2 exactly'. Exactly one correct.",
+      "tone": "concise"
+    }
+  ],
+  "maxBoardOps": 3,
+  "corpusRef": "math.limits.predict-from-right"
+}

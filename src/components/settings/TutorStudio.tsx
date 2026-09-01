@@ -43,12 +43,6 @@ import {
   type TutorToolId,
 } from "../../lib/preferences";
 import {
-  clearLearnerModel,
-  forgetLearnerModelEntry,
-  getLearnerModelEntries,
-  type LearnerModelEntry,
-} from "../../lib/learnerModel";
-import {
   clearTutorSessionLearnerMemory,
   forgetTutorSessionLearnerObservation,
   testTutorStudioPrompt,
@@ -502,11 +496,11 @@ function HypothesesSection() {
 }
 
 function MemoryPanel({ tutor, updateTutor, onNotify }: PanelProps & { onNotify: (text: string) => void }) {
-  const [entries, setEntries] = useState<LearnerModelEntry[]>([]);
+  const [hypotheses, setHypotheses] = useState<LearnerHypothesis[]>([]);
   const [loading, setLoading] = useState(true);
   const memory = tutor.memory;
   const patch = (next: Partial<typeof memory>) => updateTutor((current) => ({ ...current, memory: { ...current.memory, ...next } }));
-  const refresh = async () => { setLoading(true); setEntries(await getLearnerModelEntries()); setLoading(false); };
+  const refresh = async () => { setLoading(true); setHypotheses(await getHypotheses()); setLoading(false); };
   useEffect(() => { void refresh(); }, []);
   return (
     <>
@@ -521,18 +515,18 @@ function MemoryPanel({ tutor, updateTutor, onNotify }: PanelProps & { onNotify: 
         <FieldGroup label="Retention"><Select value={String(memory.retentionDays)} onChange={(value) => patch({ retentionDays: Number(value) as typeof memory.retentionDays })} options={["30", "90", "180", "365", "0"]} labels={{ "0": "Forever" }} /></FieldGroup>
       </div>
       <HypothesesSection />
-      <Subhead>Saved observations · {entries.length}</Subhead>
-      {loading ? <Empty text="Loading learner-owned memory…" /> : entries.length === 0 ? <Empty text="No persistent observations saved." /> : (
+      <Subhead>Structured hypotheses · {hypotheses.length}</Subhead>
+      {loading ? <Empty text="Loading hypotheses…" /> : hypotheses.length === 0 ? <Empty text="No standing hypotheses about this learner." /> : (
         <div className="space-y-1.5">
-          {entries.slice(0, 30).map((entry) => (
-            <div key={entry.id} className="flex gap-2 rounded-md border border-white/[0.07] p-2">
-              <div className="min-w-0 flex-1"><div className="text-[9px] uppercase tracking-wide text-dim">{entry.entryKind.replace(/_/g, " ")} · {entry.observationCount}×</div><div className="mt-0.5 text-[10.5px] leading-relaxed text-mut">{entry.statement}</div></div>
-              <IconButton label="Forget observation" onClick={() => void forgetLearnerModelEntry(entry.id).then(() => { forgetTutorSessionLearnerObservation(entry.statement); return refresh(); })}><Trash2 size={11} /></IconButton>
+          {hypotheses.slice(0, 30).map((entry) => (
+            <div key={entry.hypothesisId} className="flex gap-2 rounded-md border border-white/[0.07] p-2">
+              <div className="min-w-0 flex-1"><div className="text-[9px] uppercase tracking-wide text-dim">{entry.kind.replace(/_/g, " ")} · {entry.status}</div><div className="mt-0.5 text-[10.5px] leading-relaxed text-mut">{entry.statement}</div></div>
+              <IconButton label="Forget hypothesis" onClick={() => void disputeHypothesis(entry.hypothesisId, "Learner disagreed").then(() => { forgetTutorSessionLearnerObservation(entry.statement); return refresh(); })}><Trash2 size={11} /></IconButton>
             </div>
           ))}
         </div>
       )}
-      <button className="studio-button mt-2 text-red-300" onClick={() => { if (window.confirm("Forget all saved learner observations? This cannot be undone.")) void clearLearnerModel().then(() => { clearTutorSessionLearnerMemory(); void refresh(); onNotify("Learner memory cleared"); }); }}><Trash2 size={11} />Forget all memory</button>
+      <button className="studio-button mt-2 text-red-300" onClick={() => { if (window.confirm("Forget all standing learner hypotheses? This cannot be undone.")) void clearTutorSessionLearnerMemory(); onNotify("Session memory cleared"); }}><Trash2 size={11} />Forget session memory</button>
     </>
   );
 }
@@ -740,6 +734,15 @@ interface TutorDiagnostic {
 
 function DiagnosticsPanel() {
   const [entries, setEntries] = useState<TutorDiagnostic[]>([]);
+  const [traceEntries, setTraceEntries] = useState<Array<{
+    id: string;
+    sessionId: string;
+    learnerId: string;
+    totalMs: number;
+    phaseCount: number;
+    phases: Array<{ phase: string; ms: number }>;
+    createdAt: number;
+  }>>([]);
   const [loading, setLoading] = useState(true);
   const refresh = async () => {
     setLoading(true);
@@ -769,6 +772,20 @@ function DiagnosticsPanel() {
         };
       });
       setEntries(next);
+      // Read the most recent turn traces. Phase list surfaces what each turn
+      // actually did — policy, grounding, llm-call, ground-mastery, the four
+      // surviving enforcers, contract, persist, end.
+      const { getRecentTurnTraces } = await import("../../lib/learning/tracing");
+      const traces = await getRecentTurnTraces(20);
+      setTraceEntries(traces.map((record) => ({
+        id: record.id,
+        sessionId: record.sessionId,
+        learnerId: record.learnerId,
+        totalMs: Math.round(record.trace.totalMs),
+        phaseCount: record.trace.phases.length,
+        phases: record.trace.phases.map((phase) => ({ phase: phase.phase, ms: Math.round(phase.ms) })),
+        createdAt: record.createdAt,
+      })));
     } catch {
       setEntries([]);
     } finally {
@@ -796,6 +813,33 @@ function DiagnosticsPanel() {
             </div>
             <div className="mt-1 text-[9.5px] text-dim">{entry.latencyMs} ms{entry.tokenTotal !== null ? ` · ${entry.tokenTotal} tokens` : ""}{entry.timestamp ? ` · ${new Date(entry.timestamp).toLocaleString()}` : ""}</div>
             {entry.failureClass && <div className="mt-1 text-[9.5px] text-red-300">{entry.failureClass}</div>}
+          </div>
+        ))}
+      </div>
+    )}
+    <Subhead>Recent traces · {traceEntries.length}</Subhead>
+    {traceEntries.length === 0 ? (
+      <Empty text="No turn traces persisted yet." />
+    ) : (
+      <div className="space-y-1.5">
+        {traceEntries.map((trace) => (
+          <div key={trace.id} className="rounded-md border border-white/[0.07] p-2">
+            <div className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate text-[10.5px] text-fg">{trace.sessionId}</span>
+              <span className="text-[9px] uppercase tracking-wide text-dim">{trace.totalMs} ms · {trace.phaseCount} phases</span>
+            </div>
+            <div className="mt-1 text-[9.5px] text-dim">{new Date(trace.createdAt).toLocaleString()}</div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {trace.phases.map((phase) => (
+                <span
+                  key={phase.phase}
+                  className="rounded bg-white/[0.06] px-1 py-[1px] font-mono text-[9px] text-mut"
+                  title={`${phase.phase} · ${phase.ms} ms`}
+                >
+                  {phase.phase}:{phase.ms}
+                </span>
+              ))}
+            </div>
           </div>
         ))}
       </div>

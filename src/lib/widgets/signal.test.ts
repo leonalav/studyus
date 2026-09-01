@@ -288,8 +288,16 @@ describe("exploration widgets signal only when the agent asked for a response", 
     expect(message).toContain("I agree with the plan");
     expect(message).toContain("1. Pictures before letters");
     expect(message).toContain("2. Defend a claim");
-    expect(message).toMatch(/go-ahead/);
-    expect(message).toMatch(/Choose the next valid move from the deterministic learning policy/);
+    // The learner has authorized teaching toward the agreed plan…
+    expect(message).toMatch(/authorising you to teach toward this route/i);
+    // …and the next move is policy-selected, not a promise to begin the first
+    // phase immediately. A deterministic policy route may legitimately skip a
+    // route-bearing the policy has not selected.
+    expect(message).toMatch(/the next move is policy-selected/i);
+    expect(message).toMatch(/not a free pass to begin the first phase/i);
+    // Defence against the regression that motivated this revision: the signal
+    // must never promise to begin the first phase immediately, since the policy
+    // may select a different starting point.
     expect(message).not.toContain("Begin at the first phase now");
 
     // An edit is part of the contract, not the tutor's private proposal.
@@ -301,6 +309,8 @@ describe("exploration widgets signal only when the agent asked for a response", 
     expect(edited).toContain("I edited the proposed plan");
     expect(edited).toContain("1. Only the sum rule");
     expect(edited).not.toContain("2. Defend a claim");
+    // The edited branch carries the same policy-selected framing.
+    expect(edited).toMatch(/the next move is policy-selected/i);
 
     const display = buildWidgetSignalDisplayText(intent, { submitted: true });
     expect(display).toContain("Agreed to the plan");

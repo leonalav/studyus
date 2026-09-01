@@ -1,0 +1,33 @@
+{
+  "id": "math.limits.transfer-cubic",
+  "route": "transfer_check",
+  "stage": "apply",
+  "mode": "transfer",
+  "contextVariant": "changed_representation",
+  "targetSkill": "math.limits.base",
+  "supportCeiling": 0,
+  "permittedWidgetKinds": [
+    "question",
+    "scratchpad",
+    "reflection"
+  ],
+  "requiredVisualizationKind": "function",
+  "requiredEvidence": [
+    "transfer",
+    "construction"
+  ],
+  "proseSlots": [
+    {
+      "blockId": "scratchpad-1",
+      "hint": "Force the learner to factor first. No worked example. The system records a 'transfer' event keyed on contextVariant: changed_representation. The numbers change AND the polynomial degree changes — this is what makes it a transfer check and not a practice item.",
+      "tone": "inquisitive"
+    },
+    {
+      "blockId": "reflection-1",
+      "hint": "After the answer: 'In one sentence, describe what the limit operation is doing to the hole in the graph.' Min words: 20. The system records 'explanation' evidence with a high independence credit.",
+      "tone": "concise"
+    }
+  ],
+  "maxBoardOps": 4,
+  "corpusRef": "math.limits.transfer-cubic"
+}

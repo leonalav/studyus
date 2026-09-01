@@ -208,6 +208,17 @@ const EXEMPLARS: Record<WidgetKind, WidgetIntent> = {
     next: "Apply the same reasoning to a rate-of-change word problem.",
     reviewIn: "3 days",
   },
+  figure_spec: {
+    kind: "figure_spec",
+    spec: {
+      kind: "unitCircle",
+      theta: Math.PI / 6,
+      showSin: true,
+      showCos: true,
+      showLabels: true,
+    },
+    caption: "Unit circle at θ = π/6 with sin and cos projections.",
+  },
   overview: {
     kind: "overview",
     concept: "Trigonometric functions",

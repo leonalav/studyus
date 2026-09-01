@@ -1,0 +1,38 @@
+{
+  "id": "math.limits.limit-laws-via-scratchpad",
+  "route": "faded_example",
+  "stage": "construct",
+  "mode": "guided_practice",
+  "contextVariant": "same",
+  "targetSkill": "math.limits.base",
+  "supportCeiling": 2,
+  "permittedWidgetKinds": [
+    "example",
+    "scratchpad",
+    "hint",
+    "question"
+  ],
+  "requiredEvidence": [
+    "construction",
+    "procedure"
+  ],
+  "proseSlots": [
+    {
+      "blockId": "example-1",
+      "hint": "Full worked example with every step's WHY line filled in. No skipped algebra. Each 'why' names the limit law being used (sum, product, quotient) so the learner sees the rule attached to the line, not just the line.",
+      "tone": "worked"
+    },
+    {
+      "blockId": "example-2",
+      "hint": "Same pattern, with the first and last steps given and the middle erased. Each erased line is a 'why' prompt — the learner is asked which law the erased step uses, not just to copy the arithmetic.",
+      "tone": "worked"
+    },
+    {
+      "blockId": "scratchpad-1",
+      "hint": "Free scratch space. The learner does the algebra unaided; the system records a 'construction' evidence event when they submit. No worked example alongside — the reconstruction is the point.",
+      "tone": "inquisitive"
+    }
+  ],
+  "maxBoardOps": 5,
+  "corpusRef": "math.limits.limit-laws-via-scratchpad"
+}

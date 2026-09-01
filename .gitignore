@@ -4,3 +4,5 @@ src-tauri/target/
 .env*
 !.env.example
 .DS_Store
+.claude
+.cursor

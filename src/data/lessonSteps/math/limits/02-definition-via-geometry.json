@@ -1,0 +1,39 @@
+{
+  "id": "math.limits.definition-via-geometry",
+  "route": "direct_instruction",
+  "stage": "understand",
+  "mode": "instruction",
+  "contextVariant": "same",
+  "targetSkill": "math.limits.base",
+  "supportCeiling": 2,
+  "permittedWidgetKinds": [
+    "concept_card",
+    "animation",
+    "comparison",
+    "example"
+  ],
+  "requiredVisualizationKind": "geometry",
+  "requiredEvidence": [
+    "explanation",
+    "observation"
+  ],
+  "proseSlots": [
+    {
+      "blockId": "concept-1",
+      "hint": "The 2ε and 2δ bands. Each is a horizontal or vertical strip on the Cartesian plane. The function enters the ε-band whenever x stays inside the δ-band. Name the bands; do not derive ε-δ formally here.",
+      "tone": "worked"
+    },
+    {
+      "blockId": "animation-1",
+      "hint": "Animate shrinking δ. As δ halves, ε must follow. Show the learner the live relationship: a tighter δ forces a tighter ε, and the learner must see the graph stay inside the ε-band the whole time.",
+      "tone": "inquisitive"
+    },
+    {
+      "blockId": "comparison-1",
+      "hint": "Side-by-side: the 'close enough on x' half-strip vs the 'close enough on y' half-strip. The names are the same but the roles differ — one controls where x can be, the other where f(x) is allowed to land.",
+      "tone": "concise"
+    }
+  ],
+  "maxBoardOps": 6,
+  "corpusRef": "math.limits.definition-via-geometry"
+}

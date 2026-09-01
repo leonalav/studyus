@@ -1,0 +1,169 @@
+{
+  "subject": "math",
+  "topic": "limits",
+  "version": 1,
+  "corpusModel": "all-MiniLM-L6-v2",
+  "files": [
+    {
+      "id": "math.limits.diagnostic-on-trig",
+      "route": "diagnostic_probe",
+      "stage": "encounter",
+      "mode": "diagnostic",
+      "contextVariant": "same",
+      "targetSkill": "math.limits.base",
+      "permittedWidgetKinds": [
+        "question",
+        "concept_card",
+        "retrieval_check"
+      ],
+      "requiredEvidence": [
+        "selection",
+        "explanation",
+        "construction"
+      ],
+      "proseSlotsCount": 3,
+      "file": "08-diagnostic-on-trig.json"
+    },
+    {
+      "id": "math.limits.predict-from-right",
+      "route": "prediction",
+      "stage": "encounter",
+      "mode": "explore",
+      "contextVariant": "same",
+      "targetSkill": "math.limits.base",
+      "requiredVisualizationKind": "function",
+      "permittedWidgetKinds": [
+        "question",
+        "concept_card"
+      ],
+      "requiredEvidence": [
+        "prediction",
+        "observation"
+      ],
+      "proseSlotsCount": 2,
+      "file": "01-predict-from-right.json"
+    },
+    {
+      "id": "math.limits.one-sided-vs-two-sided",
+      "route": "contrast_case",
+      "stage": "understand",
+      "mode": "explore",
+      "contextVariant": "same",
+      "targetSkill": "math.limits.base",
+      "requiredVisualizationKind": "function",
+      "permittedWidgetKinds": [
+        "concept_card",
+        "comparison",
+        "question",
+        "example"
+      ],
+      "requiredEvidence": [
+        "selection",
+        "explanation"
+      ],
+      "proseSlotsCount": 2,
+      "file": "03-one-sided-vs-two-sided.json"
+    },
+    {
+      "id": "math.limits.definition-via-geometry",
+      "route": "direct_instruction",
+      "stage": "understand",
+      "mode": "instruction",
+      "contextVariant": "same",
+      "targetSkill": "math.limits.base",
+      "requiredVisualizationKind": "geometry",
+      "permittedWidgetKinds": [
+        "concept_card",
+        "animation",
+        "comparison",
+        "example"
+      ],
+      "requiredEvidence": [
+        "explanation",
+        "observation"
+      ],
+      "proseSlotsCount": 3,
+      "file": "02-definition-via-geometry.json"
+    },
+    {
+      "id": "math.limits.squeeze-theorem",
+      "route": "direct_instruction",
+      "stage": "construct",
+      "mode": "instruction",
+      "contextVariant": "same",
+      "targetSkill": "math.limits.base",
+      "requiredVisualizationKind": "function",
+      "permittedWidgetKinds": [
+        "animation",
+        "concept_card",
+        "example",
+        "challenge"
+      ],
+      "requiredEvidence": [
+        "observation",
+        "construction"
+      ],
+      "proseSlotsCount": 1,
+      "file": "07-squeeze-theorem.json"
+    },
+    {
+      "id": "math.limits.limit-laws-via-scratchpad",
+      "route": "faded_example",
+      "stage": "construct",
+      "mode": "guided_practice",
+      "contextVariant": "same",
+      "targetSkill": "math.limits.base",
+      "permittedWidgetKinds": [
+        "example",
+        "scratchpad",
+        "hint",
+        "question"
+      ],
+      "requiredEvidence": [
+        "construction",
+        "procedure"
+      ],
+      "proseSlotsCount": 3,
+      "file": "04-limit-laws-via-scratchpad.json"
+    },
+    {
+      "id": "math.limits.mc-on-limits",
+      "route": "guided_retry",
+      "stage": "apply",
+      "mode": "guided_practice",
+      "contextVariant": "changed_numbers",
+      "targetSkill": "math.limits.base",
+      "permittedWidgetKinds": [
+        "question",
+        "mistake_check",
+        "example"
+      ],
+      "requiredEvidence": [
+        "selection",
+        "explanation"
+      ],
+      "proseSlotsCount": 1,
+      "file": "05-mc-on-limits.json"
+    },
+    {
+      "id": "math.limits.transfer-cubic",
+      "route": "transfer_check",
+      "stage": "apply",
+      "mode": "transfer",
+      "contextVariant": "changed_representation",
+      "targetSkill": "math.limits.base",
+      "requiredVisualizationKind": "function",
+      "permittedWidgetKinds": [
+        "question",
+        "scratchpad",
+        "reflection"
+      ],
+      "requiredEvidence": [
+        "transfer",
+        "construction"
+      ],
+      "proseSlotsCount": 2,
+      "file": "06-transfer-cubic.json"
+    }
+  ]
+}

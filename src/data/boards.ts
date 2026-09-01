@@ -290,6 +290,11 @@ function widgetToMarkdown(intent: WidgetIntent, state?: WidgetState): string[] {
       if (intent.next) lines.push(`_Next:_ ${intent.next}`);
       break;
     }
+    case "figure_spec": {
+      lines.push(`_Figure:_ ${intent.spec.kind}`);
+      if (intent.caption) lines.push(`_${intent.caption}_`);
+      break;
+    }
   }
 
   if (intent.note) lines.push(`_${intent.note}_`);

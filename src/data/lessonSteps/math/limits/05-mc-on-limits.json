@@ -1,0 +1,27 @@
+{
+  "id": "math.limits.mc-on-limits",
+  "route": "guided_retry",
+  "stage": "apply",
+  "mode": "guided_practice",
+  "contextVariant": "changed_numbers",
+  "targetSkill": "math.limits.base",
+  "supportCeiling": 1,
+  "permittedWidgetKinds": [
+    "question",
+    "mistake_check",
+    "example"
+  ],
+  "requiredEvidence": [
+    "selection",
+    "explanation"
+  ],
+  "proseSlots": [
+    {
+      "blockId": "question-1",
+      "hint": "The stem asks for lim x→3 (x² - 9)/(x - 3). Each distractor must be tagged with the misconception it represents: 'undefined' (the cancellation-slip), '3' (substitution slip), '0' (subtraction slip), '6' (correct). On a wrong pick the misconception tag is shown, not just 'incorrect'.",
+      "tone": "concise"
+    }
+  ],
+  "maxBoardOps": 3,
+  "corpusRef": "math.limits.mc-on-limits"
+}

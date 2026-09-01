@@ -40,6 +40,12 @@ export const AdapterId = {
   KaTex: "katex",
   PhetLocked: "phet-locked",
   Unsupported: "unsupported",
+  /** The high-level textbook-figure vocabulary (unit circle, parabola,
+   *  secant/tangent, …). Renders through the chalkboard `SceneFigure` in
+   *  `WidgetSurface.tsx`, which is the existing scene renderer — the
+   *  adapter id is registered for callers that need a string handle, but
+   *  the path itself is a widget, not a free-standing visualization. */
+  FigureSpec: "figure-spec",
   // Back-compat aliases for already-rendered blocks/tests; current renderers use
   // the old ids while the adapter map expands toward the approved stack.
   JsxGraph: "jsxgraph",

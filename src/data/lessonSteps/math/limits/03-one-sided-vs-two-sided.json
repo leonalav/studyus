@@ -1,0 +1,34 @@
+{
+  "id": "math.limits.one-sided-vs-two-sided",
+  "route": "contrast_case",
+  "stage": "understand",
+  "mode": "explore",
+  "contextVariant": "same",
+  "targetSkill": "math.limits.base",
+  "supportCeiling": 2,
+  "permittedWidgetKinds": [
+    "concept_card",
+    "comparison",
+    "question",
+    "example"
+  ],
+  "requiredVisualizationKind": "function",
+  "requiredEvidence": [
+    "selection",
+    "explanation"
+  ],
+  "proseSlots": [
+    {
+      "blockId": "comparison-1",
+      "hint": "Two columns: 'left limit' and 'right limit'. Force the learner to articulate what 'approach from the left' and 'approach from the right' mean as separate ideas before the question lands.",
+      "tone": "worked"
+    },
+    {
+      "blockId": "question-1",
+      "hint": "A single multiple-choice: 'If the left limit is 3 and the right limit is 5, the two-sided limit is...?' Exactly one correct option: 'Does not exist'. The misconception distractor is '4' (averaging).",
+      "tone": "concise"
+    }
+  ],
+  "maxBoardOps": 4,
+  "corpusRef": "math.limits.one-sided-vs-two-sided"
+}

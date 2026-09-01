@@ -18,6 +18,13 @@ import {
   type SceneAccent,
   type SceneLineStyle,
 } from "./types";
+import {
+  FIGURE_KINDS,
+  COORD_MAX,
+  MAX_FIGURE_EXPRESSION,
+  MAX_FIGURE_DECLARED,
+} from "../figureSpec/types";
+import { devLog } from "../devLog";
 
 /* ── Safety bounds ── */
 
@@ -201,6 +208,7 @@ export function validateWidgetIntent(intent: unknown): ValidationResult {
     case "challenge": return validateChallenge(intent);
     case "reflection": return validateReflection(intent);
     case "mastery_card": return validateMasteryCard(intent);
+    case "figure_spec": return validateFigureSpec(intent);
   }
 }
 
@@ -240,6 +248,7 @@ const MAX_PLAN_STEP_DETAILS = 4;
 function validatePlan(intent: Record<string, unknown>): ValidationResult {
   if (!text(intent.heading, MAX_SHORT_TEXT_LENGTH)) return fail("Plan needs a heading — what is being mastered");
   const steps = requiredList(intent.steps, MAX_PLAN_STEPS);
+  devLog("[tutor-trace] validatePlan steps:", Array.isArray(steps) ? `array len=${steps.length}` : "null", "intent.steps was:", intent.steps);
   if (!steps || steps.length < 2) return fail(`Plan needs 2–${MAX_PLAN_STEPS} steps`);
   const ids = uniqueIds(steps, "plan.steps");
   if (!ids.valid) return ids;
@@ -1176,6 +1185,278 @@ function validateMasteryCard(intent: Record<string, unknown>): ValidationResult 
   if (!optionalText(intent.next, MAX_SHORT_TEXT_LENGTH)) return fail("Mastery card 'next' is too long");
   if (!optionalText(intent.reviewIn, 60)) return fail("Mastery card reviewIn is too long");
   return ok;
+}
+
+/* ── 23 · FigureSpec — high-level textbook figure ── */
+
+/**
+ * Validate a `figure_spec` widget. We check the *spec* (the agent's
+ * authoring), not the compiled primitive list — the spec is the source of
+ * truth, the compile is a derived artifact. The compile-then-validate-scene
+ * round-trip happens inside `compile.ts` and surfaces its own error type,
+ * `FigureSpecCompileError`, which the agent's repair loop reads.
+ *
+ * Bounds mirror `MAX_SCENE_ELEMENTS = 24` upstream: a spec that could
+ * produce more than 24 primitives is rejected with a reason. The
+ * per-kind branches gate coordinates, lengths and expression sizes so a
+ * textbook-spec-shaped object that nonetheless contains a hostile payload
+ * (NaN, an unbounded string, an unsupported kind) is refused at the wire.
+ */
+export function validateFigureSpec(intent: Record<string, unknown>): ValidationResult {
+  const spec = intent.spec;
+  if (!isPlainObject(spec)) return fail("Figure widget needs a spec object");
+  const kind = spec.kind;
+  if (typeof kind !== "string" || !(FIGURE_KINDS as readonly string[]).includes(kind)) {
+    return fail(`Figure spec kind must be one of ${FIGURE_KINDS.join(", ")}`);
+  }
+
+  switch (kind) {
+    case "unitCircle": {
+      if (!finiteNumber(spec.theta)) return fail("unitCircle.theta must be a finite number");
+      if (Math.abs((spec.theta as number)) > 100) return fail("unitCircle.theta is unreasonably large");
+      validateOptionalDomain(spec.domainX, "unitCircle.domainX");
+      validateOptionalDomain(spec.domainY, "unitCircle.domainY");
+      if (!optionalBoolean(spec.showRadius)) return fail("unitCircle.showRadius must be a boolean");
+      if (!optionalBoolean(spec.showSin)) return fail("unitCircle.showSin must be a boolean");
+      if (!optionalBoolean(spec.showCos)) return fail("unitCircle.showCos must be a boolean");
+      if (!optionalBoolean(spec.showTan)) return fail("unitCircle.showTan must be a boolean");
+      if (!optionalBoolean(spec.showLabels)) return fail("unitCircle.showLabels must be a boolean");
+      break;
+    }
+    case "trigGraph": {
+      if (!["sin", "cos", "tan", "csc", "sec", "cot"].includes(String(spec.function))) {
+        return fail("trigGraph.function must be sin, cos, tan, csc, sec, or cot");
+      }
+      const dx = requiredTuple(spec.domainX, "trigGraph.domainX");
+      if (!dx.valid) return dx;
+      validateOptionalRange(spec.rangeY, "trigGraph.rangeY");
+      if (!optionalBoolean(spec.showKeyPoints)) return fail("trigGraph.showKeyPoints must be a boolean");
+      if (!optionalBoolean(spec.showLabels)) return fail("trigGraph.showLabels must be a boolean");
+      break;
+    }
+    case "parabola": {
+      if (!pointTuple(spec.vertex, "parabola.vertex")) return fail("parabola.vertex must be [x, y]");
+      if (!["up", "down", "left", "right"].includes(String(spec.opens))) {
+        return fail("parabola.opens must be up, down, left, or right");
+      }
+      if (spec.scale !== undefined && spec.scale !== null) {
+        if (!finiteNumber(spec.scale) || (spec.scale as number) <= 0) {
+          return fail("parabola.scale must be a positive number");
+        }
+      }
+      if (!optionalBoolean(spec.showFocusDirectrix)) return fail("parabola.showFocusDirectrix must be a boolean");
+      validateOptionalDomain(spec.domainX, "parabola.domainX");
+      validateOptionalDomain(spec.domainY, "parabola.domainY");
+      break;
+    }
+    case "polynomialGraph": {
+      if (!text(spec.expressionLatex, MAX_FIGURE_EXPRESSION)) return fail("polynomialGraph.expressionLatex is too long or empty");
+      const dx = requiredTuple(spec.domainX, "polynomialGraph.domainX");
+      if (!dx.valid) return dx;
+      validateOptionalRange(spec.rangeY, "polynomialGraph.rangeY");
+      if (!optionalBoolean(spec.showRoots)) return fail("polynomialGraph.showRoots must be a boolean");
+      if (!optionalBoolean(spec.showVertex)) return fail("polynomialGraph.showVertex must be a boolean");
+      break;
+    }
+    case "secantTangent": {
+      if (!text(spec.fLatex, MAX_FIGURE_EXPRESSION)) return fail("secantTangent.fLatex is too long or empty");
+      if (!finiteNumber(spec.x0) || !finiteNumber(spec.x1)) return fail("secantTangent.x0 and x1 must be finite numbers");
+      if (spec.tangentAt !== undefined && spec.tangentAt !== null && !finiteNumber(spec.tangentAt)) {
+        return fail("secantTangent.tangentAt must be a finite number");
+      }
+      if (spec.domainPad !== undefined && spec.domainPad !== null) {
+        if (!finiteNumber(spec.domainPad) || (spec.domainPad as number) <= 0) {
+          return fail("secantTangent.domainPad must be a positive number");
+        }
+      }
+      validateOptionalRange(spec.rangeY, "secantTangent.rangeY");
+      if (!optionalBoolean(spec.showLabels)) return fail("secantTangent.showLabels must be a boolean");
+      break;
+    }
+    case "limitGraph": {
+      if (!text(spec.fLatex, MAX_FIGURE_EXPRESSION)) return fail("limitGraph.fLatex is too long or empty");
+      if (!finiteNumber(spec.limitPoint)) return fail("limitGraph.limitPoint must be a finite number");
+      if (!optionalBoolean(spec.leftArrow)) return fail("limitGraph.leftArrow must be a boolean");
+      if (!optionalBoolean(spec.rightArrow)) return fail("limitGraph.rightArrow must be a boolean");
+      if (spec.domainPad !== undefined && spec.domainPad !== null) {
+        if (!finiteNumber(spec.domainPad) || (spec.domainPad as number) <= 0) {
+          return fail("limitGraph.domainPad must be a positive number");
+        }
+      }
+      validateOptionalRange(spec.rangeY, "limitGraph.rangeY");
+      if (!optionalBoolean(spec.showLabels)) return fail("limitGraph.showLabels must be a boolean");
+      break;
+    }
+    case "shadedArea": {
+      if (!text(spec.fLatex, MAX_FIGURE_EXPRESSION)) return fail("shadedArea.fLatex is too long or empty");
+      if (!finiteNumber(spec.fromX) || !finiteNumber(spec.toX)) return fail("shadedArea.fromX and toX must be finite numbers");
+      if ((spec.fromX as number) >= (spec.toX as number)) return fail("shadedArea.fromX must be less than toX");
+      if (spec.baseY !== undefined && spec.baseY !== null && !finiteNumber(spec.baseY)) {
+        return fail("shadedArea.baseY must be a finite number");
+      }
+      if (spec.domainPad !== undefined && spec.domainPad !== null) {
+        if (!finiteNumber(spec.domainPad) || (spec.domainPad as number) <= 0) {
+          return fail("shadedArea.domainPad must be a positive number");
+        }
+      }
+      validateOptionalRange(spec.rangeY, "shadedArea.rangeY");
+      if (!optionalBoolean(spec.showLabels)) return fail("shadedArea.showLabels must be a boolean");
+      break;
+    }
+    case "vector": {
+      if (!pointTuple(spec.origin, "vector.origin")) return fail("vector.origin must be [x, y]");
+      if (!pointTuple(spec.tip, "vector.tip")) return fail("vector.tip must be [x, y]");
+      const origin = spec.origin as unknown as [number, number];
+      const tip = spec.tip as unknown as [number, number];
+      if (origin[0] === tip[0] && origin[1] === tip[1]) {
+        return fail("vector.origin and tip must differ");
+      }
+      if (spec.label !== undefined && spec.label !== null && !text(spec.label, MAX_SHORT_TEXT_LENGTH)) {
+        return fail("vector.label is too long");
+      }
+      if (spec.labelLatex !== undefined && spec.labelLatex !== null && !text(spec.labelLatex, MAX_LATEX_LENGTH)) {
+        return fail("vector.labelLatex is too long");
+      }
+      break;
+    }
+    case "rightTriangle": {
+      if (!finiteNumber(spec.adjacent) || !finiteNumber(spec.opposite)) return fail("rightTriangle.adjacent and opposite must be finite numbers");
+      if ((spec.adjacent as number) <= 0 || (spec.opposite as number) <= 0) {
+        return fail("rightTriangle.adjacent and opposite must be positive");
+      }
+      if ((spec.adjacent as number) > COORD_MAX || (spec.opposite as number) > COORD_MAX) {
+        return fail("rightTriangle.adjacent and opposite are unreasonably large");
+      }
+      if (!optionalBoolean(spec.showRatios)) return fail("rightTriangle.showRatios must be a boolean");
+      if (!optionalBoolean(spec.thetaLabel)) return fail("rightTriangle.thetaLabel must be a boolean");
+      break;
+    }
+    case "coordinatePlane": {
+      const xr = requiredTuple(spec.xRange, "coordinatePlane.xRange");
+      if (!xr.valid) return xr;
+      const yr = requiredTuple(spec.yRange, "coordinatePlane.yRange");
+      if (!yr.valid) return yr;
+      if (!Array.isArray(spec.points) || spec.points.length > MAX_FIGURE_DECLARED) {
+        return fail(`coordinatePlane.points needs 0–${MAX_FIGURE_DECLARED} entries`);
+      }
+      for (const p of spec.points as Record<string, unknown>[]) {
+        if (!finiteNumber(p.x) || !finiteNumber(p.y)) return fail("coordinatePlane point needs finite x and y");
+        if (Math.abs(p.x as number) > COORD_MAX || Math.abs(p.y as number) > COORD_MAX) {
+          return fail("coordinatePlane point coords are unreasonably large");
+        }
+        if (p.label !== undefined && p.label !== null && !text(p.label, MAX_SHORT_TEXT_LENGTH)) {
+          return fail("coordinatePlane point label is too long");
+        }
+        if (p.labelLatex !== undefined && p.labelLatex !== null && !text(p.labelLatex, MAX_LATEX_LENGTH)) {
+          return fail("coordinatePlane point labelLatex is too long");
+        }
+      }
+      if (!optionalBoolean(spec.showOrigin)) return fail("coordinatePlane.showOrigin must be a boolean");
+      if (!optionalBoolean(spec.showLabels)) return fail("coordinatePlane.showLabels must be a boolean");
+      break;
+    }
+    case "flowchart": {
+      if (!Array.isArray(spec.nodes) || spec.nodes.length === 0 || spec.nodes.length > MAX_FIGURE_DECLARED) {
+        return fail(`flowchart.nodes needs 1–${MAX_FIGURE_DECLARED} entries`);
+      }
+      const nodeIds = new Set<string>();
+      for (const n of spec.nodes as Record<string, unknown>[]) {
+        if (typeof n.id !== "string" || n.id.length === 0 || n.id.length > MAX_ID_LENGTH) {
+          return fail("flowchart node needs a short id string");
+        }
+        if (nodeIds.has(n.id)) return fail(`flowchart node ids must be unique (duplicate ${n.id})`);
+        nodeIds.add(n.id);
+        if (!text(n.label, MAX_TEXT_LENGTH)) return fail("flowchart node needs a non-empty label");
+        if (!finiteNumber(n.x) || !finiteNumber(n.y)) return fail("flowchart node needs finite x and y");
+      }
+      if (spec.edges !== undefined && spec.edges !== null) {
+        if (!Array.isArray(spec.edges) || spec.edges.length > MAX_FIGURE_DECLARED * 2) {
+          return fail(`flowchart.edges has too many entries`);
+        }
+        for (const e of spec.edges as Record<string, unknown>[]) {
+          if (typeof e.from !== "string" || !nodeIds.has(e.from)) return fail("flowchart edge 'from' must reference a declared node id");
+          if (typeof e.to !== "string" || !nodeIds.has(e.to)) return fail("flowchart edge 'to' must reference a declared node id");
+          if (e.from === e.to) return fail("flowchart edge cannot loop onto itself");
+          if (e.label !== undefined && e.label !== null && !text(e.label, MAX_SHORT_TEXT_LENGTH)) {
+            return fail("flowchart edge label is too long");
+          }
+        }
+      }
+      if (!optionalBoolean(spec.showLabels)) return fail("flowchart.showLabels must be a boolean");
+      break;
+    }
+    case "freeBodyDiagram": {
+      if (spec.body !== "block" && spec.body !== "sphere") return fail("freeBodyDiagram.body must be block or sphere");
+      if (!Array.isArray(spec.forces) || spec.forces.length === 0 || spec.forces.length > 8) {
+        return fail("freeBodyDiagram.forces needs 1–8 entries");
+      }
+      for (const f of spec.forces as Record<string, unknown>[]) {
+        if (!finiteNumber(f.magnitude) || (f.magnitude as number) < 0) return fail("freeBodyDiagram force magnitude must be a non-negative number");
+        if (!finiteNumber(f.angleDeg)) return fail("freeBodyDiagram force angleDeg must be a finite number");
+        if (f.label !== undefined && f.label !== null && !text(f.label, MAX_SHORT_TEXT_LENGTH)) {
+          return fail("freeBodyDiagram force label is too long");
+        }
+      }
+      if (spec.body === "block") {
+        if (spec.width !== undefined && spec.width !== null && (!finiteNumber(spec.width) || (spec.width as number) <= 0)) {
+          return fail("freeBodyDiagram.width must be a positive number");
+        }
+        if (spec.height !== undefined && spec.height !== null && (!finiteNumber(spec.height) || (spec.height as number) <= 0)) {
+          return fail("freeBodyDiagram.height must be a positive number");
+        }
+      }
+      if (spec.at !== undefined && spec.at !== null && !pointTuple(spec.at, "freeBodyDiagram.at")) {
+        return fail("freeBodyDiagram.at must be [x, y]");
+      }
+      if (!optionalBoolean(spec.showLabels)) return fail("freeBodyDiagram.showLabels must be a boolean");
+      break;
+    }
+  }
+
+  // optional accents on every kind
+  if (spec.accent !== undefined && spec.accent !== null) {
+    if (!(SCENE_ACCENTS as readonly string[]).includes(String(spec.accent))) {
+      return fail("figure spec accent must be a known scene accent");
+    }
+  }
+  if (spec.style !== undefined && spec.style !== null) {
+    if (!(SCENE_LINE_STYLES as readonly string[]).includes(String(spec.style))) {
+      return fail("figure spec style must be one of solid, dashed, dotted");
+    }
+  }
+
+  // caption lives on the widget, not the spec — validate it here.
+  if (!optionalText(intent.caption, MAX_TEXT_LENGTH)) return fail("Figure caption is too long");
+  return ok;
+}
+
+function pointTuple(value: unknown, label: string): boolean {
+  if (!Array.isArray(value) || value.length !== 2) return false;
+  if (!finiteNumber(value[0]) || !finiteNumber(value[1])) return false;
+  if (Math.abs(value[0] as number) > COORD_MAX || Math.abs(value[1] as number) > COORD_MAX) {
+    devLog("[validate] %s coord exceeds COORD_MAX", label);
+    return false;
+  }
+  return true;
+}
+
+function requiredTuple(value: unknown, label: string): ValidationResult {
+  if (!Array.isArray(value) || value.length !== 2) return fail(`${label} must be [start, end]`);
+  if (!finiteNumber(value[0]) || !finiteNumber(value[1])) return fail(`${label} must be finite numbers`);
+  if ((value[0] as number) >= (value[1] as number)) return fail(`${label} start must be less than end`);
+  if (Math.abs(value[0] as number) > COORD_MAX || Math.abs(value[1] as number) > COORD_MAX) {
+    return fail(`${label} values are unreasonably large`);
+  }
+  return ok;
+}
+
+function validateOptionalDomain(value: unknown, label: string): ValidationResult {
+  if (value === undefined || value === null) return ok;
+  return requiredTuple(value, label);
+}
+
+function validateOptionalRange(value: unknown, label: string): ValidationResult {
+  return validateOptionalDomain(value, label);
 }
 
 /* ── Learner state ── */

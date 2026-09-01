@@ -1,0 +1,38 @@
+{
+  "id": "math.limits.diagnostic-on-trig",
+  "route": "diagnostic_probe",
+  "stage": "encounter",
+  "mode": "diagnostic",
+  "contextVariant": "same",
+  "targetSkill": "math.limits.base",
+  "supportCeiling": 0,
+  "permittedWidgetKinds": [
+    "question",
+    "concept_card",
+    "retrieval_check"
+  ],
+  "requiredEvidence": [
+    "selection",
+    "explanation",
+    "construction"
+  ],
+  "proseSlots": [
+    {
+      "blockId": "question-1",
+      "hint": "MCQ on lim x→0 sin(x)/x. Distractors: 'undefined', '0', '1' (correct), 'infinity'. No hint, no worked example. Records a 'selection' event with confidence unknown.",
+      "tone": "concise"
+    },
+    {
+      "blockId": "retrieval_check-1",
+      "hint": "Short-answer: 'What does lim x→0 cos(x)/x do, and why?' No options. Records a 'construction' event with a high independence credit (supportCeiling: 0).",
+      "tone": "inquisitive"
+    },
+    {
+      "blockId": "question-2",
+      "hint": "Final MCQ on the squeeze theorem intuition. Records a 'selection' event. The combined result is what evaluateStageExit('encounter', events) reads — the three events together discriminate 'has the idea' from 'has only pattern-matched it'.",
+      "tone": "concise"
+    }
+  ],
+  "maxBoardOps": 4,
+  "corpusRef": "math.limits.diagnostic-on-trig"
+}

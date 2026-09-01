@@ -89,8 +89,16 @@ export function shouldSignalTutor(
     case "example":
     case "memory_hook":
     case "mastery_card":
+    case "figure_spec":
       return false;
   }
+  // Exhaustive check — the compiler cannot prove the switch covers every
+  // union member, so the safety net lives here rather than relying on a
+  // `never`-typed default. A new widget kind added to WIDGET_KINDS that
+  // forgets this switch will surface as a TypeScript error elsewhere
+  // (WIDGET_FIELD_SPEC, WIDGET_TEACHING_RULE); the throw is the runtime
+  // guarantee that an unhandled kind cannot slip past the gate.
+  return false;
 }
 
 /**
@@ -245,8 +253,8 @@ export function buildWidgetSignalMessage(
       });
       lines.push(
         draft
-          ? `[The route above is the one I signed off, edits included — teach toward it. Choose the next valid move from the deterministic learning policy, and if evidence later forces a revision, say what changed and why; the plan is ours, not yours alone.]`
-          : `[This is my go-ahead: teach toward this route. Choose the next valid move from the deterministic learning policy, and if evidence later forces you to revise the plan, say what changed and why; never teach silently around it.]`
+          ? `[I'm authorising you to teach toward this route, edits included — the next move is policy-selected, not a free pass to begin the first phase; if evidence later forces a revision, say what changed and why; the plan is ours, not yours alone.]`
+          : `[I'm authorising you to teach toward this route — the next move is policy-selected, not a free pass to begin the first phase; if evidence later forces you to revise the plan, say what changed and why; never teach silently around it.]`
       );
       break;
     }

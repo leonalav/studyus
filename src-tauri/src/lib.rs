@@ -7,9 +7,9 @@
 //! stores the source PDF, and forwards the assembled request body to the model
 //! endpoint — the key and body cross IPC exactly once, then leave the machine.
 
-mod pdf_render;
+pub mod pdf_render;
 mod storage;
-mod doc_extract;
+pub mod doc_extract;
 
 use std::path::PathBuf;
 
@@ -424,6 +424,7 @@ Return the content in clean markdown format following these rules:
     Ok(doc_extract::ExtractionResult {
         markdown,
         tables: Vec::new(),
+        figure_regions: Vec::new(),
         warnings: Vec::new(),
     })
 }

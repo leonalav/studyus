@@ -23,6 +23,8 @@ import {
 import { renderMath } from "../../lib/latex/render";
 import { generateAxisTicks } from "./Visuals";
 import { gradeAnswerableWidget, MAX_RECTS, sanitizeWidgetState } from "../../lib/widgets/validate";
+import { compile as compileFigureSpec, FigureSpecCompileError } from "../../lib/figureSpec/compile";
+import type { FigureSpec } from "../../lib/figureSpec/types";
 import {
   WIDGET_LABEL,
   type WidgetIntent,
@@ -92,6 +94,7 @@ const MARKS: Record<WidgetKind, string> = {
   reflection: "M4 5h16v9H8l-4 4z M8 9h8M8 12h5",
   mastery_card: "M12 3l2.4 5 5.4.6-4 3.7 1.1 5.3L12 20l-4.9 2.6L8.2 12l-4-3.7 5.4-.6z",
   overview: "M4 5h6v2H4zM4 11h10v2H4zM4 17h8v2H4zM16 5h4v14h-4z",
+  figure_spec: "M5 5h14v14H5zM5 5l14 14M19 5L5 19",
 };
 
 const EXTRA_MARK_SHAPES: Partial<Record<WidgetKind, React.ReactElement>> = {
@@ -121,6 +124,7 @@ const DEFAULT_TAGS: Record<WidgetKind, string> = {
   challenge: "On your own",
   reflection: "In your words",
   mastery_card: "Evidence",
+  figure_spec: "Picture",
 };
 
 /* ── Small shared primitives ── */
@@ -462,6 +466,25 @@ function normalizeIntent(intent: WidgetIntent): { intent: WidgetIntent } | { rea
     if (!evidence || typeof evidence !== "object") return { reason: "no evidence" };
   }
 
+  if (intent.kind === "figure_spec") {
+    // Compile the spec eagerly here so a broken spec is caught before the
+    // renderer mounts. A restore from disk that lost the `spec` field, an
+    // unsupported kind, an unparseable expression, or a spec that would
+    // produce more than MAX_FIGURE_ELEMENTS primitives all surface as a
+    // reason string, which renders as the IncompleteWidget fallback.
+    const spec = (intent as unknown as { spec?: unknown }).spec;
+    if (!spec || typeof spec !== "object") return { reason: "no figure spec" };
+    try {
+      compileFigureSpec(spec as FigureSpec);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (e instanceof FigureSpecCompileError) {
+        return { reason: `figure spec invalid (${e.kind}: ${msg})` };
+      }
+      return { reason: `figure spec invalid (${msg})` };
+    }
+  }
+
   if (Object.keys(patch).length === 0) return { intent };
   return { intent: { ...intent, ...patch } as WidgetIntent };
 }
@@ -517,6 +540,7 @@ function renderBody(rawIntent: WidgetIntent, props: BodyProps) {
     case "challenge": return <ChallengeBody intent={intent} {...props} />;
     case "reflection": return <ReflectionBody intent={intent} {...props} />;
     case "mastery_card": return <MasteryCardBody intent={intent} {...props} />;
+    case "figure_spec": return <FigureSpecBody intent={intent} {...props} />;
   }
 }
 
@@ -1517,6 +1541,41 @@ function SceneFigure({
     >
       {nodes}
     </svg>
+  );
+}
+
+/**
+ * A static textbook figure rendered through the same `SceneFigure` chalkboard
+ * path the animation widget uses for its scene frame.
+ *
+ * The figure-spec layer is the *unified translator* (see
+ * `lib/figureSpec/compile.ts`): every producer — the LLM agent, the OCR
+ * pipeline via `lib/figureSpec/ocrInfer.ts`, or a hand-authored lesson JSON
+ * — emits a `FigureSpec`, the compiler turns it into an `AnimationScene`,
+ * and the existing chalkboard renderer paints the result. There is no new
+ * render path here on purpose: any change to scene aesthetics is one change
+ * away from the rest of the chalkboard.
+ *
+ * Progress is held at 1.0 so `writeOn` curves are fully drawn and labels
+ * (which interpolate `{expr}` against the playhead) resolve to their final
+ * value rather than `0`.
+ */
+function FigureSpecBody({ intent, chalk, accent }: BodyProps & { intent: Extract<WidgetIntent, { kind: "figure_spec" }> }) {
+  const scene = compileFigureSpec(intent.spec);
+  return (
+    <div className="space-y-1.5">
+      <div
+        className="relative overflow-hidden rounded"
+        style={{ background: "rgba(0,0,0,0.18)" }}
+        data-figure-spec={intent.spec.kind}
+        data-figure-elements={scene.elements.length}
+      >
+        <SceneFigure scene={scene} progress={1} chalk={chalk} accent={accent} />
+      </div>
+      {intent.caption ? (
+        <div className="text-[10.5px] opacity-65 italic">{intent.caption}</div>
+      ) : null}
+    </div>
   );
 }
 

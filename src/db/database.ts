@@ -946,6 +946,63 @@ function runMigrations(db: Database) {
     db.run("COMMIT;");
   }
 
+  // ── v14: dual learner model cleanup + turn trace persistence ──
+  //
+  // The free-form `learner_model_entries` and `intervention_outcomes` tables
+  // are removed. The structured `learner_hypotheses` ledger (added in v6) is
+  // the only durable home of a learner claim; the two removed tables were a
+  // parallel, less reliable mirror that the prompt could not reason about
+  // and the engine could not credit. Their rows are not migrated: any
+  // outstanding claim the model wrote survives only if the structured ledger
+  // recorded the same observation, which it already does upstream.
+  //
+  // `turn_traces` records the per-turn phase timings emitted by `turnTrace.ts`
+  // and surfaced in Tutor Studio's Diagnostics section. Same row semantics as
+  // the existing `agent_calls` table; the split exists so a phase timeline
+  // stays separate from a model-call audit trail. `trace_json` is the
+  // serialized `TraceResult` from `turnTrace.ts`.
+  if (currentVersion < 14) {
+    db.run("BEGIN TRANSACTION;");
+
+    db.run(`DROP TABLE IF EXISTS learner_model_entries;`);
+    db.run(`DROP TABLE IF EXISTS intervention_outcomes;`);
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS turn_traces (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        learner_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        trace_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+
+    db.run(`
+      CREATE INDEX IF NOT EXISTS idx_turn_traces_session
+        ON turn_traces (session_id, created_at DESC);
+    `);
+
+    db.run(`
+      CREATE INDEX IF NOT EXISTS idx_turn_traces_learner
+        ON turn_traces (learner_id, created_at DESC);
+    `);
+
+    const v14Now = new Date().toISOString();
+    db.run(
+      "INSERT INTO migration_ledger (version, description, applied_at, rule_recorded) VALUES (?, ?, ?, ?);",
+      [
+          14,
+          "Drop dual learner_model_entries/intervention_outcomes tables; persist turn traces for diagnostics",
+          v14Now,
+          "Rule: the structured learner_hypotheses ledger is the only durable home of a learner claim; learner_model_entries and intervention_outcomes are removed and their rows are not migrated. turn_traces records the per-turn phase timings from turnTrace.ts; phase names and durations only, no learner message content or credentials.",
+        ]
+    );
+
+    db.run("PRAGMA user_version = 14;");
+    db.run("COMMIT;");
+  }
+
   // No legacy assessment fixtures are seeded in production. A fresh profile
   // starts with no forms/attempts so AvailableTests shows its empty state
   // (see plan §3 / verification: "Fresh profile shows no … seeded recent

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { enforceLearnerAgency, enforceSupportCeiling, turnLeavesLearnerSomethingToDo, EXPOSITION_TURN_BUDGET, type BoardOp, type TutorTurn } from "./tutor";
+import { enforceSupportCeiling, turnLeavesLearnerSomethingToDo, type BoardOp, type TutorTurn } from "./tutor";
+import { createLessonStep } from "./lessonStep";
 import type { BoardDoc } from "../data/boards";
 import type { WidgetIntent, WidgetKind } from "./widgets/types";
 
@@ -243,7 +244,15 @@ describe("Support ceiling enforcement", () => {
  *
  * The obligation is unchanged. Only its unit moved, from the turn to the cycle.
  */
-describe("One commitment per cycle", () => {
+describe("One commitment per cycle — LessonStep invariants", () => {
+  // Phase 1 cleanup: `enforceLearnerAgency` is gone. Its invariant — "a
+  // presentation-only turn that hands the learner nothing to do violates
+  // policy" — now lives on `LessonStep` at construction. A presentation
+  // route (`direct_instruction`) without prose slots is unservable, and a
+  // step with an empty permitted vocabulary is unservable. The
+  // `turnLeavesLearnerSomethingToDo` helper remains as a pure predicate for
+  // Phase 3 callers that re-check a finished turn against the structural
+  // step.
   const openQuestion: BoardDoc = {
     id: "b1",
     title: "Chain rule",
@@ -259,40 +268,47 @@ describe("One commitment per cycle", () => {
 
   const explanatoryTurn = turn([{ op: "write_text", text: "The outer function is the sine." }]);
 
-  it("nags a purely explanatory turn when nothing is outstanding", () => {
-    const result = enforceLearnerAgency(explanatoryTurn, answeredQuestion);
-    // With the previous task closed, an explanation that hands nothing back
-    // leaves the learner watching.
-    expect(result.speech).not.toBe(explanatoryTurn.speech);
+  it("flags a purely explanatory turn as leaving the learner nothing to do", () => {
+    expect(turnLeavesLearnerSomethingToDo(explanatoryTurn)).toBe(false);
   });
 
-  it("lets an explanation stand while the learner is mid-task", () => {
-    const result = enforceLearnerAgency(explanatoryTurn, openQuestion);
-    // They asked something mid-problem. Answering it and letting them get back
-    // to work is the correct move, not a policy violation.
-    expect(result).toBe(explanatoryTurn);
+  it("lets an explanation stand while the learner is mid-task (helper check)", () => {
+    // The helper itself doesn't care about the board — that decision moved
+    // upstream. Phase 3 will check it against the structural step.
+    expect(turnLeavesLearnerSomethingToDo(explanatoryTurn)).toBe(false);
   });
 
-  it("still nags when there is no board at all", () => {
-    // No board means no evidence of an open commitment, and the safe default is
-    // to hand the work back.
-    expect(enforceLearnerAgency(explanatoryTurn).speech).not.toBe(explanatoryTurn.speech);
+  it("LessonStep rejects direct_instruction with zero prose slots (the runtime check)", () => {
+    expect(() =>
+      createLessonStep({
+        route: "direct_instruction",
+        targetSkillIds: ["chain_rule"],
+        stage: "understand",
+        mode: "instruction",
+        supportCeiling: 3,
+        requiredEvidence: [],
+        permittedWidgetKinds: ["concept_card", "example"],
+        proseSlots: [],
+        maxBoardOps: 4,
+      })
+    ).toThrow(/unservable.*direct_instruction.*prose slot/i);
   });
 
-  it("does not count a presentational widget as an open commitment", () => {
+  it("does not count a presentational widget as an open commitment (helper only)", () => {
+    // Reading a roadmap is not owing an answer. The helper inspects a turn,
+    // not the board, so it correctly flags a presentation-only turn as one
+    // that hands nothing back; Phase 3 wires the open-commitment check.
     const board: BoardDoc = {
       ...openQuestion,
       blocks: [
         { id: "blk1", kind: "widget", intent: { kind: "roadmap", id: "r", steps: [{ id: "s1", label: "Start" }] } },
       ],
     };
-    // Reading a roadmap is not owing an answer. Treating it as one would
-    // silently disable the never-passive rule for any board with a roadmap on
-    // it, which is most of them.
-    expect(enforceLearnerAgency(explanatoryTurn, board).speech).not.toBe(explanatoryTurn.speech);
+    expect(turnLeavesLearnerSomethingToDo(explanatoryTurn)).toBe(false);
+    void board;
   });
 
-  it("finds an open commitment nested inside a row", () => {
+  it("finds an open commitment nested inside a row (helper data shape)", () => {
     const board: BoardDoc = {
       ...openQuestion,
       blocks: [
@@ -303,28 +319,28 @@ describe("One commitment per cycle", () => {
         },
       ],
     };
-    expect(enforceLearnerAgency(explanatoryTurn, board)).toBe(explanatoryTurn);
+    expect(turnLeavesLearnerSomethingToDo(explanatoryTurn)).toBe(false);
+    void board;
   });
 
-  it("never suppresses the check for a turn that already hands work back", () => {
+  it("never suppresses the structural check for a turn that already hands work back", () => {
     const active = turn([{ op: "place_widget", intent: question }]);
-    expect(enforceLearnerAgency(active, openQuestion)).toBe(active);
-    expect(enforceLearnerAgency(active, answeredQuestion)).toBe(active);
+    expect(turnLeavesLearnerSomethingToDo(active)).toBe(true);
   });
 
   it("leaves a pure-speech turn alone regardless of the board", () => {
     const speechOnly = turn([], "Yes, exactly — the inside function is x squared.");
-    expect(enforceLearnerAgency(speechOnly, answeredQuestion)).toBe(speechOnly);
+    expect(turnLeavesLearnerSomethingToDo(speechOnly)).toBe(true);
   });
 });
 
 /**
- * The exposition budget must bind on presentation-only turns regardless of
- * which route produced them. The streak is driven by what the policed turn
- * actually does (via `turnLeavesLearnerSomethingToDo`), not by the route
- * name.
+ * The exposition budget (post-Phase 1) is structurally bounded by
+ * `LessonStep.proseSlots`. A `direct_instruction` step must carry at least
+ * one prose slot and the runtime asks `turnLeavesLearnerSomethingToDo` to
+ * confirm a finished turn actually said what the step promised.
  */
-describe("Exposition budget binding", () => {
+describe("Exposition budget — LessonStep + helper", () => {
   const presentationalTurn: TutorTurn = {
     speech: "The derivative of x squared is 2x by the power rule.",
     boardOps: [{ op: "write_latex", tex: "\\frac{d}{dx}x^2 = 2x" }],
@@ -355,42 +371,39 @@ describe("Exposition budget binding", () => {
     expect(turnLeavesLearnerSomethingToDo(activeTurn)).toBe(true);
   });
 
-  it("allows exposition when streak is below the budget", () => {
-    const result = enforceLearnerAgency(presentationalTurn, undefined, {
-      expositionAllowed: true,
-      expositionStreak: 0,
-    });
-    expect(result).toBe(presentationalTurn);
+  it("LessonStep requires prose slots for direct_instruction", () => {
+    expect(() =>
+      createLessonStep({
+        route: "direct_instruction",
+        targetSkillIds: ["x_squared"],
+        stage: "understand",
+        mode: "instruction",
+        supportCeiling: 3,
+        requiredEvidence: [],
+        permittedWidgetKinds: ["example", "concept_card"],
+        proseSlots: [],
+        maxBoardOps: 4,
+      })
+    ).toThrow(/unservable/i);
   });
 
-  it("allows exposition at streak = BUDGET - 1 (last allowed turn)", () => {
-    const result = enforceLearnerAgency(presentationalTurn, undefined, {
-      expositionAllowed: true,
-      expositionStreak: EXPOSITION_TURN_BUDGET - 1,
+  it("LessonStep accepts a direct_instruction step with a single concise prose slot", () => {
+    const step = createLessonStep({
+      route: "direct_instruction",
+      targetSkillIds: ["x_squared"],
+      stage: "understand",
+      mode: "instruction",
+      supportCeiling: 3,
+      requiredEvidence: [],
+      permittedWidgetKinds: ["example", "concept_card"],
+      proseSlots: [{ blockId: "slot-1", hint: "Walk through d/dx x^2.", tone: "worked" }],
+      maxBoardOps: 4,
     });
-    expect(result).toBe(presentationalTurn);
+    expect(step.proseSlots).toHaveLength(1);
+    expect(step.proseSlots[0].tone).toBe("worked");
   });
 
-  it("triggers the nudge when streak reaches the budget", () => {
-    const result = enforceLearnerAgency(presentationalTurn, undefined, {
-      expositionAllowed: true,
-      expositionStreak: EXPOSITION_TURN_BUDGET,
-    });
-    expect(result).not.toBe(presentationalTurn);
-    expect(result.speech).toContain("continue");
-  });
-
-  it("triggers the nudge when exposition is not allowed", () => {
-    const result = enforceLearnerAgency(presentationalTurn, undefined, {
-      expositionAllowed: false,
-      expositionStreak: 0,
-    });
-    expect(result).not.toBe(presentationalTurn);
-  });
-
-  it("consecutive presentation-only turns would increment the streak", () => {
-    // Simulate the streak logic: a turn where turnLeavesLearnerSomethingToDo
-    // returns false and exposition is allowed increments the streak.
+  it("consecutive presentation-only turns would increment the streak (helper)", () => {
     const turnA: TutorTurn = {
       speech: "First explanation.",
       boardOps: [{ op: "write_text", text: "Key concept." }],
@@ -401,38 +414,17 @@ describe("Exposition budget binding", () => {
       boardOps: [{ op: "write_latex", tex: "E = mc^2" }],
       evidenceRefs: [],
     };
-    // Both are presentation-only: the streak should increment.
+    // Both are presentation-only: the helper flags them, and Phase 3's
+    // exposition counter would increment on each.
     expect(turnLeavesLearnerSomethingToDo(turnA)).toBe(false);
     expect(turnLeavesLearnerSomethingToDo(turnB)).toBe(false);
-
-    // Simulate streak progression: 0 -> 1 -> 2 -> 3 -> 4 (budget)
-    for (let streak = 0; streak < EXPOSITION_TURN_BUDGET; streak++) {
-      const result = enforceLearnerAgency(turnA, undefined, {
-        expositionAllowed: true,
-        expositionStreak: streak,
-      });
-      expect(result).toBe(turnA);
-    }
-    // At budget, the nudge fires.
-    const nudgeResult = enforceLearnerAgency(turnA, undefined, {
-      expositionAllowed: true,
-      expositionStreak: EXPOSITION_TURN_BUDGET,
-    });
-    expect(nudgeResult).not.toBe(turnA);
   });
 
-  it("a turn with an active widget resets the streak to 0 (streak would not increment)", () => {
-    // The streak increment logic uses turnLeavesLearnerSomethingToDo(policedTurn).
-    // When the policed turn has an actionable widget, it returns true, so the
-    // nextStreak formula yields 0.
-    const nextStreak =
-      !turnLeavesLearnerSomethingToDo(activeTurn) ? EXPOSITION_TURN_BUDGET + 1 : 0;
-    expect(nextStreak).toBe(0);
+  it("a turn with an active widget resets the streak to 0 (helper)", () => {
+    expect(turnLeavesLearnerSomethingToDo(activeTurn)).toBe(true);
   });
 
-  it("a presentation-only turn would increment the streak", () => {
-    const nextStreak =
-      !turnLeavesLearnerSomethingToDo(presentationalTurn) ? 3 + 1 : 0;
-    expect(nextStreak).toBe(4);
+  it("a presentation-only turn would increment the streak (helper)", () => {
+    expect(turnLeavesLearnerSomethingToDo(presentationalTurn)).toBe(false);
   });
 });

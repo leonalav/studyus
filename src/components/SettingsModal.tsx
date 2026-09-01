@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { formatCredits, studyusModelSpec } from "../lib/studyusModels";
-import { customEndpointsProBypass } from "../lib/featureFlags";
 import { EMPTY_CREDIT_USAGE, STARTING_CREDITS, formatCreditAmount, loadCreditUsage, type CreditUsage } from "../lib/credits";
+
+// TEMPORARY: while `CUSTOM_ENDPOINTS_PRO_BYPASS` is set this opens the
+// add form instead of pointing at Pro; the lock returns with the flag.
+// Set this back to `false` to restore the full Pro lock on custom endpoints
+// once the subscription backend ships. The flag lives here, next to its only
+// consumer, on purpose: `featureFlags.ts` was removed in Phase 1 because a
+// flag without a UI consumer is a dead path.
+const CUSTOM_ENDPOINTS_PRO_BYPASS = true;
 import {
   ArrowLeft,
   Check,
@@ -984,7 +991,7 @@ function Models({ preferences, updatePreferences, onNotify }: {
           className={`flex items-center justify-center gap-1.5 rounded px-2 py-1.5 text-[11.5px] transition-colors ${category === "custom" ? "bg-white/[0.14] text-fg" : "text-dim hover:text-mut"}`}
         >
           Custom endpoints · {customEndpoints.length}
-          {!customEndpointsProBypass && <ProCrown />}
+          {!CUSTOM_ENDPOINTS_PRO_BYPASS && <ProCrown />}
         </button>
       </div>
 
@@ -1092,7 +1099,7 @@ function Models({ preferences, updatePreferences, onNotify }: {
         })}
       </div>
 
-      {category === "custom" && !customEndpointsProBypass && (
+      {category === "custom" && !CUSTOM_ENDPOINTS_PRO_BYPASS && (
         <div className="mb-2 flex items-start gap-2 rounded-md border border-[#e2b73f]/25 bg-[#e2b73f]/[0.06] px-2.5 py-2">
           <Crown size={12} className="mt-[2px] shrink-0 text-[#e2b73f]" />
           <p className="text-[11.5px] leading-relaxed text-mut">
@@ -1105,15 +1112,15 @@ function Models({ preferences, updatePreferences, onNotify }: {
 
       {category === "custom" && (!showAdd ? (
         <button
-          // TEMPORARY: while `customEndpointsProBypass` is set this opens the
+          // TEMPORARY: while `CUSTOM_ENDPOINTS_PRO_BYPASS` is set this opens the
           // add form instead of pointing at Pro; the lock returns with the flag.
-          onClick={() => (customEndpointsProBypass ? setShowAdd(true) : onNotify("Custom endpoints are reserved for Studyus Pro"))}
-          title={customEndpointsProBypass ? undefined : "Reserved for Studyus Pro"}
-          className={customEndpointsProBypass
+          onClick={() => (CUSTOM_ENDPOINTS_PRO_BYPASS ? setShowAdd(true) : onNotify("Custom endpoints are reserved for Studyus Pro"))}
+          title={CUSTOM_ENDPOINTS_PRO_BYPASS ? undefined : "Reserved for Studyus Pro"}
+          className={CUSTOM_ENDPOINTS_PRO_BYPASS
             ? "mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-white/12 py-2 text-[12px] text-mut transition-colors hover:border-accent/40 hover:text-fg"
             : "mb-2 flex w-full cursor-not-allowed items-center justify-center gap-1.5 rounded-md border border-dashed border-white/12 py-2 text-[12px] text-dim transition-colors hover:border-[#e2b73f]/30"}
         >
-          {customEndpointsProBypass ? <Plus size={12} /> : <Crown size={12} className="text-[#e2b73f]" />}
+          {CUSTOM_ENDPOINTS_PRO_BYPASS ? <Plus size={12} /> : <Crown size={12} className="text-[#e2b73f]" />}
           Add OpenAI-compatible endpoint
         </button>
       ) : (

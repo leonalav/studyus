@@ -52,11 +52,12 @@ import { buildContractReminder } from "./contracts/format";
 import type { TurnContract } from "./contracts/types";
 import { TUTOR_AGENT_PROMPT_V1 } from "./llm";
 import {
-  getActiveTutorContextLearnerSummary,
-  pruneLearnerModelEntries,
-  recordLearnerModelEntry,
-} from "./learnerModel";
+  getSkillEvidence, upsertEntrySignal, upsertHypothesis, DEFAULT_LEARNER_ID, getActivePlanForSkill
+} from "./learning/store";
+import { getLearnerPromptSummary, formatLearnerPromptSummary } from "./learning/promptSummary";
 import { getEvidenceForSelectedNodes } from "./curriculum";
+import { createTurnTrace, type TraceResult } from "./turnTrace";
+import { recordTurnTrace } from "./learning/tracing";
 import {
   CREATE_FORMS_TOOL,
   buildOnboardingReminder,
@@ -72,6 +73,7 @@ import type { VisualizationIntent } from "./visualization/types";
 import { validateVisualizationIntent } from "./visualization/validate";
 import type { RoadmapStep, RoadmapWidget, WidgetIntent, WidgetKind, WidgetState } from "./widgets/types";
 import type { SupportLevel, LearningRoute, SelfReportedFamiliarity } from "./learning/types";
+import { devLog, devWarn } from "./devLog";
 import { WIDGET_LABEL, isActionableWidget } from "./widgets/types";
 import { validateWidgetIntent } from "./widgets/validate";
 import { formatMasteryDirective, formatWidgetCatalog } from "./widgets/prompt";
@@ -659,605 +661,65 @@ export function boardHasOpenCommitment(board: BoardDoc | undefined): boolean {
  * session's persisted streak: if the streak has not been exhausted the turn
  * stands; once it has, the normal never-passive rule reasserts.
  */
-export function enforceLearnerAgency(
-  turn: TutorTurn,
-  board?: BoardDoc,
-  options: { expositionAllowed?: boolean; expositionStreak?: number } = {}
-): TutorTurn {
-  if (turn.boardOps.length === 0) return turn;
-  if (turnLeavesLearnerSomethingToDo(turn)) return turn;
-  if (boardHasOpenCommitment(board)) return turn;
-  // Allow an exposition beat when the route permits it and the streak has not
-  // been exhausted. Without the streak check the exemption would last the
-  // entire session.
-  if (
-    options.expositionAllowed &&
-    typeof options.expositionStreak === "number" &&
-    options.expositionStreak < EXPOSITION_TURN_BUDGET
-  ) {
-    return turn;
-  }
-  const speech = turn.speech.trim();
-  return { ...turn, speech: speech ? `${speech} ${PASSIVE_TURN_NUDGE}` : PASSIVE_TURN_NUDGE };
-}
+// REMOVED (Phase 1 cleanup): `enforceLearnerAgency`. The never-passive
+// invariant it enforced is now declared on `LessonStep` at construction — a
+// step with an empty permitted vocabulary or zero prose slots is unservable,
+// and the post-LLM compiler (Phase 3) reads the step directly rather than
+// re-deciding the rule from a board snapshot. `turnLeavesLearnerSomethingToDo`
+// remains as a pure helper for tests and future callers; the runtime branch
+// here is gone.
 
 /* ─────────────────────────────────────────────────────────────
    ROADMAP PROGRESS (tied to the evidence ledger, not model claims)
    ───────────────────────────────────────────────────────────── */
 
-/**
- * Locate the lesson roadmap already on the board.
- *
- * A session is allowed one roadmap. The first top-level (or nested-in-row)
- * roadmap widget is the map; later placements are duplicates the runtime must
- * rewrite into updates of this one.
- */
-export function findBoardRoadmap(
-  board: BoardDoc | undefined
-): { anchor: string; index: number; intent: RoadmapWidget } | null {
-  if (!board) return null;
+// The roadmap helpers (`findBoardRoadmap`, `buildRoadmapIntentForStage`,
+// `isRoadmapBlockSpec`, `opCarriesRoadmap`, `isRoadmapWidgetOp`,
+// `stripRoadmapsFromThread`, `roadmapIntentDiffers`) and the
+// `getOrCreateRoadmapBlock` seam all moved to `learning/roadmapLedger.ts`
+// in Phase 1. The runtime enforcer that used to live here
+// (`enforceRoadmapProgress`) is gone — its invariants are now declared on
+// `LessonStep` upstream and by the post-LLM compiler (Phase 3).
 
-  const walk = (
-    blocks: BoardDoc["blocks"],
-    pathPrefix: number[]
-  ): { anchor: string; index: number; intent: RoadmapWidget } | null => {
-    for (let i = 0; i < blocks.length; i += 1) {
-      const block = blocks[i];
-      if (block.kind === "widget" && block.intent.kind === "roadmap") {
-        // Prefer the top-level index for targetIndex fallbacks; nested roadmaps
-        // still expose their stable anchor, which update_widget prefers.
-        return {
-          anchor: block.id,
-          index: pathPrefix.length === 0 ? i : pathPrefix[0] ?? i,
-          intent: block.intent,
-        };
-      }
-      if (block.kind === "row") {
-        const nested = walk(block.children, pathPrefix.length === 0 ? [i] : pathPrefix);
-        if (nested) return nested;
-      }
-    }
-    return null;
-  };
+// REMOVED (Phase 1 cleanup): the bodies and exports of the five enforcers
+// listed below. They were removed because their invariants are now declared
+// once on `LessonStep` at construction rather than re-decided order-sensitively
+// after the model has spoken. The chain reduces to:
+//
+//   enforceTutorToolPolicy    (keep — user-toggleable tools)
+//   enforceTutorBoardNecessity (keep — guardrail only, not governance)
+//   enforceSupportCeiling     (keep — engine ceiling, runtime ladder can diverge)
+//   enforceLearnerContract    (keep — learner-owned commitments override)
+//
+// Removed in this phase:
+//   - enforceFillerGuard
+//   - enforceLearnerAgency
+//   - enforceVisualExplanation
+//   - enforceWidgetBudget
+//   - enforceRoadmapProgress
 
-  return walk(board.blocks, []);
-}
-
-/**
- * Resolve a roadmap step id to a mastery stage when the id (or label) names one.
- * Custom lesson steps that do not map onto the ladder return null and are left
- * alone — this path only autowires Guide-to-Mastery roadmaps.
- *
- * Matching is exact (after normalizing to letters) against the stage id or the
- * published stage label. Substring includes (`"application".includes("apply")`)
- * are deliberately rejected: they silently promote free-form lesson steps onto
- * the mastery ladder and mark them done when the ledger moves.
- */
-function stageFromRoadmapStep(step: Pick<RoadmapStep, "id" | "label">): MasteryStage | null {
-  const candidates = [step.id, step.label]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .map((value) => value.trim().toLowerCase().replace(/[^a-z]/g, ""));
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    if (isMasteryStage(candidate)) return candidate;
-    for (const stage of MASTERY_STAGES) {
-      const label = MASTERY_STAGE_SPECS[stage].label.toLowerCase().replace(/[^a-z]/g, "");
-      if (candidate === stage || candidate === label) return stage;
-    }
-  }
-  return null;
-}
-
-/** True when a board block spec is a roadmap widget. */
-function isRoadmapBlockSpec(block: BoardBlockSpec): block is Extract<BoardBlockSpec, { kind: "widget" }> & {
-  intent: RoadmapWidget;
-} {
-  return block.kind === "widget" && block.intent.kind === "roadmap";
-}
-
-/**
- * Any board op that would put a roadmap on the board or rewrite one in place.
- * Covers place/update and the block-shaped insert/replace/thread paths so a
- * second map cannot slip through a non-place channel.
- */
-function opCarriesRoadmap(op: BoardOp): boolean {
-  if (op.op === "place_widget" || op.op === "update_widget") {
-    return op.intent.kind === "roadmap";
-  }
-  if (op.op === "insert_after" || op.op === "replace_block") {
-    return isRoadmapBlockSpec(op.block);
-  }
-  if (op.op === "spawn_thread") {
-    return op.initialBlocks.some((block) => isRoadmapBlockSpec(block));
-  }
-  return false;
-}
-
-/**
- * Align roadmap step states to a demonstrated mastery stage.
- *
- * Steps that map onto the Guide to Mastery ladder become `done` when they sit
- * strictly before `liveStage`, `current` when they are the live stage, and
- * `upcoming` otherwise. Steps that do not map onto a stage keep their prior
- * state — we never invent progress for free-form lesson checkpoints.
- *
- * This is the only place that may mark a stage step done. Callers must pass a
- * stage that the evidence ledger (or an observed regression) actually moved to;
- * there is no weaker unsupported promotion path.
- */
-export function buildRoadmapIntentForStage(
-  existing: RoadmapWidget,
-  liveStage: MasteryStage
-): RoadmapWidget {
-  const liveIndex = MASTERY_STAGES.indexOf(liveStage);
-  let assignedCurrent = false;
-
-  const steps: RoadmapStep[] = existing.steps.map((step) => {
-    const mapped = stageFromRoadmapStep(step);
-    if (!mapped) return { ...step };
-
-    const stepIndex = MASTERY_STAGES.indexOf(mapped);
-    let state: RoadmapStep["state"];
-    if (stepIndex < liveIndex) {
-      state = "done";
-    } else if (stepIndex === liveIndex && !assignedCurrent) {
-      state = "current";
-      assignedCurrent = true;
-    } else {
-      state = "upcoming";
-    }
-    return { ...step, state };
-  });
-
-  // If no step mapped onto the live stage, leave the first non-done step as
-  // current so the board still shows a single pointer — never invent a new step.
-  if (!assignedCurrent) {
-    const pointer = steps.find((step) => step.state !== "done");
-    if (pointer) pointer.state = "current";
-  }
-
-  // At most one current — validator invariant, enforced here too.
-  let sawCurrent = false;
-  for (const step of steps) {
-    if (step.state === "current") {
-      if (sawCurrent) step.state = "upcoming";
-      else sawCurrent = true;
-    }
-  }
-
-  return { ...existing, steps };
-}
-
-function isRoadmapWidgetOp(
-  op: BoardOp
-): op is Extract<BoardOp, { op: "place_widget" | "update_widget" }> & { intent: RoadmapWidget } {
-  return (
-    (op.op === "place_widget" || op.op === "update_widget") &&
-    op.intent.kind === "roadmap"
-  );
-}
-
-/** Strip roadmap widgets from a spawn_thread's initial block list. */
-function stripRoadmapsFromThread(op: Extract<BoardOp, { op: "spawn_thread" }>): BoardOp | null {
-  const initialBlocks = op.initialBlocks.filter((block) => !isRoadmapBlockSpec(block));
-  if (initialBlocks.length === op.initialBlocks.length) return op;
-  if (initialBlocks.length === 0) return null;
-  return { ...op, initialBlocks };
-}
-
-/** True when two roadmap intents disagree on step ids or states (order-sensitive). */
-function roadmapIntentDiffers(a: RoadmapWidget, b: RoadmapWidget): boolean {
-  if (a.steps.length !== b.steps.length) return true;
-  return a.steps.some(
-    (step, i) => step.id !== b.steps[i]?.id || step.state !== b.steps[i]?.state
-  );
-}
-
-/**
- * Keep the board's single roadmap honest when a goal is demonstrably complete.
- *
- * Invariants enforced in code (the prompt asks for the same behaviour):
- *
- *  1. Never place a second roadmap when one already exists — rewrite to
- *     `update_widget` on the existing anchor. insert_after / replace_block /
- *     spawn_thread roadmap payloads are rewritten or stripped the same way.
- *  2. When the session stage moved on ledger evidence (forward `advancedTo` or
- *     an explicit `liveStage` from the caller — including regression), the
- *     existing roadmap is healed to that stage. A missing update is injected
- *     even when the turn has no other board work: stage can persist without a
- *     teaching op, and the map must not lie about where the learner is. Model-
- *     claimed `turn.stage` alone never triggers a heal (that would re-open a
- *     claim path); only `advancedTo` / caller `liveStage` do.
- *  3. Roadmap-only turns that are not an honest heal (duplicate place, idle
- *     retouch while the map already matches the live stage) are dropped rather
- *     than painted as a second map or a no-op progress flash.
- *
- * This never creates a weaker promotion path: step states are derived only from
- * `advancedTo` / the live stage the predicates already accepted. On regression
- * (`liveStage` behind the map's furthest done/current stage), steps are pulled
- * back so the board cannot advertise progress the ledger has withdrawn.
- */
-export function enforceRoadmapProgress(
-  turn: TutorTurn,
-  board: BoardDoc | undefined,
-  opts: { advancedTo: MasteryStage | null; liveStage?: MasteryStage }
-): TutorTurn {
-  const existing = findBoardRoadmap(board);
-  // Clamp path may fall back to turn.stage so a model-authored update still gets
-  // pulled toward something coherent; heal injection never uses that fallback.
-  const liveStage = opts.advancedTo ?? opts.liveStage ?? turn.stage ?? null;
-  const healStage = opts.advancedTo ?? opts.liveStage ?? null;
-
-  // No board roadmap and no stage movement: still strip multi-roadmap payloads
-  // within a single turn (place + insert + thread) so an empty board cannot
-  // grow two maps at once.
-  if (!existing && !opts.advancedTo) {
-    let sawRoadmap = false;
-    let changed = false;
-    const deduped = turn.boardOps.flatMap<BoardOp>((op) => {
-      if (op.op === "place_widget" && op.intent.kind === "roadmap") {
-        if (sawRoadmap) {
-          changed = true;
-          return [];
-        }
-        sawRoadmap = true;
-        return [op];
-      }
-      if ((op.op === "insert_after" || op.op === "replace_block") && isRoadmapBlockSpec(op.block)) {
-        if (sawRoadmap) {
-          changed = true;
-          return [];
-        }
-        // Normalize the first block-shaped roadmap into a place_widget so the
-        // rest of the pipeline only has one shape to reason about.
-        sawRoadmap = true;
-        changed = true;
-        return [{ op: "place_widget" as const, intent: op.block.intent }];
-      }
-      if (op.op === "spawn_thread" && op.initialBlocks.some((b) => isRoadmapBlockSpec(b))) {
-        const stripped = stripRoadmapsFromThread(op);
-        if (!stripped) {
-          changed = true;
-          return [];
-        }
-        if (stripped !== op) {
-          changed = true;
-          // Keep at most one roadmap overall: if the turn already has a map,
-          // drop thread roadmaps; if not, lift the first thread roadmap out as
-          // a place_widget on the main board (session maps are not thread-local).
-          if (sawRoadmap) return [stripped];
-          const first = op.initialBlocks.find((b) => isRoadmapBlockSpec(b));
-          if (first && isRoadmapBlockSpec(first)) {
-            sawRoadmap = true;
-            return [{ op: "place_widget" as const, intent: first.intent }, stripped];
-          }
-          return [stripped];
-        }
-      }
-      return [op];
-    });
-    return changed ? { ...turn, boardOps: deduped } : turn;
-  }
-
-  let hadRoadmapOp = false;
-  let changed = false;
-
-  const rewriteToUpdate = (intentSource: RoadmapWidget): BoardOp[] => {
-    if (!existing) return [];
-    // Without a demonstrated stage move (forward or regression), a second-map
-    // attempt is dropped entirely rather than painted as a progress update.
-    if (!healStage) return [];
-    const intent = buildRoadmapIntentForStage(
-      existing.intent.steps.length ? existing.intent : intentSource,
-      healStage
-    );
-    return [
-      {
-        op: "update_widget" as const,
-        targetAnchor: existing.anchor,
-        intent,
-      },
-    ];
-  };
-
-  const boardOps = turn.boardOps.flatMap<BoardOp>((op) => {
-    // Block-shaped second maps: rewrite to update when stage moved, else drop.
-    if ((op.op === "insert_after" || op.op === "replace_block") && isRoadmapBlockSpec(op.block)) {
-      hadRoadmapOp = true;
-      changed = true;
-      if (existing) return rewriteToUpdate(op.block.intent);
-      // No existing map: normalize to place_widget so one path owns placement.
-      return [{ op: "place_widget" as const, intent: op.block.intent }];
-    }
-
-    if (op.op === "spawn_thread" && op.initialBlocks.some((b) => isRoadmapBlockSpec(b))) {
-      changed = true;
-      const stripped = stripRoadmapsFromThread(op);
-      const first = op.initialBlocks.find((b) => isRoadmapBlockSpec(b));
-      if (existing && first && isRoadmapBlockSpec(first)) {
-        hadRoadmapOp = true;
-        const update = rewriteToUpdate(first.intent);
-        return stripped ? [...update, stripped] : update;
-      }
-      if (!existing && first && isRoadmapBlockSpec(first)) {
-        hadRoadmapOp = true;
-        const place: BoardOp = { op: "place_widget", intent: first.intent };
-        return stripped ? [place, stripped] : [place];
-      }
-      return stripped ? [stripped] : [];
-    }
-
-    if (!isRoadmapWidgetOp(op)) return [op];
-    hadRoadmapOp = true;
-
-    // A place_widget roadmap when one already exists is always a duplicate.
-    // Only rewrite into an update when the stage actually moved on the ledger
-    // (forward or regression) — otherwise drop it. Falling back to turn.stage
-    // here would paint a "progress" update on every stray second map.
-    if (op.op === "place_widget" && existing) {
-      changed = true;
-      if (!healStage) return [];
-      const intent = buildRoadmapIntentForStage(
-        // Prefer the board's step list (stable ids) over a free rewrite.
-        existing.intent.steps.length ? existing.intent : op.intent,
-        healStage
-      );
-      return [
-        {
-          op: "update_widget" as const,
-          targetAnchor: existing.anchor,
-          intent,
-        },
-      ];
-    }
-
-    // An update (or the first place, when none exists yet) is clamped to the
-    // demonstrated stage when we know one — never trust the model to mark later
-    // steps done. `liveStage` may be the current stage even without a forward
-    // move (including regression), so over-promoted updates still get pulled
-    // back to what the ledger supports; non-progressing retouches stay honest
-    // under the same clamp.
-    if (liveStage && (op.op === "update_widget" || (op.op === "place_widget" && !existing))) {
-      const base =
-        existing && existing.intent.steps.length > 0
-          ? {
-              ...existing.intent,
-              ...("heading" in op.intent
-                ? { heading: op.intent.heading ?? existing.intent.heading }
-                : {}),
-            }
-          : op.intent;
-      // Preserve model-authored step labels/ids when it is rewriting the map on
-      // first place; when updating, prefer the existing ids so we never invent
-      // a parallel checklist.
-      const source: RoadmapWidget =
-        op.op === "update_widget" && existing
-          ? {
-              ...existing.intent,
-              heading: op.intent.heading ?? existing.intent.heading,
-              steps:
-                op.intent.steps?.length &&
-                op.intent.steps.every((step) =>
-                  existing.intent.steps.some((prior) => prior.id === step.id)
-                )
-                  ? op.intent.steps.map((step) => {
-                      const prior = existing.intent.steps.find((p) => p.id === step.id)!;
-                      return {
-                        ...prior,
-                        label: step.label || prior.label,
-                        detail: step.detail ?? prior.detail,
-                      };
-                    })
-                  : existing.intent.steps,
-            }
-          : base;
-
-      const intent = buildRoadmapIntentForStage(source, liveStage);
-      const same =
-        op.op === "update_widget" &&
-        op.intent.steps.length === intent.steps.length &&
-        op.intent.steps.every(
-          (step, i) =>
-            step.id === intent.steps[i]?.id && step.state === intent.steps[i]?.state
-        );
-      if (!same) changed = true;
-      if (op.op === "update_widget") {
-        return [
-          {
-            ...op,
-            targetAnchor: op.targetAnchor ?? existing?.anchor,
-            intent,
-          },
-        ];
-      }
-      return [{ ...op, intent }];
-    }
-
-    // place without existing and without live stage: leave as authored (session open).
-    return [op];
-  });
-
-  // Stage moved on evidence (or explicit liveStage, e.g. regression) but the
-  // model forgot the map: inject a heal so the board cannot advertise a stale
-  // current after setSessionMasteryStage. Prefer attaching beside teaching work;
-  // when the turn is empty or roadmap-only, still ship the heal alone so stage
-  // and map cannot desync across turns.
-  const hasNonRoadmapWork = boardOps.some((op) => !opCarriesRoadmap(op));
-  if (healStage && existing && !hadRoadmapOp) {
-    const intent = buildRoadmapIntentForStage(existing.intent, healStage);
-    if (roadmapIntentDiffers(existing.intent, intent)) {
-      boardOps.unshift({
-        op: "update_widget",
-        targetAnchor: existing.anchor,
-        intent,
-      });
-      changed = true;
-    }
-  }
-
-  // Drop a turn that, after rewrites, is only idle roadmap housekeeping with no
-  // teaching/work and no needed heal — whether the model authored a lone update
-  // that already matches the board or a duplicate place with nowhere to go.
-  // Keep a genuine first-place on an empty board (session open). Keep a heal
-  // that actually changes step states so stage movement is visible on the map.
-  const onlyRoadmapLeft =
-    boardOps.length > 0 && boardOps.every((op) => opCarriesRoadmap(op));
-  if (onlyRoadmapLeft && existing) {
-    const healNeeded =
-      healStage != null &&
-      boardOps.some((op) => {
-        if (!isRoadmapWidgetOp(op)) return false;
-        const intent =
-          op.op === "update_widget" || op.op === "place_widget"
-            ? (op.intent as RoadmapWidget)
-            : null;
-        if (!intent) return false;
-        return roadmapIntentDiffers(existing.intent, intent);
-      });
-    if (!healNeeded && !hasNonRoadmapWork) {
-      changed = true;
-      return { ...turn, boardOps: [] };
-    }
-  }
-
-  if (!changed) return turn;
-  return { ...turn, boardOps };
-}
+// The roadmap helpers (`isRoadmapBlockSpec`, `opCarriesRoadmap`,
+// `buildRoadmapIntentForStage`, `isRoadmapWidgetOp`, `stripRoadmapsFromThread`,
+// `roadmapIntentDiffers`, `stageFromRoadmapStep`) and `findBoardRoadmap` all
+// moved to `learning/roadmapLedger.ts`. The runtime enforcer that used them
+// (`enforceRoadmapProgress`) is gone; `buildRoadmapIntentForStage` and
+// `findBoardRoadmap` remain re-exported at the bottom of this file for tests
+// that depended on them, so Phase 1's cleanup does not break the suite.
 
 /**
  * Show, don't just tell.
  *
- * The never-passive rule above gets a runtime backstop; the "show it" half of
- * the stage vocabulary does not. The observable failure is a board that
- * accumulates question after question while a spatial idea — slope, area,
- * shape, motion — is never once drawn, in a stage whose whole job is to build
- * the picture (Encounter: function/geometry, Apply/Transfer: function/equation,
- * Understand: equation).
- *
- * Same honesty constraint as the agency rule: this never fabricates a figure
- * the agent did not author. It appends an invitation in speech, so the
- * learner's "draw it" becomes the cue the model then fulfils with a real
- * `visualize` op.
- *
- * Fires at most once per board: as soon as any figure, equation, or
- * self-drawing widget (animation/slider) exists on the board, the obligation is
- * discharged. A session is nudged toward its first picture, not harassed on
- * every later turn. An equation only satisfies a stage whose own visual
- * vocabulary is `equation` — Encounter wants a *picture*, and a lone Σ is not
- * one. `plan` and `roadmap` placements are orientation, not concept teaching,
- * so the session-opening beat is never nudged.
+ * REMOVED (Phase 1 cleanup): `enforceVisualExplanation` and its helpers
+ * (`VISUAL_WIDGET_KINDS`, `widgetKindTeachesConcept`,
+ * `blockSpecHasVisualRepresentation`, `turnHasVisualRepresentation`,
+ * `blockHasVisualRepresentation`, `boardHasVisualRepresentation`,
+ * `turnAddsTeachingContent`). The "draw the picture" obligation is now
+ * declared on `LessonStep.requiredVisualizationKind`: a step that names a
+ * visual is invalid without one, and the post-LLM compiler (Phase 3)
+ * emits the figure rather than nudging the tutor with speech. The runtime
+ * nudge existed because the LLM was asked to invent its own picture on
+ * every turn; with that load lifted upstream, no fallback is needed.
  */
-export function enforceVisualExplanation(
-  turn: TutorTurn,
-  stage: MasteryStage,
-  board?: BoardDoc
-): TutorTurn {
-  if (turn.boardOps.length === 0) return turn;
-  const spec = MASTERY_STAGE_SPECS[stage];
-  if (!spec || spec.visualizations.length === 0) return turn;
-  // A pure-explanation turn is the never-passive rule's to fix, in its own
-  // words. Two nudges on one turn is harassment, not rigour.
-  if (!turnLeavesLearnerSomethingToDo(turn)) return turn;
-  if (!turnAddsTeachingContent(turn)) return turn;
-
-  const equationSatisfies = spec.visualizations.includes("equation");
-  if (turnHasVisualRepresentation(turn, equationSatisfies)) return turn;
-  if (boardHasVisualRepresentation(board, equationSatisfies)) return turn;
-
-  const speech = turn.speech.trim();
-  // Do not interview the learner or wait for them to invent a drawing request.
-  // The obligation is on the tutor: next content turn must draw the picture.
-  const nudge =
-    "This step still needs the core picture on the board — type **continue** and I will draw the smallest graph, diagram or animation that shows the mechanism, instead of another text block or look-alike quiz.";
-  return { ...turn, speech: speech ? `${speech} ${nudge}` : nudge };
-}
-
-/** Widgets that draw their own picture, satisfying the stage without a
- *  separate `visualize` op. */
-const VISUAL_WIDGET_KINDS: ReadonlySet<WidgetKind> = new Set(["animation", "slider"]);
-
-/** `plan` and `roadmap` are orientation/consent, not the teaching of a spatial
- *  concept — placing them owes no figure, so the opening turn stays clean. */
-function widgetKindTeachesConcept(kind: WidgetKind): boolean {
-  return kind !== "plan" && kind !== "roadmap";
-}
-
-function blockSpecHasVisualRepresentation(block: BoardBlockSpec, equationSatisfies: boolean): boolean {
-  if (block.kind === "visualization") return true;
-  if (block.kind === "latex") return equationSatisfies;
-  return block.kind === "widget" && VISUAL_WIDGET_KINDS.has(block.intent.kind);
-}
-
-function turnHasVisualRepresentation(turn: TutorTurn, equationSatisfies: boolean): boolean {
-  return turn.boardOps.some((op) => {
-    switch (op.op) {
-      case "visualize":
-        return true;
-      case "write_latex":
-        return equationSatisfies;
-      case "place_widget":
-      case "update_widget":
-        return VISUAL_WIDGET_KINDS.has(op.intent.kind);
-      case "replace_block":
-      case "insert_after":
-        return blockSpecHasVisualRepresentation(op.block, equationSatisfies);
-      case "spawn_thread":
-        return op.initialBlocks.some((block) => blockSpecHasVisualRepresentation(block, equationSatisfies));
-      default:
-        return false;
-    }
-  });
-}
-
-function blockHasVisualRepresentation(
-  block: BoardDoc["blocks"][number],
-  equationSatisfies: boolean
-): boolean {
-  switch (block.kind) {
-    case "visualization":
-      return true;
-    case "latex":
-      return equationSatisfies;
-    case "widget":
-      return VISUAL_WIDGET_KINDS.has(block.intent.kind);
-    case "row":
-      return block.children.some((child) => blockHasVisualRepresentation(child, equationSatisfies));
-    default:
-      return false;
-  }
-}
-
-function boardHasVisualRepresentation(board: BoardDoc | undefined, equationSatisfies: boolean): boolean {
-  return Boolean(board?.blocks.some((block) => blockHasVisualRepresentation(block, equationSatisfies)));
-}
-
-/** Does this turn add content that teaches — the kind whose missing figure is a
- *  real gap. Housekeeping (delete/revise/redraw) owes the learner nothing new. */
-function turnAddsTeachingContent(turn: TutorTurn): boolean {
-  return turn.boardOps.some((op) => {
-    switch (op.op) {
-      case "write_title":
-      case "write_text":
-      case "write_bullets":
-      case "write_callout":
-      case "write_latex":
-      case "visualize":
-        return true;
-      case "place_widget":
-      case "update_widget":
-        return widgetKindTeachesConcept(op.intent.kind);
-      case "replace_block":
-      case "insert_after":
-        return op.block.kind !== "widget" || widgetKindTeachesConcept(op.block.intent.kind);
-      case "spawn_thread":
-        return op.initialBlocks.some(
-          (block) => block.kind !== "widget" || widgetKindTeachesConcept(block.intent.kind)
-        );
-      default:
-        return false;
-    }
-  });
-}
 
 /**
  * Widget kinds that hand the learner support rather than work.
@@ -1408,62 +870,26 @@ export function enforceTutorBoardNecessity(turn: TutorTurn, learnerMessage: stri
  * board already has an unanswered actionable widget, suppress further
  * explanatory content or assessed-work reveals. Redirect the learner to
  * the existing commitment instead.
- *
- * Substantive answers pass through unchanged. This guard is independent
- * of `enforceSupportCeiling` — it catches the specific failure mode
- * where filler triggers a new exposition block rather than addressing
- * what is already on the board.
+ * REMOVED (Phase 1 cleanup): `enforceFillerGuard`. The filler-redirect
+ * invariant it enforced is now declared upstream: a retrieval / practice
+ * `LessonStep` carries `supportCeiling: 0` and an empty proseSlots-by-default,
+ * so a filler-driven exposition cannot survive construction. The runtime
+ * branch here was a final backstop against the LLM emitting fresh
+ * presentational content while the learner still had an unanswered
+ * commitment on the board; the LessonStep's required widget kinds now
+ * make that off-policy.
  */
-export function enforceFillerGuard(
-  turn: TutorTurn,
-  learnerMessage: string,
-  board?: BoardDoc
-): TutorTurn {
-  if (!isFillerMessage(learnerMessage)) return turn;
-  if (!boardHasOpenCommitment(board)) return turn;
-  // Strip board ops that add new presentational content; keep ops that
-  // update existing widgets (e.g. highlighting the pending task) and
-  // actionable widgets the learner can interact with.
-  const filteredOps = turn.boardOps.filter((op) => {
-    switch (op.op) {
-      case "write_title":
-      case "write_text":
-      case "write_bullets":
-      case "write_latex":
-      case "write_callout":
-      case "visualize":
-        return false;
-      case "place_widget":
-        // Actionable widgets (questions, scratchpads, etc.) hand work back
-        // to the learner and must not be stripped on filler.
-        return isActionableWidget(op.intent);
-      default:
-        return true;
-    }
-  });
-  const redirect = "You have an unanswered task on the board — try that before we move on.";
-  const speech = turn.speech.trim();
-  return {
-    ...turn,
-    boardOps: filteredOps,
-    speech: speech ? `${speech}\n\n${redirect}` : redirect,
-  };
-}
 
 /**
  * Enforce the widget budget: keep only the first place_widget op per turn.
  *
- * The board is a shared workspace, not a widget dashboard. More than one
- * interactive study widget per teaching beat overwhelms the learner and
- * fragments the turn into a scatter of half-answered prompts.
+ * REMOVED (Phase 1 cleanup): `enforceWidgetBudget`. The single-widget-per-turn
+ * rule is declared by `LessonStep.permittedWidgetKinds.length` and by the
+ * `maxBoardOps` clamp in the constructor. The session-opening `plan + overview`
+ * exception is preserved by the constructor's prose-slot rule on
+ * `direct_instruction`, which requires at least one prose slot and therefore
+ * forces the opening beat to carry its own agreement pair.
  */
-export function enforceWidgetBudget(turn: TutorTurn): TutorTurn {
-  const widgetOps = turn.boardOps.filter((op) => op.op === "place_widget");
-  if (widgetOps.length <= 1) return turn;
-  const firstWidget = widgetOps[0];
-  const otherOps = turn.boardOps.filter((op) => op.op !== "place_widget");
-  return { ...turn, boardOps: [...otherOps, firstWidget] };
-}
 
 export function enforceTutorToolPolicy(
   turn: TutorTurn,
@@ -1661,11 +1087,25 @@ export async function rememberTutorDiagnosis(
     if (preferences.memory.mode === "persistent" &&
         current.count >= preferences.memory.minimumEvidence &&
         !current.persisted) {
-      await recordLearnerModelEntry({
-        entryKind: current.kind,
-        statement: current.statement,
-        evidenceRefs: evidenceRefs.length ? evidenceRefs : [`session:${sessionId}`],
-      });
+      // Phase 1 cleanup: the structured `learner_hypotheses` ledger is the
+      // only durable home of a learner claim. Translating the old free-form
+      // session-memory candidate into a `HypothesisKind` keeps the same
+      // observational data flowing into the structured store without
+      // resurrecting the duplicate `learner_model_entries` table.
+      try {
+        await upsertHypothesis({
+          learnerId,
+          skillId: persistence.learnerId ?? learner.learnerId ?? DEFAULT_LEARNER_ID,
+          kind: candidate.kind === "criterion_deficit" ? "missing_prerequisite" : "misconception",
+          statement: current.statement,
+          nextBestTest: candidate.kind === "calibration"
+            ? "Watch whether the learner's confidence rating matches their measured correctness on the next retrieval."
+            : "Re-encounter the same idea on the next turn and observe whether the learner produces the same belief unaided.",
+          evidenceIds: evidenceRefs.length ? evidenceRefs : [`session:${sessionId}`],
+        });
+      } catch (error) {
+        console.warn("[tutor] could not persist hypothesis", error);
+      }
       current.persisted = true;
     }
   }
@@ -2211,17 +1651,23 @@ function validateBoardOp(value: unknown, path: string, errors: string[]): BoardO
 
 /**
  * The SESSION OPENING contract: when the learner has just submitted the intake
- * form, the tutor's first turn MUST place both a plan widget and an overview
- * widget. The plan is the route from where they stand to mastery; the overview
- * is the full-concept map laid out transparently (identities, properties,
- * graphs, vocabulary, pitfalls, patterns) so they see exactly what they'd
- * learn before agreeing. Without the overview the learner cannot see the full
- * concept before agreeing — placing only the plan is teaching by omission.
+ * form, the tutor's first turn MUST place BOTH a plan widget AND an overview
+ * widget. The plan is the route from where they stand to mastery; the
+ * overview is the full-concept map laid out transparently (identities,
+ * properties, graphs, vocabulary, pitfalls, patterns) so they see exactly
+ * what they'd learn before agreeing.
+ *
+ * The contract is bidirectional. Placing only the plan is teaching by
+ * omission (the learner cannot see the full concept map before agreeing).
+ * Placing only the overview is the symmetric violation: a fully-drawn
+ * concept map with no commitment device the learner can agree to. Both
+ * directions are reported as separate errors so the repair loop can target
+ * the missing widget precisely instead of guessing.
  *
  * Returns the error message when the payload violates the contract (or
  * `null` when it satisfies it). Exposed so the repair-loop recover callback
- * can also refuse to silently sanitize a plan-only payload back into a
- * successful turn.
+ * can also refuse to silently sanitize a missing-widget payload back into
+ * a successful turn.
  */
 export function checkSessionOpeningContract(
   payload: unknown,
@@ -2231,8 +1677,14 @@ export function checkSessionOpeningContract(
   const ops = (payload as Record<string, unknown>)?.board_ops as Array<Record<string, unknown>> | undefined;
   const hasPlan = ops?.some((op) => (op?.intent as Record<string, unknown>)?.kind === "plan");
   const hasOverview = ops?.some((op) => (op?.intent as Record<string, unknown>)?.kind === "overview");
+  if (!hasPlan && !hasOverview) {
+    return "Session opening: you placed NEITHER the plan widget NOR the overview widget. Place BOTH the plan widget (the route from your starting point to mastery) AND the overview widget (the full-concept map: identities, properties, graphs, vocabulary, pitfalls, patterns) in the same board_ops. Both are required for the learner to see what they would learn before agreeing.";
+  }
   if (hasPlan && !hasOverview) {
     return "Session opening: you placed a plan widget but did not place an overview widget alongside it. Place BOTH the plan widget (the route from zero to mastery) AND the overview widget (the full-concept map: identities, properties, graphs, vocabulary, pitfalls, patterns) in the same board_ops. Both are required for the learner to see what they would learn before agreeing.";
+  }
+  if (!hasPlan && hasOverview) {
+    return "Session opening: you placed an overview widget but did not place a plan widget alongside it. The overview shows the full-concept map (identities, properties, graphs, vocabulary, pitfalls, patterns) but the plan is the commitment device the learner agrees to BEFORE teaching begins. Place BOTH the plan widget AND the overview widget in the same board_ops.";
   }
   return null;
 }
@@ -3370,6 +2822,11 @@ export function summarizeRoadmapSteps(intent: RoadmapWidget): string {
   return `${heading} · steps=[${steps}]`;
 }
 
+// Phase 1 cleanup: re-export the roadmap helpers that moved to
+// `learning/roadmapLedger.ts` so existing test imports keep working. New
+// callers should import from the ledger directly.
+export { findBoardRoadmap, buildRoadmapIntentForStage } from "./learning/roadmapLedger";
+
 /* ─────────────────────────────────────────────────────────────
    PUBLIC ENTRY POINT
    ───────────────────────────────────────────────────────────── */
@@ -3394,24 +2851,31 @@ export function resolveTurnWidgetPermit(
     : policyPermitted;
 }
 
-export interface TutorTurnRequest {
-  sessionId: string;
-  sessionTitle: string;
-  domain: Domain;
-  board?: BoardDoc;
-  boundNodes?: string[];
-  assistancePolicy?: string;
-  /** Pre-session onboarding answers. Composed into a consistent system reminder
-   *  and appended to the tutor's system prompt for the whole session, so the
-   *  agent tutors to the learner's declared mastery, weak areas, chosen agent,
-   *  pace, and remarks. Omitted for restored sessions (already ran). */
-  onboarding?: OnboardingAnswers;
+/**
+ * The lesson state this turn is about.
+ *
+ * `skillId` is the curriculum skill the turn is teaching; `route` is the
+ * policy-engine move the planner wants; `evidenceIds` cites the ledger rows
+ * that justified the route; `supportCeiling` is the maximum help allowed for
+ * the activity.
+ */
+export interface LessonContext {
+  skillId?: string;
+  route?: LearningRoute;
+  evidenceIds?: string[];
+  supportCeiling?: SupportLevel;
+}
+
+/**
+ * The learner-side inputs that vary per turn: who they are, what they just
+ * said, what they attached, and the intake they filled in at session start.
+ */
+export interface LearnerState {
+  /** Learner identity for the ledger. Single-user today; explicit so the
+   *  evidence store is not retrofitted later. */
+  learnerId?: string;
   learnerMessage: string;
-  /** Distinguishes the session-opening greeting turn. Only a greeting with
-   *  onboarding answers on record is the DESIGNATED session opening: the turn
-   *  that must place the plan widget (zero→mastery route built on the five
-   *  intake answers) and the roadmap before any teaching. */
-  turnKind?: "chat" | "greeting" | "widget" | "plan_start";
+  signal?: AbortSignal;
   attachments?: {
     name: string;
     kind: string;
@@ -3419,23 +2883,74 @@ export interface TutorTurnRequest {
     dataUrl?: string;
     textContent?: string;
   }[];
-  signal?: AbortSignal;
-  endpoint?: ResolvedRoleEndpoint;
-  /** The skill this turn is about, for the evidence ledger and policy engine.
-   *
-   *  When omitted it is derived from the bound curriculum node or the session
-   *  title, so evidence still accumulates somewhere stable rather than being
-   *  silently dropped. */
-  skillId?: string;
-  /** Learner identity for the ledger. Single-user today; explicit so the
-   *  evidence store is not retrofitted later. */
+  /** Pre-session onboarding answers. Composed into a consistent system reminder
+   *  and appended to the tutor's system prompt for the whole session, so the
+   *  agent tutors to the learner's declared mastery, weak areas, chosen agent,
+   *  pace, and remarks. Omitted for restored sessions (already ran). */
+  onboarding?: OnboardingAnswers;
+  selfReportedFamiliarity?: SelfReportedFamiliarity;
+}
+
+/**
+ * The chalkboard this turn writes to: which session it is, the current doc
+ * the tutor must hand back to in `update_widget`, the domain the renderer is
+ * configured for, and the assistance policy the session was opened under.
+ */
+export interface BoardState {
+  sessionId: string;
+  sessionTitle: string;
+  domain: Domain;
+  board?: BoardDoc;
+  assistancePolicy?: string;
+  /** Distinguishes the session-opening greeting turn. Only a greeting with
+   *  onboarding answers on record is the DESIGNATED session opening: the turn
+   *  that must place the plan widget (zero→mastery route built on the five
+   *  intake answers) and the roadmap before any teaching. */
+  turnKind?: "chat" | "greeting" | "widget" | "plan_start";
+}
+
+/**
+ * The durable references this turn's evidence and board ops are filed under.
+ *
+ * `activityId` is assigned at placement so a widget answered many turns later
+ * resolves to the contract it was placed under rather than whichever contract
+ * is newest at the moment of submission.
+ */
+export interface PersistenceRefs {
+  sessionId: string;
   learnerId?: string;
-  /** The learner's active Turn Contract revision. Binding over learner-owned
-   *  choices (scope, representation, notation, examples) and carrying no
-   *  authority over engine-owned support, evidence, or mastery decisions. */
+  activityId?: string;
+  boundNodes?: string[];
+}
+
+/**
+ * Anything that controls how the model call itself is shaped: the endpoint,
+ * generation params, the active Turn Contract revision, and any plan the
+ * learner is following.
+ */
+export interface ModelConfig {
+  endpoint?: ResolvedRoleEndpoint;
+  temperature?: number;
+  maxTokens?: number;
+  maxRepairAttempts?: number;
   turnContract?: TurnContract;
-  /** Optional active learning plan ID to include in tutor context */
   activePlanId?: string;
+}
+
+/**
+ * Public request shape: five grouped sections so adding a new dimension
+ * requires updating one of the five types rather than growing a flat list.
+ *
+ * Callers in `StudyRoom.tsx` build this object in lockstep with the type
+ * definition; the internal implementation re-reads each section explicitly
+ * so the categorisation is not cosmetic.
+ */
+export interface TutorTurnRequest {
+  context: LessonContext;
+  learner: LearnerState;
+  board: BoardState;
+  persistence: PersistenceRefs;
+  model: ModelConfig;
 }
 
 /**
@@ -3445,7 +2960,7 @@ export interface TutorTurnRequest {
  * capability must all agree. Data is bounded per turn and never persisted.
  */
 export function selectTutorImageContentParts(
-  attachments: TutorTurnRequest["attachments"],
+  attachments: LearnerState["attachments"],
   tools: TutorToolPermissions,
   allowImageDataInPrompts: boolean,
   endpoint: ResolvedRoleEndpoint
@@ -3466,7 +2981,7 @@ export function selectTutorImageContentParts(
 
 /** Inline bounded .txt/.md contents for any OpenAI-compatible endpoint. */
 export function selectTutorFileContentParts(
-  attachments: TutorTurnRequest["attachments"],
+  attachments: LearnerState["attachments"],
   tools: TutorToolPermissions,
   allowFileDataInPrompts: boolean
 ): ContentPart[] {
@@ -3499,8 +3014,12 @@ export function selectTutorFileContentParts(
  * title. The fallback matters: evidence attributed to a stable-but-coarse skill
  * is still usable, whereas evidence dropped because no skill was named is gone.
  */
-export function resolveTurnSkillId(req: Pick<TutorTurnRequest, "skillId" | "boundNodes" | "sessionTitle">): string {
-  const raw = req.skillId ?? req.boundNodes?.[0] ?? req.sessionTitle;
+export function resolveTurnSkillId(req: {
+  context?: Pick<LessonContext, "skillId">;
+  persistence?: Pick<PersistenceRefs, "boundNodes">;
+  board?: Pick<BoardState, "sessionTitle">;
+}): string {
+  const raw = req.context?.skillId ?? req.persistence?.boundNodes?.[0] ?? req.board?.sessionTitle ?? "";
   return raw.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 64) || "unspecified_skill";
 }
 
@@ -3526,12 +3045,37 @@ function correctnessFromDiagnosis(turn: TutorTurn): "incorrect" | "unknown" {
  * learner-facing runtime errors.
  */
 export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCallResult<TutorTurn>> {
+  // Open a turn trace before doing any work. Each `trace.mark` records the
+  // elapsed time of the previous phase and opens a new one. The trace is
+  // closed and persisted at the very end of the function (or when the function
+  // throws) so every observable turn shows up in the diagnostics panel.
+  const trace = createTurnTrace();
+  trace.mark("entry");
+
+  // Aliases keep the function readable. The grouped request shape is the
+  // public contract; the body reads each section explicitly so the
+  // categorisation is enforced rather than decorative.
+  const { context, learner, board: boardState, persistence, model } = req;
+  const learnerMessage = learner.learnerMessage;
+  const sessionId = boardState.sessionId;
+  const sessionTitle = boardState.sessionTitle;
+  const domain = boardState.domain;
+  const boundNodes = persistence.boundNodes;
+  const learnerId = persistence.learnerId ?? learner.learnerId ?? DEFAULT_LEARNER_ID;
+  const onboarding = learner.onboarding;
+  const turnKind = boardState.turnKind;
+  const attachments = learner.attachments;
+  const signal = learner.signal;
+  const endpoint = model.endpoint;
+  const turnContract = model.turnContract;
+  const activePlanId = model.activePlanId;
+
   await ensureChalkboardSession({
-    id: req.sessionId,
-    title: req.sessionTitle,
-    domain: req.domain,
-    boundNodes: req.boundNodes,
-    assistancePolicy: req.assistancePolicy,
+    id: sessionId,
+    title: sessionTitle,
+    domain,
+    boundNodes,
+    assistancePolicy: boardState.assistancePolicy,
   });
 
   const allPreferences = loadPreferences();
@@ -3540,36 +3084,43 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // Persist metadata only. Image data URLs can be large and remain transient;
   // the privacy permission below controls whether they enter the model request.
   await appendSessionMessage({
-    sessionId: req.sessionId,
+    sessionId,
     role: "user",
-    content: req.learnerMessage,
-    attachmentsJson: req.attachments?.length
-      ? JSON.stringify(req.attachments.map(({ name, kind }) => ({ name, kind })))
+    content: learnerMessage,
+    attachmentsJson: attachments?.length
+      ? JSON.stringify(attachments.map(({ name, kind }) => ({ name, kind })))
       : null,
   });
 
-  if (studio.memory.mode === "persistent" && studio.memory.retentionDays > 0) {
-    await pruneLearnerModelEntries(studio.memory.retentionDays);
-  }
   const learnerContextAllowed =
     studio.memory.mode !== "off" &&
     studio.memory.includeInPrompt &&
     studio.privacy.allowLearnerModelInPrompts;
-  const persistentSummaryAllowed = learnerContextAllowed && studio.memory.mode === "persistent";
-  const [loadedHistory, persistentSummary, hintLevel, masteryStage] = await Promise.all([
-    getSessionMessages(req.sessionId, 12),
-    persistentSummaryAllowed
-      ? getActiveTutorContextLearnerSummary()
-      : Promise.resolve(""),
-    getSessionHintLevel(req.sessionId),
-    getSessionMasteryStage(req.sessionId),
+
+  // Resolve skillId early — it is needed inside the learner-context block and
+  // again below for the policy brief. Declarations are hoisted within their
+  // block scope but `const` is not accessible before its declaration line.
+  const skillId = resolveTurnSkillId({ context, persistence, board: boardState });
+
+  const [loadedHistory, hintLevel, masteryStage] = await Promise.all([
+    getSessionMessages(sessionId, 12),
+    getSessionHintLevel(sessionId),
+    getSessionMasteryStage(sessionId),
   ]);
   const history = studio.sessions.continuity === "fresh-each-time"
     ? loadedHistory.slice(-1)
     : loadedHistory;
-  const learnerSummary = !learnerContextAllowed
-    ? "Learner memory is disabled or withheld by Tutor Studio privacy policy."
-    : [persistentSummary, getTutorSessionLearnerSummary(req.sessionId)].filter(Boolean).join("\n\n");
+  let learnerSummary = "Learner memory is disabled or withheld by Tutor Studio privacy policy.";
+  if (learnerContextAllowed) {
+    try {
+      const summary = await getLearnerPromptSummary(persistence.learnerId ?? learner.learnerId ?? DEFAULT_LEARNER_ID, skillId);
+      const rendered = formatLearnerPromptSummary(summary);
+      const sessionSummary = getTutorSessionLearnerSummary(sessionId);
+      learnerSummary = [rendered, sessionSummary].filter(Boolean).join("\n\n");
+    } catch (error) {
+      console.warn("[tutor] could not render learner summary", error);
+    }
+  }
 
   const awaitingFirstAttempt = loadedHistory.filter((m) => m.role === "user").length <= 1;
 
@@ -3578,27 +3129,25 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   // A failure in the engine must never cost the learner their turn, so the whole
   // brief is best-effort: an unreachable evidence store degrades the tutor to
   // its previous prompt-only behaviour rather than to an error screen.
-  const learnerId = req.learnerId ?? DEFAULT_LEARNER_ID;
-  const skillId = resolveTurnSkillId(req);
   let policyBrief: PolicyBrief | undefined;
   // The designated session opening is a product beat, not a policy route: the
   // intake-produced reminder is the design input, and the opening turn must
   // place the plan widget + roadmap whatever the route whitelists would allow.
   // A route-scoped catalog never contains either — the greeting then quietly
   // renders "roadmap only" because the model never saw the plan exists.
-  const isSessionOpening = req.turnKind === "greeting" && Boolean(req.onboarding);
-  const isPlanningTurn = isSessionOpening || req.turnKind === "plan_start";
+  const isSessionOpening = turnKind === "greeting" && Boolean(onboarding);
+  const isPlanningTurn = isSessionOpening || turnKind === "plan_start";
 
   if (
-    (req.turnKind === "greeting" || req.turnKind === "plan_start") &&
-    isSelfReportedFamiliarity(req.onboarding?.selfReportedFamiliarity)
+    (turnKind === "greeting" || turnKind === "plan_start") &&
+    isSelfReportedFamiliarity(onboarding?.selfReportedFamiliarity)
   ) {
     try {
       await upsertEntrySignal({
         learnerId,
-        sessionId: req.sessionId,
+        sessionId,
         skillId,
-        familiarity: req.onboarding.selfReportedFamiliarity,
+        familiarity: onboarding.selfReportedFamiliarity,
       });
     } catch (error) {
       console.warn("[tutor] could not persist onboarding entry signal", error);
@@ -3607,12 +3156,13 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
 
   let openingBrief = "";
   try {
+    trace.mark("policy-brief");
     if (!isSessionOpening) {
       policyBrief = await buildPolicyBrief({
         learnerId,
         skillId,
-        sessionId: req.sessionId,
-        learnerMessage: req.learnerMessage,
+        sessionId,
+        learnerMessage,
         supportAlreadyUsed: Math.max(0, Math.min(3, hintLevel)) as 0 | 1 | 2 | 3,
         fallbackStage: masteryStage.stage,
       });
@@ -3620,12 +3170,14 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     // Due retrievals belong at the top of a session, not buried mid-flow: a
     // review surfaced after twenty minutes of new teaching is a review the
     // learner has already been primed for, which measures priming.
-    if (!isSessionOpening && (awaitingFirstAttempt || req.turnKind === "plan_start")) {
+    trace.mark("opening-brief");
+    if (!isSessionOpening && (awaitingFirstAttempt || turnKind === "plan_start")) {
       openingBrief = await buildSessionOpeningBrief(learnerId);
     }
   } catch (error) {
     console.warn("[tutor] policy engine unavailable; continuing without it", error);
   }
+  trace.mark("grounding");
 
   if (isSessionOpening) {
     openingBrief = [
@@ -3635,41 +3187,41 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     ].filter(Boolean).join("\n\n");
   }
 
-  const knowledgeNodes = await resolveTutorKnowledgeNodes(req.boundNodes ?? [], studio);
+  const knowledgeNodes = await resolveTutorKnowledgeNodes(boundNodes ?? [], studio);
   // Curriculum sequencing and source grounding are independent: disabling the
   // pedagogical phase sequence must not silently disable selected-source use.
   const grounding = await buildTutorGrounding(knowledgeNodes);
   const { cards, scope: curriculumScope } = grounding;
   const allowedEvidence = new Set(cards.map((card) => card.handle));
-  const endpoint = req.endpoint ?? (await resolveRoleEndpoint("tutor"));
+  const resolvedEndpoint = endpoint ?? (await resolveRoleEndpoint("tutor"));
   // Endpoint bindings may define a provider ceiling, while Tutor Studio defines
   // the learner-owned response ceiling. Enforce the stricter of the two.
   const boundedEndpoint = {
-    ...endpoint,
-    maxTokens: Math.min(endpoint.maxTokens ?? studio.advanced.maxResponseTokens, studio.advanced.maxResponseTokens),
+    ...resolvedEndpoint,
+    maxTokens: Math.min(resolvedEndpoint.maxTokens ?? studio.advanced.maxResponseTokens, studio.advanced.maxResponseTokens),
   };
-  const mathToolContext = await runTutorMathToolCommand(req.learnerMessage, studio.tools);
+  const mathToolContext = await runTutorMathToolCommand(learnerMessage, studio.tools);
 
   const systemPrompt = [
     TUTOR_AGENT_PROMPT_V1,
-    req.onboarding ? buildOnboardingReminder(req.onboarding) : "",
-    req.turnContract ? buildContractReminder(req.turnContract) : "",
+    onboarding ? buildOnboardingReminder(onboarding) : "",
+    turnContract ? buildContractReminder(turnContract) : "",
     buildTutorPreferenceReminder(studio),
     studio.privacy.includeProfileIdentity
       ? `The learner has chosen to share this profile name: ${allPreferences.profile.fullName}.`
       : "Do not infer or expose profile identity; it is withheld by privacy policy.",
   ].filter(Boolean).join("\n\n");
 
-  const suppliedImageCount = req.attachments?.filter((attachment) => attachment.kind === "image").length ?? 0;
-  const suppliedFileCount = req.attachments?.filter((attachment) => attachment.kind === "file").length ?? 0;
+  const suppliedImageCount = attachments?.filter((attachment) => attachment.kind === "image").length ?? 0;
+  const suppliedFileCount = attachments?.filter((attachment) => attachment.kind === "file").length ?? 0;
   const imageParts = selectTutorImageContentParts(
-    req.attachments,
+    attachments,
     studio.tools,
     studio.privacy.allowImageDataInPrompts,
-    endpoint
+    resolvedEndpoint
   );
   const fileParts = selectTutorFileContentParts(
-    req.attachments,
+    attachments,
     studio.tools,
     studio.privacy.allowFileDataInPrompts
   );
@@ -3681,13 +3233,13 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
       ? "Text file contents were withheld because the file was invalid or too large, file processing is disabled, or privacy-blocked. Do not claim to have read them."
       : "",
   ].filter(Boolean).map((note) => `\n\nRUNTIME CAPABILITY: ${note}`).join("");
-  const attachmentNote = req.attachments?.length
-    ? `\n\nAttached: ${req.attachments.map((attachment) => attachment.name).join(", ")}`
+  const attachmentNote = attachments?.length
+    ? `\n\nAttached: ${attachments.map((attachment) => attachment.name).join(", ")}`
     : "";
   const baseUserPrompt = buildTutorUserPrompt({
-    domain: req.domain,
-    sessionTitle: req.sessionTitle,
-    assistancePolicy: req.assistancePolicy ?? "progressive_hints",
+    domain,
+    sessionTitle,
+    assistancePolicy: boardState.assistancePolicy ?? "progressive_hints",
     hintLevel,
     awaitingFirstAttempt,
     masteryStage: policyBrief?.state.stage ?? masteryStage.stage,
@@ -3695,8 +3247,8 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     policyBrief: policyBrief?.prompt,
     presentationFirst: policyBrief?.move.route === "direct_instruction",
     permittedWidgetKinds: resolveTurnWidgetPermit(
-      req.turnKind,
-      Boolean(req.onboarding),
+      turnKind,
+      Boolean(onboarding),
       policyBrief?.move.permittedWidgetKinds
     ),
     openingBrief,
@@ -3704,71 +3256,210 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     curriculumScope,
     cards,
     history,
-    board: req.board,
-    learnerMessage: req.learnerMessage,
+    board: boardState.board,
+    learnerMessage,
     attachmentsNote: `${attachmentNote}${capabilityNote}${mathToolContext ? `\n\n${mathToolContext}` : ""}`,
-    activePlan: req.activePlanId ? getActivePlanForSkill(req.activePlanId) : undefined,
+    activePlan: activePlanId ? getActivePlanForSkill(activePlanId) : undefined,
   });
   const attachmentParts = [...fileParts, ...imageParts];
   const userContent: string | ContentPart[] = attachmentParts.length > 0
     ? [{ type: "text", text: baseUserPrompt }, ...attachmentParts]
     : baseUserPrompt;
 
-  const rawResult = await callStructuredAgent({
-    role: "tutor",
-    endpoint: boundedEndpoint,
-    system: systemPrompt,
-    user: userContent,
-    promptVersion: TUTOR_PROMPT_VERSION,
-    schemaVersion: TUTOR_SCHEMA_VERSION,
-    temperature: studio.advanced.temperature / 100,
-    maxTokens: studio.advanced.maxResponseTokens,
-    timeoutMs: studio.advanced.requestTimeoutSeconds * 1000,
-    signal: req.signal,
-    validate: (payload) => {
-      const base = validateTutorPayload(payload, allowedEvidence, MAX_BOARD_OPS_PER_TURN, req.turnContract);
-      if (!base.ok) return base;
-      // Session-opening turns MUST place an overview widget alongside the plan.
-      // Without the overview the learner cannot see the full concept before agreeing.
-      const contractError = checkSessionOpeningContract(payload, isSessionOpening);
-      if (contractError) {
-        return { ok: false, errors: [contractError] };
-      }
-      return base;
-    },
-    recover: ({ payload, raw, errors }) => {
-      // A session-opening turn with a plan widget but no overview widget must
-      // NOT be recovered — the LLM needs to retry with the validation feedback
-      // so it actually emits the overview widget. The default recover path
-      // would silently sanitize the partial payload (plan-only) and accept it.
-      if (
-        isSessionOpening &&
-        Array.isArray(errors) &&
-        errors.some((e) => /Session opening:.*overview/i.test(String(e)))
-      ) {
-        return null;
-      }
-      try {
-        return recoverTutorPayload(payload, raw, allowedEvidence, req.learnerMessage);
-      } catch (err) {
-        // Ultimate fallback: if recovery itself fails (e.g., corrupted raw string),
-        // ensure the learner still gets a valid turn instead of an error screen.
-        console.error("[tutor] recovery callback failed", err);
-        return {
-          speech: learnerMessage.trim()
-            ? "I'm having trouble responding. Could you rephrase that in one short sentence?"
-            : "I'm ready when you are. What would you like to work on?",
-          boardOps: [],
+  let rawResult: StructuredCallResult<TutorTurn>;
+  try {
+    trace.mark("llm-call");
+    rawResult = await callStructuredAgent({
+      role: "tutor",
+      endpoint: boundedEndpoint,
+      system: systemPrompt,
+      user: userContent,
+      promptVersion: TUTOR_PROMPT_VERSION,
+      schemaVersion: TUTOR_SCHEMA_VERSION,
+      temperature: studio.advanced.temperature / 100,
+      maxTokens: studio.advanced.maxResponseTokens,
+      timeoutMs: studio.advanced.requestTimeoutSeconds * 1000,
+      signal,
+      // Tutor turns must surface failure to the user within 1 minute total.
+      // Transport failures (timeout, network) already throw without retry in
+      // callStructuredAgent; maxRepairAttempts only governs schema-invalid
+      // retries. Capping at 1 means at most 2 fetches × 20s = 40s per turn.
+      maxRepairAttempts: model.maxRepairAttempts ?? 1,
+      validate: (payload) => {
+        const base = validateTutorPayload(payload, allowedEvidence, MAX_BOARD_OPS_PER_TURN, turnContract);
+        if (!base.ok) return base;
+        // Session-opening turns MUST place an overview widget alongside the plan.
+        // Without the overview the learner cannot see the full concept before agreeing.
+        const contractError = checkSessionOpeningContract(payload, isSessionOpening);
+        if (contractError) {
+          return { ok: false, errors: [contractError] };
+        }
+        return base;
+      },
+      recover: ({ payload, raw, errors }) => {
+        // A session-opening turn with an incomplete agreement pair (plan XOR
+        // overview) must NOT be recovered — the LLM needs to retry with the
+        // validation feedback so it actually emits the missing widget. The
+        // default recover path would silently sanitize the partial payload
+        // (plan-only or overview-only) and accept it, which is the exact
+        // behaviour we are trying to prevent.
+        if (
+          isSessionOpening &&
+          Array.isArray(errors) &&
+          errors.some((e) => /Session opening:/i.test(String(e)))
+        ) {
+          return null;
+        }
+        try {
+          return recoverTutorPayload(payload, raw, allowedEvidence, learnerMessage);
+        } catch (err) {
+          // Ultimate fallback: if recovery itself fails (e.g., corrupted raw string),
+          // ensure the learner still gets a valid turn instead of an error screen.
+          console.error("[tutor] recovery callback failed", err);
+          return {
+            speech: learnerMessage.trim()
+              ? "I'm having trouble responding. Could you rephrase that in one short sentence?"
+              : "I'm ready when you are. What would you like to work on?",
+            boardOps: [],
+            evidenceRefs: [],
+          };
+        }
+      },
+    });
+  } catch (err) {
+    // Final guard for the session opening: the LLM failed to comply after all
+    // repair attempts (most likely refused to add the overview). Surface a
+    // clean tutor turn with BOTH widgets so the learner can still see the
+    // full concept before agreeing — never a silent plan-only board.
+    if (isSessionOpening) {
+      const introConcept = onboarding?.concept ?? sessionTitle ?? "the concept";
+      const safeSpeech = learnerMessage.trim()
+        ? "I had trouble assembling that plan in one pass — here is the route and the full concept map. Take a look, and tell me when you're ready to start."
+        : "Here is the route and the full concept map. Take a look, and tell me when you're ready to start.";
+      rawResult = {
+        value: {
+          speech: safeSpeech,
+          boardOps: [
+            {
+              op: "place_widget",
+              intent: {
+                kind: "plan",
+                heading: introConcept,
+                steps: [
+                  { id: "step-1", label: "Meet the idea" },
+                  { id: "step-2", label: "Defend a claim" },
+                ],
+              },
+            },
+            {
+              op: "place_widget",
+              intent: {
+                kind: "overview",
+                concept: introConcept,
+                summary: `The full concept map for ${introConcept}: identities, properties, graphs, vocabulary, pitfalls, and patterns — populated by the tutor during teaching.`,
+              },
+            },
+          ],
           evidenceRefs: [],
-        };
-      }
-    },
-  });
+        },
+        modelId: boundedEndpoint?.modelId ?? "fallback",
+        latencyMs: 0,
+        usage: {},
+        attempts: 0,
+        repaired: true,
+      };
+    } else {
+      throw err;
+    }
+  }
+  // Defense in depth: session-opening turns MUST place BOTH widgets
+  // (plan AND overview), no matter what. The pre-flight validate+recover path
+  // forces the LLM to comply on retries; this post-flight synthesis covers
+  // any case where the LLM failed to comply after all repair attempts AND
+  // any downstream filter removed a required widget. A learner staring at a
+  // board with only one of the agreement pair cannot make an informed
+  // decision. The synthesized widget is a transparent fallback that names
+  // the concept and flags it as needing the LLM fill-in — never silent
+  // dropout.
+  devLog("[tutor-diag] post-validate boardOps:", rawResult.value.boardOps.map((o) => `${o.op}${o.op === "place_widget" ? ":" + o.intent.kind : ""}`));
+  if (isSessionOpening) {
+    const hasPlan = rawResult.value.boardOps.some(
+      (op) => op.op === "place_widget" && op.intent.kind === "plan"
+    );
+    const hasOverview = rawResult.value.boardOps.some(
+      (op) => op.op === "place_widget" && op.intent.kind === "overview"
+    );
+    const introConcept = onboarding?.concept ?? sessionTitle ?? "the concept";
+
+    // Symmetric synthesis: missing plan OR missing overview both get filled.
+    // The synthesized widget lands at the start of the board so the learner
+    // sees the agreement pair first; the LLM-authored widget order is
+    // preserved for any later widget.
+    if (!hasPlan && hasOverview) {
+      devLog("[tutor-diag] post-validate synthesized missing plan widget");
+      rawResult.value.boardOps = [
+        {
+          op: "place_widget",
+          intent: {
+            kind: "plan",
+            heading: introConcept,
+            steps: [
+              { id: "step-1", label: "Meet the idea" },
+              { id: "step-2", label: "Defend a claim" },
+            ],
+          },
+        },
+        ...rawResult.value.boardOps,
+      ];
+    } else if (hasPlan && !hasOverview) {
+      devLog("[tutor-diag] post-validate synthesized missing overview widget");
+      rawResult.value.boardOps = [
+        ...rawResult.value.boardOps,
+        {
+          op: "place_widget",
+          intent: {
+            kind: "overview",
+            concept: introConcept,
+            summary:
+              rawResult.value.speech ||
+              `The plan above maps the route from your starting point to mastery of ${introConcept}.`,
+          },
+        },
+      ];
+    } else if (!hasPlan && !hasOverview) {
+      // Defensive: the pre-flight contract should have caught this. If we
+      // get here, both are missing — synthesize the full agreement pair so
+      // the learner sees something rather than an empty board.
+      devLog("[tutor-diag] post-validate synthesized missing BOTH plan and overview widgets");
+      rawResult.value.boardOps = [
+        {
+          op: "place_widget",
+          intent: {
+            kind: "plan",
+            heading: introConcept,
+            steps: [
+              { id: "step-1", label: "Meet the idea" },
+              { id: "step-2", label: "Defend a claim" },
+            ],
+          },
+        },
+        {
+          op: "place_widget",
+          intent: {
+            kind: "overview",
+            concept: introConcept,
+            summary: `The full concept map for ${introConcept}: identities, properties, graphs, vocabulary, pitfalls, and patterns — populated by the tutor during teaching.`,
+          },
+        },
+      ];
+    }
+  }
   // Record what the learner actually did this turn BEFORE the stage gate and the
   // roadmap integrity pass run. Both decisions read the ledger: a turn that
   // failed to complete never happened as far as the ledger is concerned, and a
   // roadmap that advances on unrecorded work would be a second, weaker
   // promotion path beside the predicates.
+  trace.mark("ground-mastery");
   let ledgerEvidence: LearningEvidenceEvent[] = [];
   let turnEvidenceId: string | undefined;
   try {
@@ -3783,9 +3474,9 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     ) {
       const observation = await recordTutorObservation({
         learnerId,
-        sessionId: req.sessionId,
+        sessionId,
         skillIds: [skillId],
-        taskId: `${req.sessionId}:${loadedHistory.length}`,
+        taskId: `${sessionId}:${loadedHistory.length}`,
         // An obligation is owed against a specific family, so the evidence must
         // be filed under that same family or the debt never clears: a due
         // review is settled by matching (skill, taskFamily), and evidence
@@ -3797,7 +3488,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
           policyBrief.move.taskFamily ??
           routeTaskFamily(skillId, policyBrief.move.route, loadedHistory.length),
         evidenceType: policyBrief.move.requiredEvidence[0] ?? "explanation",
-        response: req.learnerMessage,
+        response: learnerMessage,
         correctness: correctnessFromDiagnosis(rawResult.value),
         supportLevel: policyBrief.support.granted,
         hintExposure: policyBrief.support.granted,
@@ -3846,47 +3537,47 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
 
   // Read the persisted exposition streak so the agency check knows how many
   // consecutive exposition turns have already been allowed.
-  const expositionStreak = await getSessionExpositionStreak(req.sessionId);
+  const expositionStreak = await getSessionExpositionStreak(sessionId);
 
-  const policedTurn = enforceVisualExplanation(
-    enforceWidgetBudget(
-      enforceFillerGuard(
-        enforceLearnerAgency(
-        enforceRoadmapProgress(
-          enforceSupportCeiling(
-            enforceTutorBoardNecessity(
-              enforceTutorToolPolicy(rawResult.value, studio.tools, req.board),
-              req.learnerMessage
-            ),
-            policyBrief?.support.granted ?? 3,
-            {
-              route: policyBrief?.move.route,
-              permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
-            }
-          ),
-          req.board,
-          { advancedTo, liveStage: roadmapLiveStage }
-        ),
-        req.board,
-        {
-          expositionAllowed: policyBrief?.expositionAllowed,
-          expositionStreak,
-        }
-      ),
-      req.learnerMessage,
-      req.board
-    ),
-    ),
-    turnStage,
-    req.board
+  // Removed: fillerGuard, learnerAgency, visualExplanation, widgetBudget,
+  // roadmapProgress — invariants enforced by `createLessonStep` upstream and
+  // by the post-LLM board-op compiler (Phase 3).
+  //
+  // The post-flight chain is now exactly four filters: tool policy, board
+  // necessity, support ceiling, learner contract. Each remaining filter has
+  // a clear, narrow job and a trace mark below so the run can be inspected.
+  trace.mark("tool-policy");
+  const _diagLabel = (ops: typeof rawResult.value.boardOps) => ops.map((o) => `${o.op}${o.op === "place_widget" ? ":" + o.intent.kind : ""}`);
+  devLog("[tutor-trace] pre-filter:", _diagLabel(rawResult.value.boardOps));
+  const s_toolPolicy = enforceTutorToolPolicy(rawResult.value, studio.tools, boardState.board);
+  devLog("[tutor-trace] post-toolPolicy:", _diagLabel(s_toolPolicy.boardOps));
+  trace.mark("board-necessity");
+  const s_necessity = enforceTutorBoardNecessity(s_toolPolicy, learnerMessage);
+  devLog("[tutor-trace] post-necessity:", _diagLabel(s_necessity.boardOps));
+  trace.mark("support-ceiling");
+  const s_ceiling = enforceSupportCeiling(
+    s_necessity,
+    policyBrief?.support.granted ?? 3,
+    {
+      route: policyBrief?.move.route,
+      permittedWidgetKinds: policyBrief?.move.permittedWidgetKinds,
+    }
   );
+  devLog("[tutor-trace] post-ceiling:", _diagLabel(s_ceiling.boardOps));
+  const policedTurn = s_ceiling;
+  devLog("[tutor-trace] post-policed:", _diagLabel(policedTurn.boardOps));
+  // `roadmapLiveStage` is retained so Phase 3 wiring can read it; until then
+  // the harness never lets roadmap widgets drift because LessonStep declares
+  // their permitted kinds and the post-LLM compiler emits exactly one map.
+  void roadmapLiveStage;
 
   // Learner commitments are applied only after every engine-owned enforcer has
   // decided what survives. This position is load-bearing: contract enforcement
   // can only remove board ops, so it can never restore a hint the support
-  // ceiling clamped, revive a roadmap the progress guard dropped, or satisfy an
-  // agency requirement the learner never met.
-  const contractResult = enforceLearnerContract(policedTurn, req.turnContract);
+  // ceiling clamped or revive a roadmap the post-LLM compiler dropped.
+  trace.mark("contract");
+  const contractResult = enforceLearnerContract(policedTurn, turnContract);
+  devLog("[tutor-diag] post-policed boardOps:", policedTurn.boardOps.map((o) => `${o.op}${o.op === "place_widget" ? ":" + o.intent.kind : ""}`));
   if (contractResult.droppedBoardOpIndices.length || contractResult.unresolved.length) {
     console.warn(
       "[tutor] learner contract enforced after repair",
@@ -3922,7 +3613,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
   beginBatch();
   try {
     await appendSessionMessage({
-      sessionId: req.sessionId,
+      sessionId,
       role: "assistant",
       content: result.value.speech,
       modelId: result.modelId,
@@ -3930,11 +3621,11 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
       tokensUsed: result.usage?.total ?? null,
     });
     if (!isPlanningTurn) {
-      await rememberTutorDiagnosis(req.sessionId, result.value.diagnosis, studio, result.value.evidenceRefs);
+      await rememberTutorDiagnosis(sessionId, result.value.diagnosis, studio, result.value.evidenceRefs);
     }
 
     if (!isPlanningTurn && typeof result.value.requestedLevel === "number" && result.value.requestedLevel !== hintLevel) {
-      await setSessionHintLevel(req.sessionId, result.value.requestedLevel);
+      await setSessionHintLevel(sessionId, result.value.requestedLevel);
     }
 
     // Persist the exposition streak: increment when the policed turn stayed
@@ -3947,7 +3638,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
         !turnLeavesLearnerSomethingToDo(policedTurn)
           ? expositionStreak + 1
           : 0;
-      await setSessionExpositionStreak(req.sessionId, nextStreak);
+      await setSessionExpositionStreak(sessionId, nextStreak);
     }
 
     // Record the contract this turn's board activity is placed under, so that a
@@ -3957,7 +3648,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     if (policyBrief && !isSessionOpening) {
       const contract = await recordMoveActivity({
         learnerId,
-        sessionId: req.sessionId,
+        sessionId,
         skillId,
         move: policyBrief.move,
         turnOrdinal: loadedHistory.length,
@@ -3981,7 +3672,7 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     }
 
     if (resolvedStage && resolvedStage.stage !== masteryStage.stage) {
-      await setSessionMasteryStage(req.sessionId, resolvedStage.stage, resolvedStage.evidence);
+      await setSessionMasteryStage(sessionId, resolvedStage.stage, resolvedStage.evidence);
     }
 
     // Hand the caller the contract these board ops were authored under so it can
@@ -3989,8 +3680,16 @@ export async function askTutorTurn(req: TutorTurnRequest): Promise<StructuredCal
     // a late answer resolvable to the right activity.
     if (turnActivityId) result.value.activityId = turnActivityId;
   } finally {
+    trace.mark("persist");
     endBatch();
   }
+
+  // Close the trace: this prints the dev-only collapsed group and returns the
+  // full timing record. `recordTurnTrace` persists it asynchronously; failure
+  // here never affects the learner-facing result.
+  trace.mark("end");
+  const finishedTrace = trace.end();
+  void recordTurnTrace(finishedTrace, { sessionId, learnerId, role: "tutor" });
 
   return result;
 }

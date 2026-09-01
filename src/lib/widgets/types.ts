@@ -41,7 +41,8 @@ export type WidgetIntent =
   | ChallengeWidget
   | ReflectionWidget
   | MasteryCardWidget
-  | OverviewWidget;
+  | OverviewWidget
+  | FigureSpecWidget;
 
 export type WidgetKind = WidgetIntent["kind"];
 
@@ -67,6 +68,7 @@ export const WIDGET_KINDS = [
   "challenge",
   "reflection",
   "mastery_card",
+  "figure_spec",
 ] as const satisfies readonly WidgetKind[];
 
 /** Board-spec widget numbers, preserved so product/design references line up. */
@@ -90,6 +92,7 @@ export const WIDGET_BOARD_NUMBER: Record<WidgetKind, number> = {
   challenge: 18,
   reflection: 19,
   mastery_card: 20,
+  figure_spec: 23,
 };
 
 export const WIDGET_LABEL: Record<WidgetKind, string> = {
@@ -112,6 +115,7 @@ export const WIDGET_LABEL: Record<WidgetKind, string> = {
   challenge: "Challenge",
   reflection: "Reflection",
   mastery_card: "Mastery Card",
+  figure_spec: "Figure",
 };
 
 /** Fields shared by every widget. `title` overrides the default header label;
@@ -1043,6 +1047,38 @@ export const MASTERY_EVIDENCE_DIMENSIONS = [
 ] as const;
 
 export type MasteryEvidenceDimension = typeof MASTERY_EVIDENCE_DIMENSIONS[number];
+
+/* ── 23 · FigureSpec — textbook-figure vocabulary ── */
+
+/**
+ * A high-level textbook figure (unit circle, parabola, secant, shaded area,
+ * flowchart, etc.). Compiles to an `AnimationScene` and renders through the
+ * existing `SceneFigure` chalkboard renderer (see `WidgetSurface.tsx`). The
+ * compile happens lazily inside the renderer, never in the agent or the
+ * validator — those reason about the *spec*, the spec is the source of
+ * truth, and the primitive list is a derived artifact.
+ *
+ * Why a separate widget kind? The existing `animation.scene` is a primitive
+ * list — correct for a minute choreographed animation, but the wrong level of
+ * abstraction for a textbook figure. The agent does not want to think in
+ * `(radius = 0.9) * cos(theta)`; it wants to think in "unit circle at θ =
+ * π/6 with sin/cos labelled". `FigureSpec` is the bridge.
+ *
+ * Producers that emit `FigureSpec`:
+ *   1. the LLM tutor agent (the agent's normal authoring path)
+ *   2. the OCR pipeline via `figureSpec/ocrInfer.ts`'s heuristic inference
+ *      (heuristic, always reviewed by the agent afterwards)
+ *
+ * Both go through `lib/figureSpec/compile.ts`'s dispatcher, which produces an
+ * `AnimationScene` bounded by `MAX_FIGURE_ELEMENTS = 24`.
+ */
+export interface FigureSpecWidget extends WidgetBase {
+  kind: "figure_spec";
+  /** The high-level figure intent. See `lib/figureSpec/types.ts`. */
+  spec: import("../figureSpec/types").FigureSpec;
+  /** Caption rendered below the figure. */
+  caption?: string;
+}
 
 export interface MasteryCardWidget extends WidgetBase {
   kind: "mastery_card";

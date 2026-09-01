@@ -65,8 +65,11 @@ import {
 
 /** What produced this turn. Distinguishes the opening greeting (retryable when
  *  an unmount kills it) and a widget answer (retryable, and shown in the
- *  transcript as the learner's action) from a typed chat message. */
-type TurnKind = "chat" | "greeting" | "widget" | "plan_start";
+ *  transcript as the learner's action) from a typed chat message. The
+ *  plan_start turn is the FIRST submitted plan widget — the route-bearing
+ *  turn after the greeting — and is what makes the deterministic router
+ *  actually run for the new skill. */
+export type TurnKind = "chat" | "greeting" | "widget" | "plan_start";
 
 interface Props {
   initialBoard: BoardDoc;
@@ -293,6 +296,31 @@ export function StudyRoom({
   const abortRef = useRef<AbortController | null>(null);
   const activityTurnRef = useRef(0);
   const greetedRef = useRef(false);
+  /** Hard 1-minute UI backstop: if "thinking" lingers past 55s, force an
+   *  error state so the learner never stares at a spinner past the SLA.
+   *  Cleared on every status change; the request itself is left to its own
+   *  AbortController to settle in the background. */
+  const thinkingWatchdogRef = useRef<number | null>(null);
+  const armThinkingWatchdog = useCallback(() => {
+    if (thinkingWatchdogRef.current !== null) window.clearTimeout(thinkingWatchdogRef.current);
+    thinkingWatchdogRef.current = window.setTimeout(() => {
+      thinkingWatchdogRef.current = null;
+      setAgentStatus("error");
+      setAgentActivity({
+        kind: "error",
+        label: "Response took too long",
+        detail: "The tutor did not respond within 55 seconds. The request has been cancelled.",
+      });
+      // Cancel the in-flight request so it cannot resurrect a late response.
+      abortRef.current?.abort();
+    }, 55_000);
+  }, []);
+  const disarmThinkingWatchdog = useCallback(() => {
+    if (thinkingWatchdogRef.current !== null) {
+      window.clearTimeout(thinkingWatchdogRef.current);
+      thinkingWatchdogRef.current = null;
+    }
+  }, []);
   /** Widgets that have already woken the tutor, so a re-render or a double
    *  click on Check cannot ask the same question twice. */
   const signalledWidgets = useRef(new Set<string>());
@@ -627,8 +655,8 @@ export function StudyRoom({
               taskId: `${activeId}:${blockId}`,
               fallbackSkillIds: [
                 resolveTurnSkillId({
-                  boundNodes: resolvedBoundNodes,
-                  sessionTitle: initialBoard.title,
+                  persistence: { boundNodes: resolvedBoundNodes },
+                  board: { sessionTitle: initialBoard.title },
                 }),
               ],
               // What the learner actually opened is read from widget state
@@ -847,6 +875,7 @@ export function StudyRoom({
     abortRef.current?.abort();
     abortRef.current = null;
     setTyping(false);
+    disarmThinkingWatchdog();
     setAgentStatus("idle");
     setAgentActivity(null);
     setAttachments([]);
@@ -929,6 +958,7 @@ export function StudyRoom({
       // callback's immutable attachment snapshot while React clears the UI.
       setAttachments([]);
       setAgentStatus("thinking");
+      armThinkingWatchdog();
       setAgentActivity({
         kind: "planning",
         label: "Planning a response",
@@ -946,24 +976,35 @@ export function StudyRoom({
       abortRef.current = controller;
       try {
         const result = await askTutorTurn({
-          sessionId,
-          sessionTitle: board.title,
-          domain: board.domain,
-          board,
-          boundNodes: resolvedBoundNodes,
-          onboarding: onboarding ?? undefined,
-          turnContract: activeContract,
-          learnerId: resolvedLearnerId,
-          turnKind,
-          learnerMessage: text,
-          attachments: attachments.map((a) => ({
-            name: a.name,
-            kind: a.kind,
-            mimeType: a.mimeType,
-            dataUrl: a.kind === "image" ? a.url : undefined,
-            textContent: a.kind === "file" ? a.textContent : undefined,
-          })),
-          signal: controller.signal,
+          context: {},
+          learner: {
+            learnerId: resolvedLearnerId,
+            learnerMessage: text,
+            signal: controller.signal,
+            onboarding: onboarding ?? undefined,
+            attachments: attachments.map((a) => ({
+              name: a.name,
+              kind: a.kind,
+              mimeType: a.mimeType,
+              dataUrl: a.kind === "image" ? a.url : undefined,
+              textContent: a.kind === "file" ? a.textContent : undefined,
+            })),
+          },
+          board: {
+            sessionId,
+            sessionTitle: board.title,
+            domain: board.domain,
+            board,
+            turnKind,
+          },
+          persistence: {
+            sessionId,
+            learnerId: resolvedLearnerId,
+            boundNodes: resolvedBoundNodes,
+          },
+          model: {
+            turnContract: activeContract,
+          },
         });
 
         // The learner may have rewound while the transport was settling. Never
@@ -1056,6 +1097,7 @@ export function StudyRoom({
         }
 
         if (controller.signal.aborted || activityTurnRef.current !== activityTurn) return;
+        disarmThinkingWatchdog();
         setAgentStatus("idle");
         setAgentActivity({
           kind: "complete",
@@ -1079,17 +1121,25 @@ export function StudyRoom({
             greetedRef.current = false;
             setGreetAttempt((attempt) => attempt + 1);
           }
-          // A widget answer that never reached the tutor must be allowed to
-          // retry, or the learner is left staring at an answered widget.
-          if ((turnKind === "widget" || turnKind === "plan_start") && options?.signalKey) {
-            signalledWidgets.current.delete(options.signalKey);
-          }
           if (activityTurnRef.current === activityTurn) {
+            disarmThinkingWatchdog();
             setAgentStatus("idle");
             setAgentActivity(null);
           }
           return;
         }
+        // A widget-derived turn that errored (schema_invalid, transport, etc.)
+        // must release its dedupe key here too — the saveWidgetState catch
+        // block already runs only when handleSendRef.current is missing or
+        // throws synchronously, so any throw from inside askTutorTurn is
+        // caught here. Holding the key after a failed turn would leave the
+        // learner staring at an answered widget that can never wake the tutor
+        // again for the rest of the session — a silent dead end far worse
+        // than one failed turn. Must be the same key that was claimed in
+        // saveWidgetState: `blockId` for a single widget, `group:…` for a
+        // cluster. The helper exists so this release invariant is testable.
+        releaseWidgetDedupeOnFailure(signalledWidgets.current, turnKind, options?.signalKey);
+        disarmThinkingWatchdog();
         setAgentStatus("error");
         setAgentActivity({
           kind: "error",
@@ -1151,7 +1201,7 @@ export function StudyRoom({
   // learner just completed the intake form, the first turn leads with the
   // syllabus fitted to their submitted answers rather than a generic opener.
   useEffect(() => {
-    if (initialSession || greetedRef.current || greetAttempt > 2) return;
+    if (initialSession || greetedRef.current || greetAttempt > 1) return;
     greetedRef.current = true;
     const hasIntakeAnswers = (onboarding?.answers ?? []).some((answer) => answer.answer.trim());
     void handleSend(
@@ -1673,6 +1723,38 @@ function appendBlock(board: BoardDoc, block: NonNullable<ReturnType<typeof toolC
  */
 const PERSISTED_BOARD_SNAPSHOTS = 12;
 
+/**
+ * Release the dedupe key for a widget-derived turn that did NOT complete
+ * successfully — schema-invalid model output, transport failure, or any
+ * other throw from `askTutorTurn`. The saveWidgetState catch block runs only
+ * on the synchronous failures it can see; a failed async turn reaches here.
+ *
+ * The invariant is the whole point of the widget dedupe mechanism: a widget
+ * that wakes the tutor once must be wake-able AGAIN if the first wake failed,
+ * or the learner is stranded with an answered widget that can never produce
+ * another turn. Aborts are handled separately (they are an intentional
+ * dismissal, not a failure) and DO NOT need this release because the
+ * saveWidgetState catch has not yet fired by the time the abort propagates.
+ *
+ * `signalledWidgets` is mutated in place so the caller keeps its reference;
+ * the helper exists to make this guarantee unit-testable.
+ *
+ * Returns true when a key was actually released, so tests can assert that the
+ * caller released only the correct key (not a cluster key from a different
+ * widget).
+ */
+export function releaseWidgetDedupeOnFailure(
+  signalledWidgets: Set<string>,
+  turnKind: TurnKind,
+  signalKey: string | undefined
+): boolean {
+  if (signalKey === undefined) return false;
+  if (turnKind !== "widget" && turnKind !== "plan_start") return false;
+  if (!signalledWidgets.has(signalKey)) return false;
+  signalledWidgets.delete(signalKey);
+  return true;
+}
+
 export function pruneSnapshotsForStorage(messages: ChatMsg[]): ChatMsg[] {
   let remaining = PERSISTED_BOARD_SNAPSHOTS;
   const kept = new Set<number>();
@@ -1819,6 +1901,10 @@ function widgetSearchText(intent: WidgetIntent): string {
       break;
     case "mastery_card":
       parts.push(intent.concept);
+      break;
+    case "figure_spec":
+      parts.push(intent.spec.kind);
+      parts.push(intent.caption ?? "");
       break;
   }
   return parts.filter(Boolean).join(" ");

@@ -1,0 +1,29 @@
+{
+  "id": "math.limits.squeeze-theorem",
+  "route": "direct_instruction",
+  "stage": "construct",
+  "mode": "instruction",
+  "contextVariant": "same",
+  "targetSkill": "math.limits.base",
+  "supportCeiling": 2,
+  "permittedWidgetKinds": [
+    "animation",
+    "concept_card",
+    "example",
+    "challenge"
+  ],
+  "requiredVisualizationKind": "function",
+  "requiredEvidence": [
+    "observation",
+    "construction"
+  ],
+  "proseSlots": [
+    {
+      "blockId": "animation-1",
+      "hint": "Three functions plotted: g(x) ≤ f(x) ≤ h(x), all converging as x → 0. Animate the convergence. Predict-checkpoint-reveal cycle: at t=0.3 ask 'what is lim g?'; at t=0.6 ask 'what is lim h?'; at t=1 reveal the squeeze. Each checkpoint pauses the playback and forces a committed prediction.",
+      "tone": "worked"
+    }
+  ],
+  "maxBoardOps": 5,
+  "corpusRef": "math.limits.squeeze-theorem"
+}

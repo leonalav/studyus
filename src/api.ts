@@ -45,12 +45,11 @@ import {
 } from "./lib/curriculum";
 
 import {
-  getLearnerModelEntries as backendGetLearnerModelEntries,
-  disputeLearnerModelEntry as backendDisputeLearnerModelEntry,
-  recordLearnerModelEntry as backendRecordLearnerModelEntry,
-  getActiveTutorContextLearnerSummary as backendGetActiveTutorContextLearnerSummary,
-  LearnerModelEntry,
-} from "./lib/learnerModel";
+  disputeHypothesis as backendDisputeHypothesis,
+  upsertHypothesis as backendUpsertHypothesis,
+  getHypotheses as backendGetHypotheses,
+} from "./lib/learning/store";
+import type { LearnerHypothesis } from "./lib/learning/types";
 
 import {
   testModelEndpoint as backendTestModelEndpoint,
@@ -88,7 +87,10 @@ export {
   saveSourcePdf,
 } from "./lib/tauri";
 
-export type { AttemptForTakingDTO, AttemptResultDTO, CurriculumNodeRecord, LearnerModelEntry, ModelEndpointConfig, AgentRole, GenerationRequest, GenerationResult, RubricEvaluation, RubricEvaluationRequest, TutorTurn, TutorTurnRequest, SessionMessage, GeneratedOnboarding, VisionEndpointRecord, VisionEndpointConfig };
+export type { AttemptForTakingDTO, AttemptResultDTO, CurriculumNodeRecord, ModelEndpointConfig, AgentRole, GenerationRequest, GenerationResult, RubricEvaluation, RubricEvaluationRequest, TutorTurn, TutorTurnRequest, SessionMessage, GeneratedOnboarding, VisionEndpointRecord, VisionEndpointConfig };
+// Note: `LearnerModelEntry` is exported below as an alias for `LearnerHypothesis`
+// (Phase 1 cleanup: the free-form `learner_model_entries` table is gone).
+// Keeping it out of the bundled re-export above avoids the duplicate declaration.
 export type { Commitment, TurnContract } from "./lib/contracts/types";
 export { describeCommitment, commitmentKindLabel } from "./lib/contracts/format";
 
@@ -168,27 +170,44 @@ export async function setSourceFilePath(sourceId: string, filePath: string): Pro
   return backendSetSourceFilePath(sourceId, filePath);
 }
 
-export async function getLearnerModelEntries(learnerId = "default_learner"): Promise<LearnerModelEntry[]> {
-  return backendGetLearnerModelEntries(learnerId);
+/**
+ * Phase 1 cleanup: the free-form `learner_model_entries` table is gone. The
+ * structured `learner_hypotheses` ledger is the only durable home of learner
+ * claims; `LearnerHypothesis` replaces `LearnerModelEntry` in the public API
+ * surface. The `getLearnerPromptSummary` helper in `learning/promptSummary`
+ * provides the prompt-time view.
+ */
+export type LearnerModelEntry = LearnerHypothesis;
+
+export async function getLearnerModelEntries(learnerId = "default_learner"): Promise<LearnerHypothesis[]> {
+  return backendGetHypotheses(learnerId);
 }
 
-export async function disputeLearnerModelEntry(entryId: string, note: string): Promise<void> {
-  return backendDisputeLearnerModelEntry(entryId, note);
+export async function disputeLearnerModelEntry(hypothesisId: string, note: string): Promise<void> {
+  return backendDisputeHypothesis(hypothesisId, note);
 }
 
 export async function recordLearnerModelEntry(params: {
   learnerId?: string;
-  entryKind: any;
-  curriculumNode?: string;
-  criterionId?: string;
+  skillId: string;
+  kind: LearnerHypothesis["kind"];
   statement: string;
-  evidenceRefs: string[];
-}) {
-  return backendRecordLearnerModelEntry(params);
+  nextBestTest: string;
+  evidenceIds?: string[];
+}): Promise<LearnerHypothesis> {
+  return backendUpsertHypothesis({
+    learnerId: params.learnerId,
+    skillId: params.skillId,
+    kind: params.kind,
+    statement: params.statement,
+    nextBestTest: params.nextBestTest,
+    evidenceIds: params.evidenceIds,
+  });
 }
 
 export async function getActiveTutorContextLearnerSummary(learnerId = "default_learner"): Promise<string> {
-  return backendGetActiveTutorContextLearnerSummary(learnerId);
+  const { getLearnerPromptSummary, formatLearnerPromptSummary } = await import("./lib/learning/promptSummary");
+  return formatLearnerPromptSummary(await getLearnerPromptSummary(learnerId));
 }
 
 export async function testModelEndpoint(config: ModelEndpointConfig) {
